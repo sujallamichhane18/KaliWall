@@ -75,6 +75,36 @@ type DashboardStats struct {
 	NetTxBytes        uint64  `json:"net_tx_bytes"`
 }
 
+// BlockedIP represents a manually blocked IP address.
+type BlockedIP struct {
+	IP        string    `json:"ip"`
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// WebsiteBlock represents a blocked domain/website.
+type WebsiteBlock struct {
+	Domain    string    `json:"domain"`
+	Reason    string    `json:"reason"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ThreatCacheEntry is a VT cache item for display in the threat intel dashboard.
+type ThreatCacheEntry struct {
+	IP           string  `json:"ip"`
+	ThreatLevel  string  `json:"threat_level"`
+	Malicious    int     `json:"malicious"`
+	Suspicious   int     `json:"suspicious"`
+	Harmless     int     `json:"harmless"`
+	Reputation   int     `json:"reputation"`
+	Country      string  `json:"country"`
+	Owner        string  `json:"owner"`
+	CheckedAt    string  `json:"checked_at"`
+	HasConnection bool  `json:"has_connection"`
+	IsBlocked    bool    `json:"is_blocked"`
+}
+
 // APIResponse wraps all API responses with a consistent envelope.
 type APIResponse struct {
 	Success bool        `json:"success"`

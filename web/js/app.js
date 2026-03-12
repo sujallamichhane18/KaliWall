@@ -18,6 +18,9 @@
         dashboard: "Dashboard",
         rules: "Firewall Rules",
         connections: "Active Connections",
+        blocked: "Blocked IPs",
+        threats: "Threat Intelligence",
+        websites: "Website Blocking",
         logs: "Traffic Logs",
         settings: "Settings",
     };
@@ -63,6 +66,15 @@
                 break;
             case "settings":
                 loadSettings();
+                break;
+            case "blocked":
+                loadBlocked();
+                break;
+            case "threats":
+                loadThreats();
+                break;
+            case "websites":
+                loadWebsites();
                 break;
         }
         if (page !== "dashboard") stopBandwidthStream();
@@ -209,6 +221,7 @@
                 "<td>" + actionBadge(rule.action) + "</td>" +
                 "<td>" + escapeHtml(rule.comment) + "</td>" +
                 '<td class="action-cell">' +
+                    '<button class="btn-icon" title="Edit" onclick="KaliWall.editRule(\'' + rule.id + '\')"><i class="fa-solid fa-pen"></i></button>' +
                     '<button class="btn-icon" title="Toggle" onclick="KaliWall.toggleRule(\'' + rule.id + '\')"><i class="fa-solid fa-toggle-' + (rule.enabled ? "on" : "off") + '"></i></button>' +
                     '<button class="btn-icon danger" title="Delete" onclick="KaliWall.deleteRule(\'' + rule.id + '\')"><i class="fa-solid fa-trash"></i></button>' +
                 "</td>";
@@ -332,6 +345,9 @@
 
     document.getElementById("btnAddRule").addEventListener("click", () => {
         ruleForm.reset();
+        document.getElementById("ruleEditId").value = "";
+        document.getElementById("ruleModalTitle").textContent = "Add Firewall Rule";
+        document.getElementById("ruleSubmitBtn").innerHTML = '<i class="fa-solid fa-check"></i> Create Rule';
         document.getElementById("ruleSrcIP").value = "any";
         document.getElementById("ruleSrcPort").value = "any";
         ruleModal.classList.add("open");
@@ -345,6 +361,7 @@
 
     ruleForm.addEventListener("submit", async (e) => {
         e.preventDefault();
+        const editId = document.getElementById("ruleEditId").value;
         const body = {
             chain: document.getElementById("ruleChain").value,
             protocol: document.getElementById("ruleProtocol").value,
@@ -357,19 +374,28 @@
             enabled: document.getElementById("ruleEnabled").value === "true",
         };
 
-        const res = await fetch(API + "/rules", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-        });
+        let res;
+        if (editId) {
+            res = await fetch(API + "/rules/" + encodeURIComponent(editId), {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+        } else {
+            res = await fetch(API + "/rules", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+        }
         const data = await res.json();
         if (data.success) {
-            toast("Rule created successfully", "success");
+            toast(editId ? "Rule updated" : "Rule created", "success");
             ruleModal.classList.remove("open");
             loadRules();
             loadStats();
         } else {
-            toast(data.message || "Failed to create rule", "error");
+            toast(data.message || "Failed to save rule", "error");
         }
     });
 
@@ -398,8 +424,161 @@
         }
     }
 
+    // ---------- Edit Rule ----------
+
+    async function editRule(id) {
+        const res = await apiFetch("/rules/" + encodeURIComponent(id));
+        if (!res.success) { toast("Failed to load rule", "error"); return; }
+        const rule = res.data;
+        document.getElementById("ruleEditId").value = rule.id;
+        document.getElementById("ruleChain").value = rule.chain;
+        document.getElementById("ruleProtocol").value = rule.protocol;
+        document.getElementById("ruleSrcIP").value = rule.src_ip || "any";
+        document.getElementById("ruleDstIP").value = rule.dst_ip || "any";
+        document.getElementById("ruleSrcPort").value = rule.src_port || "any";
+        document.getElementById("ruleDstPort").value = rule.dst_port || "any";
+        document.getElementById("ruleAction").value = rule.action;
+        document.getElementById("ruleEnabled").value = rule.enabled ? "true" : "false";
+        document.getElementById("ruleComment").value = rule.comment || "";
+        document.getElementById("ruleModalTitle").textContent = "Edit Firewall Rule";
+        document.getElementById("ruleSubmitBtn").innerHTML = '<i class="fa-solid fa-check"></i> Update Rule';
+        ruleModal.classList.add("open");
+    }
+
+    // ---------- Blocked IPs ----------
+
+    async function loadBlocked() {
+        const res = await apiFetch("/blocked");
+        if (!res.success) return;
+        const tbody = document.querySelector("#blockedTable tbody");
+        tbody.innerHTML = "";
+        if (!res.data || res.data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#9ca3af;padding:20px">No blocked IPs</td></tr>';
+            return;
+        }
+        res.data.forEach(function (entry) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td><strong>" + escapeHtml(entry.ip) + "</strong></td>" +
+                "<td>" + escapeHtml(entry.reason || "-") + "</td>" +
+                "<td>" + formatTime(entry.created_at) + "</td>" +
+                '<td class="action-cell">' +
+                    '<button class="btn btn-sm btn-danger" onclick="KaliWall.unblockIP(\'' + escapeHtml(entry.ip) + '\')"><i class="fa-solid fa-unlock"></i> Unblock</button>' +
+                "</td>";
+            tbody.appendChild(tr);
+        });
+    }
+
+    async function unblockIP(ip) {
+        if (!confirm("Unblock IP " + ip + "?")) return;
+        const res = await fetch(API + "/blocked/" + encodeURIComponent(ip), { method: "DELETE" });
+        const data = await res.json();
+        if (data.success) {
+            toast("IP unblocked", "success");
+            loadBlocked();
+        } else {
+            toast(data.message || "Failed to unblock IP", "error");
+        }
+    }
+
+    // ---------- Threat Intelligence ----------
+
+    async function loadThreats() {
+        const res = await apiFetch("/threat/cache");
+        if (!res.success) return;
+        const data = res.data || [];
+        var safe = 0, suspicious = 0, malicious = 0;
+        data.forEach(function (e) {
+            if (e.threat_level === "safe") safe++;
+            else if (e.threat_level === "suspicious") suspicious++;
+            else if (e.threat_level === "malicious") malicious++;
+        });
+        document.getElementById("threatSafe").textContent = safe;
+        document.getElementById("threatSuspicious").textContent = suspicious;
+        document.getElementById("threatMalicious").textContent = malicious;
+        document.getElementById("threatTotal").textContent = data.length;
+
+        const tbody = document.querySelector("#threatCacheTable tbody");
+        tbody.innerHTML = "";
+        if (data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#9ca3af;padding:20px">No cached threat data. Configure a VirusTotal API key in Settings and scan IPs from Connections.</td></tr>';
+            return;
+        }
+        data.forEach(function (entry) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td><strong>" + escapeHtml(entry.ip) + "</strong></td>" +
+                "<td>" + threatBadge(entry) + "</td>" +
+                "<td>" + (entry.malicious || 0) + "</td>" +
+                "<td>" + (entry.suspicious || 0) + "</td>" +
+                "<td>" + (entry.harmless || 0) + "</td>" +
+                "<td>" + (entry.reputation || 0) + "</td>" +
+                "<td>" + escapeHtml(entry.country || "-") + "</td>" +
+                "<td>" + escapeHtml(entry.owner || "-") + "</td>" +
+                "<td>" + (entry.has_connection ? '<span class="badge badge-enabled"><i class="fa-solid fa-link"></i> Yes</span>' : '<span class="badge badge-disabled">No</span>') + "</td>" +
+                "<td>" + (entry.is_blocked ? '<span class="badge badge-drop"><i class="fa-solid fa-ban"></i> Blocked</span>' : '<span class="badge badge-enabled">Open</span>') + "</td>" +
+                "<td>" + formatTime(entry.checked_at) + "</td>" +
+                '<td class="action-cell">' +
+                    (entry.is_blocked ? "" : '<button class="btn-icon danger" title="Block this IP" onclick="KaliWall.blockIPFromThreat(\'' + escapeHtml(entry.ip) + '\')"><i class="fa-solid fa-ban"></i></button>') +
+                "</td>";
+            tbody.appendChild(tr);
+        });
+    }
+
+    async function blockIPFromThreat(ip) {
+        if (!confirm("Block IP " + ip + "?")) return;
+        const res = await fetch(API + "/blocked", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ip: ip, reason: "Blocked from Threat Intelligence" }),
+        });
+        const data = await res.json();
+        if (data.success) {
+            toast("IP blocked", "success");
+            loadThreats();
+        } else {
+            toast(data.message || "Failed to block IP", "error");
+        }
+    }
+
+    // ---------- Website Blocking ----------
+
+    async function loadWebsites() {
+        const res = await apiFetch("/websites");
+        if (!res.success) return;
+        const tbody = document.querySelector("#websitesTable tbody");
+        tbody.innerHTML = "";
+        if (!res.data || res.data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#9ca3af;padding:20px">No blocked websites</td></tr>';
+            return;
+        }
+        res.data.forEach(function (entry) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td><strong>" + escapeHtml(entry.domain) + "</strong></td>" +
+                "<td>" + escapeHtml(entry.reason || "-") + "</td>" +
+                "<td>" + formatTime(entry.created_at) + "</td>" +
+                '<td class="action-cell">' +
+                    '<button class="btn btn-sm btn-secondary" onclick="KaliWall.unblockWebsite(\'' + escapeHtml(entry.domain) + '\')"><i class="fa-solid fa-unlock"></i> Unblock</button>' +
+                "</td>";
+            tbody.appendChild(tr);
+        });
+    }
+
+    async function unblockWebsite(domain) {
+        if (!confirm("Unblock website " + domain + "?")) return;
+        const res = await fetch(API + "/websites/" + encodeURIComponent(domain), { method: "DELETE" });
+        const data = await res.json();
+        if (data.success) {
+            toast("Website unblocked", "success");
+            loadWebsites();
+        } else {
+            toast(data.message || "Failed to unblock website", "error");
+        }
+    }
+
     // Expose to inline onclick handlers safely
-    window.KaliWall = { toggleRule, deleteRule };
+    window.KaliWall = { toggleRule, deleteRule, editRule, unblockIP, unblockWebsite, blockIPFromThreat };
 
     // ---------- Refresh Buttons ----------
 
@@ -421,6 +600,66 @@
     document.getElementById("btnClearLogs").addEventListener("click", function () {
         var tbody = document.querySelector("#logsTable tbody");
         if (tbody) tbody.innerHTML = "";
+    });
+
+    // ---------- Block IP Modal ----------
+
+    document.getElementById("btnBlockIP").addEventListener("click", function () {
+        document.getElementById("blockIPForm").reset();
+        document.getElementById("blockIPModal").classList.add("open");
+    });
+
+    document.getElementById("blockIPForm").addEventListener("submit", async function (e) {
+        e.preventDefault();
+        var ip = document.getElementById("blockIP").value.trim();
+        var reason = document.getElementById("blockReason").value.trim();
+        if (!ip) { toast("Enter an IP address", "error"); return; }
+        var res = await fetch(API + "/blocked", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ip: ip, reason: reason }),
+        });
+        var data = await res.json();
+        if (data.success) {
+            toast("IP blocked", "success");
+            document.getElementById("blockIPModal").classList.remove("open");
+            loadBlocked();
+        } else {
+            toast(data.message || "Failed to block IP", "error");
+        }
+    });
+
+    // ---------- Block Website Modal ----------
+
+    document.getElementById("btnBlockWebsite").addEventListener("click", function () {
+        document.getElementById("blockWebsiteForm").reset();
+        document.getElementById("blockWebsiteModal").classList.add("open");
+    });
+
+    document.getElementById("blockWebsiteForm").addEventListener("submit", async function (e) {
+        e.preventDefault();
+        var domain = document.getElementById("blockDomain").value.trim();
+        var reason = document.getElementById("blockWebsiteReason").value.trim();
+        if (!domain) { toast("Enter a domain", "error"); return; }
+        var res = await fetch(API + "/websites", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domain: domain, reason: reason }),
+        });
+        var data = await res.json();
+        if (data.success) {
+            toast("Website blocked", "success");
+            document.getElementById("blockWebsiteModal").classList.remove("open");
+            loadWebsites();
+        } else {
+            toast(data.message || "Failed to block website", "error");
+        }
+    });
+
+    // ---------- Threat Intel Refresh ----------
+
+    document.getElementById("btnRefreshThreats").addEventListener("click", function () {
+        loadThreats();
     });
 
     // ---------- Settings & Threat Intelligence ----------

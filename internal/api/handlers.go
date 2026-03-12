@@ -32,8 +32,13 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/logs/stream", h.handleLogStream)
 	mux.HandleFunc("/api/v1/threat/apikey", h.handleAPIKey)
 	mux.HandleFunc("/api/v1/threat/check/", h.handleThreatCheck)
+	mux.HandleFunc("/api/v1/threat/cache", h.handleThreatCache)
 	mux.HandleFunc("/api/v1/analytics", h.handleAnalytics)
 	mux.HandleFunc("/api/v1/analytics/stream", h.handleAnalyticsStream)
+	mux.HandleFunc("/api/v1/blocked", h.handleBlockedIPs)
+	mux.HandleFunc("/api/v1/blocked/", h.handleBlockedIPByAddr)
+	mux.HandleFunc("/api/v1/websites", h.handleWebsiteBlocks)
+	mux.HandleFunc("/api/v1/websites/", h.handleWebsiteBlockByDomain)
 
 	// Serve web UI from the "web" directory
 	fs := http.FileServer(http.Dir("web"))
@@ -136,6 +141,20 @@ func (h *handlers) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "Rule toggled", Data: rule})
+
+	case http.MethodPut:
+		// Update rule
+		var req models.RuleRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "Invalid JSON"})
+			return
+		}
+		rule, err := h.fw.UpdateRule(id, req)
+		if err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "Rule updated", Data: rule})
 
 	default:
 		methodNotAllowed(w)
@@ -275,6 +294,127 @@ func (h *handlers) handleThreatCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: verdict})
+}
+
+// handleThreatCache returns all cached VT verdicts with connection/block status.
+func (h *handlers) handleThreatCache(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+
+	// Get active connections to check if cached IPs are connected
+	conns := h.fw.ActiveConnections()
+	connectedIPs := make(map[string]bool)
+	for _, c := range conns {
+		connectedIPs[c.RemoteIP] = true
+		connectedIPs[c.LocalIP] = true
+	}
+
+	verdicts := h.threat.CacheEntries()
+	entries := make([]models.ThreatCacheEntry, 0, len(verdicts))
+	for _, v := range verdicts {
+		entries = append(entries, models.ThreatCacheEntry{
+			IP:            v.IP,
+			ThreatLevel:   v.ThreatLevel,
+			Malicious:     v.Malicious,
+			Suspicious:    v.Suspicious,
+			Harmless:      v.Harmless,
+			Reputation:    v.Reputation,
+			Country:       v.Country,
+			Owner:         v.Owner,
+			CheckedAt:     v.CheckedAt.Format("2006-01-02 15:04:05"),
+			HasConnection: connectedIPs[v.IP],
+			IsBlocked:     h.fw.IsIPBlocked(v.IP),
+		})
+	}
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: entries})
+}
+
+// ---------- Blocked IPs ----------
+
+func (h *handlers) handleBlockedIPs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Data: h.fw.ListBlockedIPs()})
+	case http.MethodPost:
+		var body struct {
+			IP     string `json:"ip"`
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.IP == "" {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "ip is required"})
+			return
+		}
+		entry, err := h.fw.BlockIP(body.IP, body.Reason)
+		if err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		respond(w, http.StatusCreated, models.APIResponse{Success: true, Message: "IP blocked", Data: entry})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *handlers) handleBlockedIPByAddr(w http.ResponseWriter, r *http.Request) {
+	ip := strings.TrimPrefix(r.URL.Path, "/api/v1/blocked/")
+	if ip == "" {
+		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "IP required"})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	if err := h.fw.UnblockIP(ip); err != nil {
+		respond(w, http.StatusNotFound, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "IP unblocked"})
+}
+
+// ---------- Website Blocking ----------
+
+func (h *handlers) handleWebsiteBlocks(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Data: h.fw.ListWebsiteBlocks()})
+	case http.MethodPost:
+		var body struct {
+			Domain string `json:"domain"`
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Domain == "" {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "domain is required"})
+			return
+		}
+		entry, err := h.fw.BlockWebsite(body.Domain, body.Reason)
+		if err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		respond(w, http.StatusCreated, models.APIResponse{Success: true, Message: "Website blocked", Data: entry})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *handlers) handleWebsiteBlockByDomain(w http.ResponseWriter, r *http.Request) {
+	domain := strings.TrimPrefix(r.URL.Path, "/api/v1/websites/")
+	if domain == "" {
+		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "domain required"})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	if err := h.fw.UnblockWebsite(domain); err != nil {
+		respond(w, http.StatusNotFound, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "Website unblocked"})
 }
 
 // ---------- Analytics ----------

@@ -3,15 +3,18 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"kaliwall/internal/analytics"
 	"kaliwall/internal/api"
+	"kaliwall/internal/database"
 	"kaliwall/internal/firewall"
 	"kaliwall/internal/logger"
 	"kaliwall/internal/netmon"
@@ -22,16 +25,36 @@ const (
 	listenAddr = ":8080"
 	logDir     = "logs"
 	logFile    = "logs/kaliwall.log"
+	dbFile     = "data/kaliwall.json"
 )
 
 func main() {
+	// CLI flags
+	daemon := flag.Bool("daemon", false, "Run in background daemon mode")
+	flag.Parse()
+
+	// If --daemon, fork to background
+	if *daemon {
+		runDaemon()
+		return
+	}
+
 	fmt.Println("===================================")
 	fmt.Println("  KaliWall - Linux Firewall Daemon")
 	fmt.Println("===================================")
 
-	// Ensure log directory exists
+	// Ensure directories exist
 	if err := os.MkdirAll(logDir, 0750); err != nil {
 		log.Fatalf("Failed to create log directory: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbFile), 0750); err != nil {
+		log.Fatalf("Failed to create data directory: %v", err)
+	}
+
+	// Initialize persistent database
+	db, err := database.Open(dbFile)
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
 	}
 
 	// Initialize traffic logger
@@ -41,11 +64,16 @@ func main() {
 	}
 	defer trafficLogger.Close()
 
-	// Initialize firewall engine (nftables/iptables)
-	fw := firewall.New(trafficLogger)
+	// Initialize firewall engine with database
+	fw := firewall.New(trafficLogger, db)
 
 	// Initialize threat intelligence service (VirusTotal)
 	ti := threatintel.New()
+	// Restore API key from database
+	if key, ok := db.GetSetting("vt_api_key"); ok && key != "" {
+		ti.SetAPIKey(key)
+		fmt.Println("[+] VirusTotal API key restored from database")
+	}
 
 	// Start real-time network monitor
 	monitor := netmon.New(trafficLogger)
@@ -76,5 +104,40 @@ func main() {
 	fmt.Println("\n[*] Shutting down KaliWall daemon...")
 	monitor.Stop()
 	analyticsService.Stop()
+	// Persist VT key
+	if key := ti.GetAPIKey(); key != "" {
+		db.SetSetting("vt_api_key", key)
+	}
 	trafficLogger.Log("SYSTEM", "-", "-", "-", "Daemon stopped")
+}
+
+// runDaemon forks the process into background.
+func runDaemon() {
+	exe, _ := os.Executable()
+	attr := &os.ProcAttr{
+		Dir: filepath.Dir(exe),
+		Env: os.Environ(),
+		Files: []*os.File{
+			os.Stdin,
+			nil, // stdout to /dev/null
+			nil, // stderr to /dev/null
+		},
+	}
+	// Re-launch without --daemon flag
+	args := []string{exe}
+	for _, a := range os.Args[1:] {
+		if a != "--daemon" && a != "-daemon" {
+			args = append(args, a)
+		}
+	}
+	proc, err := os.StartProcess(exe, args, attr)
+	if err != nil {
+		log.Fatalf("Failed to daemonize: %v", err)
+	}
+	// Write PID file
+	pidFile := filepath.Join(filepath.Dir(exe), "kaliwall.pid")
+	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", proc.Pid)), 0644)
+	fmt.Printf("[+] KaliWall daemon started (PID %d)\n", proc.Pid)
+	fmt.Printf("[+] PID file: %s\n", pidFile)
+	proc.Release()
 }

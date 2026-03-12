@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"kaliwall/internal/database"
 	"kaliwall/internal/logger"
 	"kaliwall/internal/models"
 	"kaliwall/internal/sysinfo"
@@ -26,16 +27,53 @@ type Engine struct {
 	mu       sync.RWMutex
 	rules    []models.Rule
 	logger   *logger.TrafficLogger
+	db       *database.Store
 	liveMode bool // true when running as root on Linux with iptables available
 }
 
 // New creates a new firewall engine and detects whether live iptables mode is available.
-func New(l *logger.TrafficLogger) *Engine {
+func New(l *logger.TrafficLogger, db *database.Store) *Engine {
 	e := &Engine{
 		rules:  make([]models.Rule, 0),
 		logger: l,
+		db:     db,
 	}
 	e.detectMode()
+
+	// Load persisted rules from database
+	if db != nil {
+		saved := db.LoadRules()
+		if len(saved) > 0 {
+			e.rules = saved
+			fmt.Printf("[+] Restored %d rules from database\n", len(saved))
+			if e.liveMode {
+				for _, r := range saved {
+					if r.Enabled {
+						e.applyRule(r)
+					}
+				}
+			}
+		}
+		// Re-apply blocked IPs
+		blocked := db.ListBlockedIPs()
+		if e.liveMode && len(blocked) > 0 {
+			for _, b := range blocked {
+				applyIPBlock(b.IP)
+			}
+			fmt.Printf("[+] Re-applied %d IP blocks\n", len(blocked))
+		}
+		// Re-apply website blocks
+		websites := db.ListWebsiteBlocks()
+		if e.liveMode && len(websites) > 0 {
+			for _, w := range websites {
+				if w.Enabled {
+					applyWebsiteBlock(w.Domain)
+				}
+			}
+			fmt.Printf("[+] Re-applied %d website blocks\n", len(websites))
+		}
+	}
+
 	return e
 }
 
@@ -81,6 +119,11 @@ func (e *Engine) AddRule(req models.RuleRequest) (models.Rule, error) {
 	e.rules = append(e.rules, rule)
 	e.mu.Unlock()
 
+	// Persist to database
+	if e.db != nil {
+		e.db.SaveRules(e.ListRules())
+	}
+
 	// Apply to iptables if live
 	if e.liveMode && rule.Enabled {
 		if err := e.applyRule(rule); err != nil {
@@ -120,6 +163,14 @@ func (e *Engine) RemoveRule(id string) error {
 
 	e.rules = append(e.rules[:idx], e.rules[idx+1:]...)
 	e.logger.Log("CONFIG", "-", "-", "-", fmt.Sprintf("Rule removed: %s", id))
+
+	// Persist
+	if e.db != nil {
+		rulesCopy := make([]models.Rule, len(e.rules))
+		copy(rulesCopy, e.rules)
+		go e.db.SaveRules(rulesCopy)
+	}
+
 	return nil
 }
 
@@ -137,6 +188,12 @@ func (e *Engine) ToggleRule(id string) (models.Rule, error) {
 				} else {
 					e.removeIPTablesRule(e.rules[i])
 				}
+			}
+			// Persist
+			if e.db != nil {
+				rulesCopy := make([]models.Rule, len(e.rules))
+				copy(rulesCopy, e.rules)
+				go e.db.SaveRules(rulesCopy)
 			}
 			return e.rules[i], nil
 		}
@@ -163,6 +220,175 @@ func (e *Engine) GetRule(id string) (models.Rule, error) {
 		}
 	}
 	return models.Rule{}, fmt.Errorf("rule %s not found", id)
+}
+
+// UpdateRule modifies an existing rule.
+func (e *Engine) UpdateRule(id string, req models.RuleRequest) (models.Rule, error) {
+	if err := validateRuleRequest(req); err != nil {
+		return models.Rule{}, err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for i, r := range e.rules {
+		if r.ID == id {
+			// Remove old iptables rule if live
+			if e.liveMode && r.Enabled {
+				e.removeIPTablesRule(r)
+			}
+
+			// Update fields
+			e.rules[i].Chain = strings.ToUpper(req.Chain)
+			e.rules[i].Protocol = strings.ToLower(req.Protocol)
+			e.rules[i].SrcIP = normalise(req.SrcIP)
+			e.rules[i].DstIP = normalise(req.DstIP)
+			e.rules[i].SrcPort = normalise(req.SrcPort)
+			e.rules[i].DstPort = normalise(req.DstPort)
+			e.rules[i].Action = strings.ToUpper(req.Action)
+			e.rules[i].Comment = req.Comment
+			e.rules[i].Enabled = req.Enabled
+
+			// Re-apply if live and enabled
+			if e.liveMode && e.rules[i].Enabled {
+				e.applyRule(e.rules[i])
+			}
+
+			// Persist
+			if e.db != nil {
+				rulesCopy := make([]models.Rule, len(e.rules))
+				copy(rulesCopy, e.rules)
+				go e.db.SaveRules(rulesCopy)
+			}
+
+			e.logger.Log("CONFIG", "-", "-", "-",
+				fmt.Sprintf("Rule updated: %s %s %s [%s]",
+					e.rules[i].Action, e.rules[i].Chain, e.rules[i].Protocol, e.rules[i].Comment))
+
+			return e.rules[i], nil
+		}
+	}
+	return models.Rule{}, fmt.Errorf("rule %s not found", id)
+}
+
+// ---------- IP Blocking ----------
+
+// BlockIP blocks an IP address via iptables and persists it.
+func (e *Engine) BlockIP(ip, reason string) (models.BlockedIP, error) {
+	if net.ParseIP(ip) == nil {
+		_, _, err := net.ParseCIDR(ip)
+		if err != nil {
+			return models.BlockedIP{}, fmt.Errorf("invalid IP: %s", ip)
+		}
+	}
+
+	entry := e.db.AddBlockedIP(ip, reason)
+
+	if e.liveMode {
+		applyIPBlock(ip)
+	}
+
+	e.logger.Log("BLOCK", ip, "-", "-", fmt.Sprintf("IP blocked: %s (%s)", ip, reason))
+	return entry, nil
+}
+
+// UnblockIP removes an IP block.
+func (e *Engine) UnblockIP(ip string) error {
+	if !e.db.RemoveBlockedIP(ip) {
+		return fmt.Errorf("IP %s not in blocklist", ip)
+	}
+
+	if e.liveMode {
+		removeIPBlock(ip)
+	}
+
+	e.logger.Log("UNBLOCK", ip, "-", "-", fmt.Sprintf("IP unblocked: %s", ip))
+	return nil
+}
+
+// ListBlockedIPs returns all blocked IPs.
+func (e *Engine) ListBlockedIPs() []models.BlockedIP {
+	return e.db.ListBlockedIPs()
+}
+
+// IsIPBlocked checks if an IP is in the blocklist.
+func (e *Engine) IsIPBlocked(ip string) bool {
+	if e.db == nil {
+		return false
+	}
+	return e.db.IsBlocked(ip)
+}
+
+func applyIPBlock(ip string) {
+	exec.Command("iptables", "-I", "INPUT", "-s", ip, "-j", "DROP").Run()
+	exec.Command("iptables", "-I", "OUTPUT", "-d", ip, "-j", "DROP").Run()
+	exec.Command("iptables", "-I", "FORWARD", "-s", ip, "-j", "DROP").Run()
+	exec.Command("iptables", "-I", "FORWARD", "-d", ip, "-j", "DROP").Run()
+}
+
+func removeIPBlock(ip string) {
+	exec.Command("iptables", "-D", "INPUT", "-s", ip, "-j", "DROP").Run()
+	exec.Command("iptables", "-D", "OUTPUT", "-d", ip, "-j", "DROP").Run()
+	exec.Command("iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP").Run()
+	exec.Command("iptables", "-D", "FORWARD", "-d", ip, "-j", "DROP").Run()
+}
+
+// ---------- Website Blocking ----------
+
+// BlockWebsite blocks a domain via iptables string matching.
+func (e *Engine) BlockWebsite(domain, reason string) (models.WebsiteBlock, error) {
+	if domain == "" {
+		return models.WebsiteBlock{}, fmt.Errorf("domain cannot be empty")
+	}
+	// Sanitize domain
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "https://")
+	domain = strings.TrimRight(domain, "/")
+
+	entry := e.db.AddWebsiteBlock(domain, reason)
+
+	if e.liveMode {
+		applyWebsiteBlock(domain)
+	}
+
+	e.logger.Log("BLOCK", "-", "-", "-", fmt.Sprintf("Website blocked: %s (%s)", domain, reason))
+	return entry, nil
+}
+
+// UnblockWebsite removes a website block.
+func (e *Engine) UnblockWebsite(domain string) error {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if !e.db.RemoveWebsiteBlock(domain) {
+		return fmt.Errorf("website %s not in blocklist", domain)
+	}
+
+	if e.liveMode {
+		removeWebsiteBlock(domain)
+	}
+
+	e.logger.Log("UNBLOCK", "-", "-", "-", fmt.Sprintf("Website unblocked: %s", domain))
+	return nil
+}
+
+// ListWebsiteBlocks returns all blocked websites.
+func (e *Engine) ListWebsiteBlocks() []models.WebsiteBlock {
+	return e.db.ListWebsiteBlocks()
+}
+
+func applyWebsiteBlock(domain string) {
+	// Block outgoing traffic containing the domain string (HTTP Host / SNI)
+	exec.Command("iptables", "-A", "OUTPUT", "-m", "string",
+		"--string", domain, "--algo", "kmp", "-j", "DROP").Run()
+	exec.Command("iptables", "-A", "FORWARD", "-m", "string",
+		"--string", domain, "--algo", "kmp", "-j", "DROP").Run()
+}
+
+func removeWebsiteBlock(domain string) {
+	exec.Command("iptables", "-D", "OUTPUT", "-m", "string",
+		"--string", domain, "--algo", "kmp", "-j", "DROP").Run()
+	exec.Command("iptables", "-D", "FORWARD", "-m", "string",
+		"--string", domain, "--algo", "kmp", "-j", "DROP").Run()
 }
 
 // ---------- Statistics ----------

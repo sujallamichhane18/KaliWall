@@ -155,6 +155,24 @@ func (s *Service) ClearCache() {
 	s.cache = make(map[string]Verdict)
 }
 
+// CacheEntries returns all cached verdicts for display.
+func (s *Service) CacheEntries() []Verdict {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Verdict, 0, len(s.cache))
+	for _, v := range s.cache {
+		out = append(out, v)
+	}
+	return out
+}
+
+// GetAPIKey returns the raw API key (for persistence).
+func (s *Service) GetAPIKey() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.apiKey
+}
+
 // isPrivateIP returns true for RFC1918, loopback, or link-local addresses.
 func isPrivateIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)

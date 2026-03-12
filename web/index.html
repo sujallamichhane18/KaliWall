@@ -28,6 +28,15 @@
         <a href="#" class="nav-item" data-page="connections">
             <i class="fa-solid fa-network-wired"></i><span>Connections</span>
         </a>
+        <a href="#" class="nav-item" data-page="blocked">
+            <i class="fa-solid fa-ban"></i><span>Blocked IPs</span>
+        </a>
+        <a href="#" class="nav-item" data-page="threats">
+            <i class="fa-solid fa-shield-virus"></i><span>Threat Intel</span>
+        </a>
+        <a href="#" class="nav-item" data-page="websites">
+            <i class="fa-solid fa-globe"></i><span>Website Blocks</span>
+        </a>
         <a href="#" class="nav-item" data-page="logs">
             <i class="fa-solid fa-file-lines"></i><span>Traffic Logs</span>
         </a>
@@ -287,6 +296,113 @@
             </div>
         </section>
 
+        <!-- ===== BLOCKED IPs PAGE ===== -->
+        <section class="page" id="page-blocked">
+            <div class="page-toolbar">
+                <h2>Blocked IP Addresses</h2>
+                <button class="btn btn-danger" id="btnBlockIP">
+                    <i class="fa-solid fa-ban"></i> Block IP
+                </button>
+            </div>
+            <div class="card">
+                <div class="card-body table-responsive">
+                    <table class="table" id="blockedTable">
+                        <thead>
+                            <tr><th>IP Address</th><th>Reason</th><th>Blocked At</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== THREAT INTEL PAGE ===== -->
+        <section class="page" id="page-threats">
+            <div class="page-toolbar">
+                <h2>Threat Intelligence Dashboard</h2>
+                <button class="btn btn-secondary" id="btnRefreshThreats">
+                    <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                </button>
+            </div>
+
+            <!-- Threat Stats Cards -->
+            <div class="stats-grid" style="margin-bottom:20px">
+                <div class="stat-card">
+                    <div class="stat-icon bg-green"><i class="fa-solid fa-shield-check"></i></div>
+                    <div class="stat-info">
+                        <span class="stat-value" id="threatSafe">0</span>
+                        <span class="stat-label">Safe IPs</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon bg-orange"><i class="fa-solid fa-triangle-exclamation"></i></div>
+                    <div class="stat-info">
+                        <span class="stat-value" id="threatSuspicious">0</span>
+                        <span class="stat-label">Suspicious</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon bg-red"><i class="fa-solid fa-skull-crossbones"></i></div>
+                    <div class="stat-info">
+                        <span class="stat-value" id="threatMalicious">0</span>
+                        <span class="stat-label">Malicious</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon bg-blue"><i class="fa-solid fa-database"></i></div>
+                    <div class="stat-info">
+                        <span class="stat-value" id="threatTotal">0</span>
+                        <span class="stat-label">Cached Total</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><i class="fa-solid fa-shield-virus"></i><h3>VirusTotal IP Cache</h3></div>
+                <div class="card-body table-responsive">
+                    <table class="table" id="threatCacheTable">
+                        <thead>
+                            <tr>
+                                <th>IP Address</th>
+                                <th>Threat Level</th>
+                                <th>Malicious</th>
+                                <th>Suspicious</th>
+                                <th>Harmless</th>
+                                <th>Reputation</th>
+                                <th>Country</th>
+                                <th>Owner / ASN</th>
+                                <th>Connected</th>
+                                <th>Blocked</th>
+                                <th>Checked At</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== WEBSITE BLOCKS PAGE ===== -->
+        <section class="page" id="page-websites">
+            <div class="page-toolbar">
+                <h2>Website Blocking</h2>
+                <button class="btn btn-danger" id="btnBlockWebsite">
+                    <i class="fa-solid fa-globe"></i> Block Website
+                </button>
+            </div>
+            <div class="card">
+                <div class="card-body table-responsive">
+                    <table class="table" id="websitesTable">
+                        <thead>
+                            <tr><th>Domain</th><th>Reason</th><th>Blocked At</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
         <!-- ===== LOGS PAGE ===== -->
         <section class="page" id="page-logs">
             <div class="page-toolbar">
@@ -353,14 +469,15 @@
     </div>
 </main>
 
-<!-- Add Rule Modal -->
+<!-- Add/Edit Rule Modal -->
 <div class="modal-overlay" id="ruleModal">
     <div class="modal">
         <div class="modal-header">
-            <h3><i class="fa-solid fa-plus-circle"></i> Add Firewall Rule</h3>
+            <h3><i class="fa-solid fa-plus-circle"></i> <span id="ruleModalTitle">Add Firewall Rule</span></h3>
             <button class="modal-close" id="modalClose"><i class="fa-solid fa-xmark"></i></button>
         </div>
         <form id="ruleForm">
+            <input type="hidden" id="ruleEditId" value="">
             <div class="modal-body">
                 <div class="form-grid">
                     <div class="form-group">
@@ -419,7 +536,59 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" id="btnCancelRule">Cancel</button>
-                <button type="submit" class="btn btn-primary"><i class="fa-solid fa-check"></i> Create Rule</button>
+                <button type="submit" class="btn btn-primary" id="ruleSubmitBtn"><i class="fa-solid fa-check"></i> Create Rule</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Block IP Modal -->
+<div class="modal-overlay" id="blockIPModal">
+    <div class="modal" style="width:420px">
+        <div class="modal-header">
+            <h3><i class="fa-solid fa-ban"></i> Block IP Address</h3>
+            <button class="modal-close" onclick="document.getElementById('blockIPModal').classList.remove('open')"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <form id="blockIPForm">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="blockIP">IP Address</label>
+                    <input type="text" id="blockIP" placeholder="e.g. 1.2.3.4" required>
+                </div>
+                <div class="form-group" style="margin-top:12px">
+                    <label for="blockReason">Reason</label>
+                    <input type="text" id="blockReason" placeholder="e.g. Port scanner, Brute force">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="document.getElementById('blockIPModal').classList.remove('open')">Cancel</button>
+                <button type="submit" class="btn btn-danger"><i class="fa-solid fa-ban"></i> Block</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Block Website Modal -->
+<div class="modal-overlay" id="blockWebsiteModal">
+    <div class="modal" style="width:420px">
+        <div class="modal-header">
+            <h3><i class="fa-solid fa-globe"></i> Block Website</h3>
+            <button class="modal-close" onclick="document.getElementById('blockWebsiteModal').classList.remove('open')"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <form id="blockWebsiteForm">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="blockDomain">Domain</label>
+                    <input type="text" id="blockDomain" placeholder="e.g. example.com" required>
+                </div>
+                <div class="form-group" style="margin-top:12px">
+                    <label for="blockWebsiteReason">Reason</label>
+                    <input type="text" id="blockWebsiteReason" placeholder="e.g. Policy violation">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="document.getElementById('blockWebsiteModal').classList.remove('open')">Cancel</button>
+                <button type="submit" class="btn btn-danger"><i class="fa-solid fa-globe"></i> Block</button>
             </div>
         </form>
     </div>

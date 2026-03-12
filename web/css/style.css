@@ -902,3 +902,18 @@ body {
 .threat-cell .badge {
     cursor: default;
 }
+
+/* ---------- Action Cell ---------- */
+.action-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+/* ---------- Threat Cache Table ---------- */
+#threatCacheTable th,
+#threatCacheTable td {
+    font-size: 0.78rem;
+    padding: 8px 10px;
+}

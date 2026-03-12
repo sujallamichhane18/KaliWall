@@ -4,17 +4,21 @@
 #
 # This script:
 #   1. Installs Go (if not present)
-#   2. Downloads the uuid dependency
-#   3. Builds and starts the KaliWall daemon
+#   2. Downloads dependencies
+#   3. Builds the KaliWall daemon and CLI
+#   4. Creates data directory
+#   5. Optionally installs systemd service
+#   6. Starts the KaliWall daemon
 
 set -euo pipefail
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  KaliWall — Firewall Setup             ${NC}"
+echo -e "${GREEN}  KaliWall — Enterprise Firewall Setup  ${NC}"
 echo -e "${GREEN}========================================${NC}"
 
 # 1. Check / Install Go
@@ -40,15 +44,79 @@ cd "$SCRIPT_DIR"
 echo -e "${YELLOW}[*] Downloading Go dependencies...${NC}"
 go mod tidy
 
-# 4. Build
-echo -e "${YELLOW}[*] Building KaliWall...${NC}"
+# 4. Build daemon
+echo -e "${YELLOW}[*] Building KaliWall daemon...${NC}"
 go build -o kaliwall main.go
-echo -e "${GREEN}[+] Build complete: ./kaliwall${NC}"
+echo -e "${GREEN}[+] Daemon built: ./kaliwall${NC}"
 
-# 5. Run
+# 5. Build CLI tool
+echo -e "${YELLOW}[*] Building KaliWall CLI...${NC}"
+go build -o kaliwall-cli ./cmd/kaliwall-cli
+echo -e "${GREEN}[+] CLI built: ./kaliwall-cli${NC}"
+
+# 6. Create data directory
+mkdir -p data logs
+echo -e "${GREEN}[+] Data directories created${NC}"
+
+# 7. Install systemd service (optional)
+install_service() {
+    echo -e "${YELLOW}[*] Installing systemd service...${NC}"
+    cat > /tmp/kaliwall.service <<EOF
+[Unit]
+Description=KaliWall Enterprise Firewall
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${SCRIPT_DIR}
+ExecStart=${SCRIPT_DIR}/kaliwall
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo mv /tmp/kaliwall.service /etc/systemd/system/kaliwall.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable kaliwall
+    echo -e "${GREEN}[+] Systemd service installed and enabled${NC}"
+    echo -e "${GREEN}[+] Use: sudo systemctl start kaliwall${NC}"
+    echo -e "${GREEN}[+] Use: sudo systemctl status kaliwall${NC}"
+}
+
+# Check for --service flag
+if [[ "${1:-}" == "--service" ]]; then
+    install_service
+    echo -e "${GREEN}[+] Starting KaliWall via systemd...${NC}"
+    sudo systemctl start kaliwall
+    sudo systemctl status kaliwall --no-pager
+    exit 0
+fi
+
+# Check for --daemon flag
+if [[ "${1:-}" == "--daemon" ]]; then
+    echo -e "${GREEN}[+] Starting KaliWall in daemon mode...${NC}"
+    echo -e "${YELLOW}[!] Run with sudo for live iptables integration${NC}"
+    nohup ./kaliwall > logs/kaliwall-daemon.log 2>&1 &
+    DAEMON_PID=$!
+    echo "$DAEMON_PID" > kaliwall.pid
+    echo -e "${GREEN}[+] KaliWall daemon started (PID: ${DAEMON_PID})${NC}"
+    echo -e "${GREEN}[+] Web UI: http://localhost:8080${NC}"
+    echo -e "${GREEN}[+] CLI:    ./kaliwall-cli status${NC}"
+    echo -e "${GREEN}[+] Logs:   tail -f logs/kaliwall-daemon.log${NC}"
+    echo -e "${YELLOW}[!] Stop:   kill \$(cat kaliwall.pid)${NC}"
+    exit 0
+fi
+
+# 8. Run in foreground (default)
 echo ""
-echo -e "${GREEN}[+] Starting KaliWall daemon...${NC}"
-echo -e "${GREEN}[+] Open http://localhost:8080 in your browser${NC}"
+echo -e "${GREEN}[+] Starting KaliWall...${NC}"
+echo -e "${GREEN}[+] Web UI: http://localhost:8080${NC}"
+echo -e "${GREEN}[+] CLI:    ./kaliwall-cli status${NC}"
 echo -e "${YELLOW}[!] Run with sudo for live iptables integration${NC}"
+echo -e "${YELLOW}[!] Use --daemon flag to run in background${NC}"
+echo -e "${YELLOW}[!] Use --service flag to install as systemd service${NC}"
 echo ""
 ./kaliwall
