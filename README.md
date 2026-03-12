@@ -1,102 +1,261 @@
-# KaliWall — Linux Firewall Management
+<p align="center">
+  <img src="https://img.shields.io/badge/Go-1.21+-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go">
+  <img src="https://img.shields.io/badge/Platform-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux">
+  <img src="https://img.shields.io/badge/Firewall-iptables-E95420?style=for-the-badge&logo=ubuntu&logoColor=white" alt="iptables">
+  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
+</p>
 
-A professional, web-based Linux firewall manager built with Go. Provides a clean FortiGate-style dashboard for managing `iptables` firewall rules, monitoring active connections, and viewing traffic logs.
+<h1 align="center">🛡️ KaliWall</h1>
 
-## Features
+<p align="center">
+  <strong>Enterprise-Grade Linux Firewall Management System</strong><br>
+  <em>Real-time dashboard • IP blocking • Website filtering • Threat intelligence • CLI & Web UI</em>
+</p>
 
-- **Firewall Rules Management** — Add, remove, toggle, and list rules via REST API or Web UI
-- **iptables Integration** — Applies rules to the Linux kernel firewall when running as root
-- **Active Connections** — Reads `/proc/net/tcp` for real-time connection monitoring
-- **Traffic Logging** — Logs all configuration changes and traffic decisions to `logs/kaliwall.log`
-- **Professional Web UI** — Card-based dashboard with FontAwesome icons, responsive layout
-- **Demo Mode** — Runs on any system with sample data (no root required for testing)
+<p align="center">
+  <img src="https://img.shields.io/badge/status-active-success?style=flat-square" alt="Status">
+  <img src="https://img.shields.io/badge/VirusTotal-integrated-blue?style=flat-square" alt="VirusTotal">
+  <img src="https://img.shields.io/badge/Chart.js-live%20charts-ff6384?style=flat-square" alt="Charts">
+</p>
 
-## Quick Start (One-Line)
+---
+
+A professional, web-based Linux firewall manager built with **Go**. Features a clean FortiGate-inspired dashboard for managing `iptables` rules, blocking IPs & websites, monitoring connections with live charts, and VirusTotal threat intelligence — all controllable via both a **Web UI** and a full **CLI tool**.
+
+## ✨ Features
+
+### 🔥 Firewall Core
+- **Rule Management** — Create, edit, toggle, and delete iptables rules via UI or API
+- **IP Blocking** — One-click block/unblock IPs across INPUT, OUTPUT, and FORWARD chains
+- **Website Blocking** — Domain-level filtering using iptables string matching
+- **Persistent Storage** — JSON-backed database survives restarts — rules, blocks, and settings auto-restore
+
+### 📊 Real-Time Monitoring
+- **Live Bandwidth Charts** — RX/TX line graphs streamed via SSE (Server-Sent Events)
+- **Protocol Breakdown** — Doughnut chart of TCP/UDP/ICMP distribution
+- **Blocked vs Allowed** — Visual pie chart of firewall decisions
+- **Top Talkers** — Horizontal bar chart of most active IPs
+- **Active Connections** — Live `/proc/net/tcp` monitoring with threat indicators
+
+### 🛡️ Threat Intelligence
+- **VirusTotal Integration** — Automatic IP reputation lookups on active connections
+- **Threat Dashboard** — Cached VT results with malicious/suspicious/safe counts, country, ASN, connection status
+- **One-Click Block** — Block malicious IPs directly from the threat intel dashboard
+
+### 🖥️ System Monitoring
+- **CPU & Memory Gauges** — Real-time circular SVG gauges from `/proc/stat` and `/proc/meminfo`
+- **Network Interfaces** — Per-interface RX/TX counters from `/proc/net/dev`
+- **System Info** — Hostname, kernel version, uptime, load average
+
+### ⌨️ CLI Tool
+- **Full CLI Management** — `kaliwall-cli` for headless/scripted operation
+- **All Features Accessible** — Rules, blocking, websites, threats, connections, logs
+- **Daemon Mode** — Run as background service with PID management
+
+## 🚀 Quick Start
+
+### One-Line Setup
 
 ```bash
 chmod +x setup.sh && ./setup.sh
 ```
 
-This installs Go (if needed), downloads dependencies, builds, and starts the server.
-
-## Manual Setup
+### Daemon Mode (Background)
 
 ```bash
-# Install Go (if not installed)
-# https://go.dev/dl/
+sudo ./setup.sh --daemon
+```
+
+### Systemd Service
+
+```bash
+sudo ./setup.sh --service
+```
+
+## 🔧 Manual Setup
+
+```bash
+# Install Go 1.21+ (https://go.dev/dl/)
 
 # Download dependencies
 go mod tidy
 
-# Build
+# Build daemon + CLI
 go build -o kaliwall main.go
+go build -o kaliwall-cli ./cmd/kaliwall-cli
 
-# Run (demo mode)
-./kaliwall
-
-# Run with iptables (requires root)
+# Run (foreground)
 sudo ./kaliwall
+
+# Or run as daemon
+sudo ./kaliwall --daemon
 ```
 
 Open **http://localhost:8080** in your browser.
 
-## Project Structure
+## 📂 Project Structure
 
 ```
 KaliWall/
-├── main.go                      # Entry point — daemon setup
-├── go.mod                       # Go module definition
-├── setup.sh                     # One-line setup script
+├── main.go                          # Entry point — daemon, DB init, signal handling
+├── go.mod                           # Go module (kaliwall)
+├── setup.sh                         # Setup script (foreground / daemon / systemd)
+├── cmd/
+│   └── kaliwall-cli/
+│       └── main.go                  # CLI tool — full firewall management
 ├── internal/
 │   ├── api/
-│   │   └── handlers.go          # REST API routes and handlers
+│   │   └── handlers.go              # REST API routes and handlers
+│   ├── analytics/
+│   │   └── analytics.go             # Bandwidth sampling & SSE streaming
+│   ├── database/
+│   │   └── database.go              # JSON-file persistent store
 │   ├── firewall/
-│   │   └── firewall.go          # iptables integration & rule engine
+│   │   └── firewall.go              # iptables engine — rules, IP/website blocking
 │   ├── logger/
-│   │   └── logger.go            # Traffic & event logger
-│   └── models/
-│       └── models.go            # Shared data structures
+│   │   └── logger.go                # Traffic & event logger
+│   ├── models/
+│   │   └── models.go                # Shared data structures
+│   ├── netmon/
+│   │   └── netmon.go                # /proc/net/tcp connection parser
+│   ├── sysinfo/
+│   │   └── sysinfo.go               # CPU, memory, network from /proc
+│   └── threatintel/
+│       └── threatintel.go           # VirusTotal API integration
 ├── web/
-│   ├── index.html               # Dashboard UI
+│   ├── index.html                   # SPA — all pages (Dashboard, Rules, Blocked, Threats, Websites, Logs, Settings)
 │   ├── css/
-│   │   └── style.css            # FortiGate-inspired stylesheet
+│   │   └── style.css                # FortiGate-inspired stylesheet
 │   └── js/
-│       └── app.js               # Frontend application logic
+│       └── app.js                   # Frontend application logic
+├── data/
+│   └── kaliwall.json                # Persistent database (auto-created)
 └── logs/
-    └── kaliwall.log             # Traffic log output
+    └── kaliwall.log                 # Traffic log output
 ```
 
-## REST API
+## 🔌 REST API
 
-| Method | Endpoint               | Description               |
-|--------|------------------------|---------------------------|
-| GET    | `/api/v1/rules`        | List all firewall rules   |
-| POST   | `/api/v1/rules`        | Add a new rule            |
-| GET    | `/api/v1/rules/{id}`   | Get a specific rule       |
-| DELETE | `/api/v1/rules/{id}`   | Delete a rule             |
-| PATCH  | `/api/v1/rules/{id}`   | Toggle rule enabled state |
-| GET    | `/api/v1/stats`        | Dashboard statistics      |
-| GET    | `/api/v1/sysinfo`      | Real-time OS system info  |
-| GET    | `/api/v1/connections`  | Active TCP/UDP connections|
-| GET    | `/api/v1/logs?limit=N` | Recent traffic log entries|
+### Core
 
-### Example: Add a Rule
+| Method | Endpoint                | Description                     |
+|--------|-------------------------|---------------------------------|
+| GET    | `/api/v1/stats`         | Dashboard statistics            |
+| GET    | `/api/v1/sysinfo`       | Real-time OS system info        |
+| GET    | `/api/v1/connections`   | Active TCP/UDP connections      |
+| GET    | `/api/v1/logs?limit=N`  | Recent traffic log entries      |
+| GET    | `/api/v1/logs/stream`   | SSE real-time log stream        |
+| GET    | `/api/v1/analytics`     | Bandwidth & chart data snapshot |
+| GET    | `/api/v1/analytics/stream` | SSE live bandwidth stream    |
+
+### Firewall Rules
+
+| Method | Endpoint              | Description               |
+|--------|-----------------------|---------------------------|
+| GET    | `/api/v1/rules`       | List all firewall rules   |
+| POST   | `/api/v1/rules`       | Create a new rule         |
+| GET    | `/api/v1/rules/{id}`  | Get a specific rule       |
+| PUT    | `/api/v1/rules/{id}`  | Update a rule             |
+| DELETE | `/api/v1/rules/{id}`  | Delete a rule             |
+| PATCH  | `/api/v1/rules/{id}`  | Toggle rule enabled state |
+
+### IP Blocking
+
+| Method | Endpoint               | Description           |
+|--------|------------------------|-----------------------|
+| GET    | `/api/v1/blocked`      | List blocked IPs      |
+| POST   | `/api/v1/blocked`      | Block an IP           |
+| DELETE | `/api/v1/blocked/{ip}` | Unblock an IP         |
+
+### Website Blocking
+
+| Method | Endpoint                    | Description             |
+|--------|-----------------------------|-------------------------|
+| GET    | `/api/v1/websites`          | List blocked websites   |
+| POST   | `/api/v1/websites`          | Block a website         |
+| DELETE | `/api/v1/websites/{domain}` | Unblock a website       |
+
+### Threat Intelligence
+
+| Method | Endpoint                      | Description                  |
+|--------|-------------------------------|------------------------------|
+| GET    | `/api/v1/threat/cache`        | All cached VT results        |
+| GET    | `/api/v1/threat/check/{ip}`   | Check IP against VirusTotal  |
+| POST   | `/api/v1/threat/apikey`       | Set VirusTotal API key       |
+| GET    | `/api/v1/threat/apikey`       | Check API key status         |
+| DELETE | `/api/v1/threat/apikey`       | Remove API key               |
+
+## ⌨️ CLI Usage
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/rules \
-  -H "Content-Type: application/json" \
-  -d '{
-    "chain": "INPUT",
-    "protocol": "tcp",
-    "src_ip": "any",
-    "dst_ip": "any",
-    "src_port": "any",
-    "dst_port": "8443",
-    "action": "DROP",
-    "comment": "Block port 8443",
-    "enabled": true
-  }'
+# Check daemon status
+./kaliwall-cli status
+
+# List firewall rules
+./kaliwall-cli rules list
+
+# Add a rule
+./kaliwall-cli rules add --chain INPUT --protocol tcp --dst-port 443 --action ACCEPT --comment "Allow HTTPS"
+
+# Edit a rule
+./kaliwall-cli rules update <id> --dst-port 8443 --comment "Updated port"
+
+# Block an IP
+./kaliwall-cli block 1.2.3.4 "Port scanner"
+
+# Unblock an IP
+./kaliwall-cli unblock 1.2.3.4
+
+# List blocked IPs
+./kaliwall-cli blocked
+
+# Block a website
+./kaliwall-cli website block example.com "Policy violation"
+
+# List blocked websites
+./kaliwall-cli websites
+
+# Check threat intel for an IP
+./kaliwall-cli threat 8.8.8.8
+
+# View all cached threats
+./kaliwall-cli threats
+
+# View connections
+./kaliwall-cli connections
+
+# Tail logs
+./kaliwall-cli logs --limit 50
 ```
+
+## 📸 Screenshots
+
+> The web UI features a FortiGate-inspired dark sidebar with a clean card-based layout including live bandwidth charts, CPU/memory gauges, threat intelligence dashboard, and full rule management.
+
+## 🛡️ Security Notes
+
+- Run with `sudo` for live iptables integration
+- Without root, KaliWall operates in monitoring/demo mode
+- VirusTotal API keys are stored locally in `data/kaliwall.json`
+- All user inputs are validated and sanitized server-side
+- No external database dependencies — fully self-contained
+
+## 📋 Requirements
+
+- **Go 1.21+**
+- **Linux** (iptables, /proc filesystem)
+- **Root/sudo** for firewall rule enforcement
+- **VirusTotal API key** (optional, for threat intelligence)
+
+---
+
+<p align="center">
+  Made with ❤️ by <strong>Sujal Lamichhane</strong>
+</p>
+
+<p align="center">
+  <em>If you find this project useful, consider giving it a ⭐</em>
+</p>
 
 ### Example: List Rules
 
