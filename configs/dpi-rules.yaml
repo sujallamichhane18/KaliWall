@@ -291,7 +291,7 @@
 
 - id: RULE-180
   type: payload
-  pattern: %2e%2e%2f
+  pattern: '%2e%2e%2f'
   action: BLOCK
 
 - id: RULE-181
@@ -351,7 +351,7 @@
 
 - id: RULE-192
   type: payload
-  pattern: {{7*7}}
+  pattern: '{{7*7}}'
   action: LOG
 
 - id: RULE-193

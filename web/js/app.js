@@ -645,7 +645,10 @@
     var logLive = true;     // live vs paused
     var maxLogRows = 500;   // cap DOM rows
 
-    function startLogStream() {
+    function startLogStream(force) {
+        if (logEventSource && !force) {
+            return;
+        }
         stopLogStream();
         logLive = true;
         updateLiveUI();
@@ -714,8 +717,7 @@
         }
     }
 
-    async function loadLogs() {
-        // Load historical logs first, then start SSE stream
+    async function refreshLogsFromBackend() {
         const res = await apiFetch("/logs?limit=200");
         if (res.success) {
             const tbody = document.querySelector("#logsTable tbody");
@@ -724,7 +726,12 @@
                 prependLogRow(entry, false);
             });
         }
-        startLogStream();
+    }
+
+    async function loadLogs() {
+        // Refresh logs data from backend and keep live stream attached.
+        await refreshLogsFromBackend();
+        startLogStream(false);
     }
 
     function isDPILogEntry(entry) {
@@ -1213,12 +1220,20 @@
 
     document.getElementById("btnRefresh").addEventListener("click", () => {
         const activePage = document.querySelector(".nav-item.active").dataset.page;
+        if (activePage === "logs") {
+            refreshLogsFromBackend();
+            toast("Logs refreshed", "success");
+            return;
+        }
         loadPageData(activePage);
         toast("Data refreshed", "success");
     });
 
     document.getElementById("btnRefreshConn").addEventListener("click", () => loadConnections());
-    document.getElementById("btnRefreshLogs").addEventListener("click", () => loadLogs());
+    document.getElementById("btnRefreshLogs").addEventListener("click", () => {
+        refreshLogsFromBackend();
+        toast("Logs refreshed", "success");
+    });
     document.getElementById("btnRefreshDNSStats").addEventListener("click", () => loadDNSStats());
     document.getElementById("btnRefreshDPIStatus").addEventListener("click", () => loadDPIStatus());
     document.getElementById("btnToggleDPI").addEventListener("click", () => toggleDPI());
