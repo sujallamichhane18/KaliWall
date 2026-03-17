@@ -80,8 +80,35 @@
         <!-- ===== DASHBOARD PAGE ===== -->
         <section class="page active" id="page-dashboard">
 
+            <div class="dashboard-nav" id="dashboardNav">
+                <div class="dashboard-nav-links">
+                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-system"><i class="fa-solid fa-server"></i> System</button>
+                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-dpi"><i class="fa-solid fa-magnifying-glass-chart"></i> DPI</button>
+                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-visibility"><i class="fa-solid fa-radar"></i> Visibility</button>
+                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-gauges"><i class="fa-solid fa-microchip"></i> Resources</button>
+                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-charts"><i class="fa-solid fa-chart-line"></i> Charts</button>
+                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-events"><i class="fa-solid fa-shield-halved"></i> Events</button>
+                </div>
+                <div class="dashboard-nav-controls">
+                    <label for="dashboardDensity">Density</label>
+                    <select id="dashboardDensity">
+                        <option value="compact">Compact</option>
+                        <option value="normal" selected>Normal</option>
+                        <option value="comfortable">Comfortable</option>
+                    </select>
+                    <label for="dashboardAutoRefreshSec">Auto refresh</label>
+                    <select id="dashboardAutoRefreshSec">
+                        <option value="0">Off</option>
+                        <option value="5">5s</option>
+                        <option value="10" selected>10s</option>
+                        <option value="20">20s</option>
+                        <option value="30">30s</option>
+                    </select>
+                </div>
+            </div>
+
             <!-- System Info Banner -->
-            <div class="system-banner" id="systemBanner">
+            <div class="system-banner" id="systemBanner" data-dashboard-section="dashboard-system">
                 <div class="sys-item"><i class="fa-solid fa-server"></i> <span id="sysHostname">--</span></div>
                 <div class="sys-item"><i class="fa-brands fa-linux"></i> <span id="sysKernel">--</span></div>
                 <div class="sys-item"><i class="fa-solid fa-clock"></i> Uptime: <span id="sysUptime">--</span></div>
@@ -89,7 +116,7 @@
                 <div class="sys-item"><i class="fa-solid fa-fire"></i> Engine: <span id="sysEngine">memory</span></div>
             </div>
 
-            <div class="card" style="margin-bottom:20px">
+            <div class="card" style="margin-bottom:20px" data-dashboard-section="dashboard-dpi">
                 <div class="card-header"><i class="fa-solid fa-magnifying-glass-chart"></i><h3>DPI Monitor</h3></div>
                 <div class="card-body">
                     <div class="stats-grid compact-stats" style="margin-bottom:12px">
@@ -109,7 +136,7 @@
                 </div>
             </div>
 
-            <div class="dashboard-grid" style="margin-bottom:20px">
+            <div class="dashboard-grid" style="margin-bottom:20px" data-dashboard-section="dashboard-visibility">
                 <div class="card">
                     <div class="card-header"><i class="fa-solid fa-radar"></i><h3>Traffic Visibility</h3></div>
                     <div class="card-body">
@@ -176,7 +203,7 @@
             </div>
 
             <!-- Resource Gauges -->
-            <div class="gauge-grid">
+            <div class="gauge-grid" data-dashboard-section="dashboard-gauges">
                 <div class="card gauge-card">
                     <div class="card-header"><i class="fa-solid fa-microchip"></i><h3>CPU Usage</h3></div>
                     <div class="card-body gauge-body">
@@ -231,7 +258,7 @@
             </div>
 
             <!-- Live Bandwidth Chart (full width) -->
-            <div class="card chart-card" style="margin-bottom:20px">
+            <div class="card chart-card" style="margin-bottom:20px" data-dashboard-section="dashboard-charts">
                 <div class="card-header">
                     <i class="fa-solid fa-chart-line"></i>
                     <h3>Live Bandwidth</h3>
@@ -243,7 +270,7 @@
             </div>
 
             <!-- Charts Row: Protocol Breakdown, Blocked vs Allowed, Top Talkers -->
-            <div class="charts-grid">
+            <div class="charts-grid" data-dashboard-section="dashboard-charts">
                 <div class="card chart-card">
                     <div class="card-header"><i class="fa-solid fa-chart-pie"></i><h3>Protocol Breakdown</h3></div>
                     <div class="card-body chart-body chart-body-sm">
@@ -265,7 +292,7 @@
             </div>
 
             <!-- Dashboard panels -->
-            <div class="dashboard-grid">
+            <div class="dashboard-grid" data-dashboard-section="dashboard-events">
                 <div class="card">
                     <div class="card-header">
                         <i class="fa-solid fa-clock-rotate-left"></i>

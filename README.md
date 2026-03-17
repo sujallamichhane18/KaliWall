@@ -37,6 +37,19 @@ A web-based Linux firewall manager built with **Go**. Features a clean FortiGate
 - **Top Talkers** — Horizontal bar chart of most active IPs
 - **Active Connections** — Live `/proc/net/tcp` monitoring with threat indicators
 
+### 🧭 Production-Ready Dashboard UX
+- **Dashboard Navigator** — Sticky quick-jump controls for System, DPI, Visibility, Resources, Charts, and Events
+- **Layout Flexibility** — Per-user density modes (Compact/Normal/Comfortable) with persisted preferences
+- **Auto Refresh Control** — Adjustable dashboard refresh interval (Off, 5s, 10s, 20s, 30s)
+- **Responsive Design** — Optimized navigation and card layout for desktop/tablet/mobile with safe overflow behavior
+- **Robust API Handling** — Frontend gracefully handles non-JSON and HTTP error payloads without breaking page state
+
+### 🔎 DPI Runtime Control & Visibility
+- **DPI On/Off from Web UI** — Toggle DPI engine directly from dashboard
+- **DPI Status Metrics** — Interface, workers, uptime, packets, blocked/logged/decode errors
+- **DPI Decisions in Traffic Logs** — `ALLOW`, `LOG`, and `BLOCK` entries include decoded context (HTTP/DNS/TLS signals)
+- **Logs Table Customization** — Resize height, compact/comfortable rows, wrap details, DPI-only filter, and hide/show columns
+
 ### 🛡️ Threat Intelligence
 - **VirusTotal Integration** — Automatic IP reputation lookups on active connections
 - **Threat Dashboard** — Cached VT results with malicious/suspicious/safe counts, country, ASN, connection status
@@ -88,6 +101,16 @@ Optional flags:
 
 - `--dpi-bpf "tcp or udp port 53"` to reduce capture volume.
 - `--dpi-rate 5000` to set per-source packet rate limiting.
+
+`start.sh` now enables DPI by default. You can override at launch:
+
+```bash
+# Disable DPI for one run
+KALIWALL_DPI=0 ./start.sh
+
+# Force capture interface
+KALIWALL_DPI_INTERFACE=eth0 ./start.sh
+```
 
 ### Logs and Status
 

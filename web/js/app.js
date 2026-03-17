@@ -12,6 +12,7 @@
     var dpiRunning = false;
     const SIDEBAR_WIDTH_KEY = "kaliwall_sidebar_width";
     const LOG_TABLE_SETTINGS_KEY = "kaliwall_log_table_settings";
+    const DASHBOARD_PREFS_KEY = "kaliwall_dashboard_prefs";
     var logTableSettings = {
         density: "normal",
         height: 600,
@@ -26,6 +27,11 @@
             detail: true,
         },
     };
+    var dashboardPrefs = {
+        density: "normal",
+        autoRefreshSec: 10,
+    };
+    var dashboardAutoRefreshTimer = null;
 
     // ---------- Theme Management ----------
     const themeToggle = document.getElementById("themeToggle");
@@ -84,6 +90,7 @@
     initTheme();
     initSidebarWidthControls();
     initLogTableControls();
+    initDashboardControls();
 
     // ---------- Navigation ----------
 
@@ -135,6 +142,7 @@
     // ---------- Data Loading ----------
 
     function loadPageData(page) {
+        stopDashboardAutoRefresh();
         switch (page) {
             case "dashboard":
                 loadStats();
@@ -148,6 +156,7 @@
                 startFirewallEventStream();
                 loadAnalytics();
                 startBandwidthStream();
+                startDashboardAutoRefresh();
                 break;
             case "rules":
                 loadRules();
@@ -177,8 +186,120 @@
     }
 
     async function apiFetch(endpoint) {
-        const res = await fetch(API + endpoint);
-        return res.json();
+        const res = await fetch(API + endpoint, {
+            headers: { "Accept": "application/json" },
+        });
+        const raw = await res.text();
+        let data = {};
+        if (raw) {
+            try {
+                data = JSON.parse(raw);
+            } catch (_err) {
+                data = {
+                    success: false,
+                    message: "Invalid JSON response from server",
+                    data: null,
+                };
+            }
+        }
+        if (typeof data !== "object" || data === null) {
+            data = { success: false, message: "Invalid response payload", data: null };
+        }
+        if (typeof data.success !== "boolean") {
+            data.success = res.ok;
+        }
+        if (!res.ok && !data.message) {
+            data.message = "HTTP " + res.status;
+        }
+        return data;
+    }
+
+    function initDashboardControls() {
+        loadDashboardPrefs();
+        applyDashboardPrefs();
+
+        const density = document.getElementById("dashboardDensity");
+        const autoRefresh = document.getElementById("dashboardAutoRefreshSec");
+
+        if (density) {
+            density.value = dashboardPrefs.density;
+            density.addEventListener("change", function () {
+                dashboardPrefs.density = density.value;
+                persistDashboardPrefs();
+                applyDashboardPrefs();
+            });
+        }
+
+        if (autoRefresh) {
+            autoRefresh.value = String(dashboardPrefs.autoRefreshSec);
+            autoRefresh.addEventListener("change", function () {
+                dashboardPrefs.autoRefreshSec = parseInt(autoRefresh.value, 10) || 0;
+                persistDashboardPrefs();
+                startDashboardAutoRefresh();
+            });
+        }
+
+        document.querySelectorAll("#dashboardNav [data-scroll-target]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                const target = btn.getAttribute("data-scroll-target");
+                if (!target) return;
+                const section = document.querySelector('[data-dashboard-section="' + target + '"]');
+                if (section) {
+                    section.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            });
+        });
+    }
+
+    function loadDashboardPrefs() {
+        try {
+            const raw = localStorage.getItem(DASHBOARD_PREFS_KEY);
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object") return;
+            if (parsed.density) dashboardPrefs.density = parsed.density;
+            if (parsed.autoRefreshSec !== undefined) {
+                const sec = parseInt(parsed.autoRefreshSec, 10);
+                dashboardPrefs.autoRefreshSec = isNaN(sec) ? 10 : Math.max(0, Math.min(60, sec));
+            }
+        } catch (_err) {}
+    }
+
+    function persistDashboardPrefs() {
+        localStorage.setItem(DASHBOARD_PREFS_KEY, JSON.stringify(dashboardPrefs));
+    }
+
+    function applyDashboardPrefs() {
+        const page = document.getElementById("page-dashboard");
+        if (!page) return;
+        page.classList.remove("dashboard-compact", "dashboard-comfortable");
+        if (dashboardPrefs.density === "compact") page.classList.add("dashboard-compact");
+        if (dashboardPrefs.density === "comfortable") page.classList.add("dashboard-comfortable");
+    }
+
+    function startDashboardAutoRefresh() {
+        stopDashboardAutoRefresh();
+        const active = document.querySelector(".nav-item.active");
+        if (!active || active.dataset.page !== "dashboard") return;
+        const sec = parseInt(dashboardPrefs.autoRefreshSec, 10) || 0;
+        if (sec <= 0) return;
+        dashboardAutoRefreshTimer = setInterval(function () {
+            loadStats();
+            loadSysInfo();
+            loadDPIStatus();
+            loadTrafficVisibility();
+            loadDashboardLogs();
+            loadDashboardConnections();
+            loadFirewallEvents();
+            loadDNSStats();
+        }, sec * 1000);
+    }
+
+    function stopDashboardAutoRefresh() {
+        if (dashboardAutoRefreshTimer) {
+            clearInterval(dashboardAutoRefreshTimer);
+            dashboardAutoRefreshTimer = null;
+        }
     }
 
     // ---------- Dashboard ----------
