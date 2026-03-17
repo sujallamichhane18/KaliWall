@@ -107,6 +107,8 @@
             case "dashboard":
                 loadStats();
                 loadSysInfo();
+                loadTrafficVisibility();
+                loadFirewallLogs();
                 loadDashboardLogs();
                 loadDashboardConnections();
                 loadAnalytics();
@@ -123,6 +125,7 @@
                 break;
             case "settings":
                 loadSettings();
+                loadFirewallEngineSettings();
                 break;
             case "blocked":
                 loadBlocked();
@@ -162,6 +165,7 @@
         document.getElementById("sysKernel").textContent = d.kernel || "--";
         document.getElementById("sysUptime").textContent = d.uptime || "--";
         document.getElementById("sysLoad").textContent = d.load_average || "--";
+        document.getElementById("sysEngine").textContent = d.firewall_engine || "memory";
 
         // CPU gauge
         var cpuPct = d.cpu_usage_percent || 0;
@@ -178,6 +182,39 @@
         // Network totals
         document.getElementById("netRxValue").textContent = formatBytes(d.net_rx_bytes || 0);
         document.getElementById("netTxValue").textContent = formatBytes(d.net_tx_bytes || 0);
+    }
+
+    async function loadTrafficVisibility() {
+        const res = await apiFetch("/traffic/visibility?limit=1200");
+        if (!res.success) return;
+        const v = res.data || {};
+        document.getElementById("visConnections").textContent = v.active_connections || 0;
+        document.getElementById("visRemoteIPs").textContent = v.unique_remote_ips || 0;
+        document.getElementById("visBlocked").textContent = v.recent_blocked || 0;
+        document.getElementById("visAllowed").textContent = v.recent_allowed || 0;
+
+        const tbody = document.querySelector("#visTopProtocols tbody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        const protocols = v.top_protocols || [];
+        if (protocols.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#9ca3af">No traffic sample yet</td></tr>';
+            return;
+        }
+        protocols.forEach(function (p) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = "<td>" + escapeHtml(p.name) + "</td><td>" + (p.count || 0) + "</td>";
+            tbody.appendChild(tr);
+        });
+    }
+
+    async function loadFirewallLogs() {
+        const res = await apiFetch("/firewall/logs?limit=120");
+        if (!res.success) return;
+        const logBox = document.getElementById("firewallLogs");
+        if (!logBox) return;
+        const lines = res.data || [];
+        logBox.textContent = lines.join("\n");
     }
 
     // Set a circular SVG gauge by percentage (0-100).
@@ -735,7 +772,63 @@
             badge.textContent = "Not configured";
             removeBtn.style.display = "none";
         }
+
+        loadFirewallEngineSettings();
     }
+
+    async function loadFirewallEngineSettings() {
+        var res = await apiFetch("/firewall/engine");
+        if (!res.success) return;
+
+        var select = document.getElementById("firewallEngineSelect");
+        var status = document.getElementById("firewallEngineStatus");
+        if (!select || !status) return;
+
+        select.innerHTML = "";
+        var current = res.data.current_engine || "memory";
+        var engines = res.data.available_engines || [];
+        if (engines.indexOf("memory") === -1) engines.push("memory");
+        engines.forEach(function (name) {
+            var opt = document.createElement("option");
+            opt.value = name;
+            opt.textContent = name;
+            if (name === current) opt.selected = true;
+            select.appendChild(opt);
+        });
+
+        if (res.data.live_mode) {
+            status.className = "badge badge-enabled";
+            status.textContent = "Live mode: " + current;
+        } else {
+            status.className = "badge badge-disabled";
+            status.textContent = "Memory mode";
+        }
+
+        if (res.data.last_error) {
+            status.className = "badge badge-reject";
+            status.textContent = "Engine warning: " + res.data.last_error;
+        }
+    }
+
+    document.getElementById("btnSaveFirewallEngine").addEventListener("click", async function () {
+        var select = document.getElementById("firewallEngineSelect");
+        if (!select) return;
+        var engine = select.value;
+        var res = await fetch(API + "/firewall/engine", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ engine: engine }),
+        });
+        var data = await res.json();
+        if (data.success) {
+            toast("Firewall engine switched to " + engine, "success");
+            loadFirewallEngineSettings();
+            loadStats();
+            loadFirewallLogs();
+        } else {
+            toast(data.message || "Failed to switch engine", "error");
+        }
+    });
 
     document.getElementById("btnSaveApiKey").addEventListener("click", async function () {
         var key = document.getElementById("vtApiKey").value.trim();

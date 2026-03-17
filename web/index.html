@@ -86,6 +86,31 @@
                 <div class="sys-item"><i class="fa-brands fa-linux"></i> <span id="sysKernel">--</span></div>
                 <div class="sys-item"><i class="fa-solid fa-clock"></i> Uptime: <span id="sysUptime">--</span></div>
                 <div class="sys-item"><i class="fa-solid fa-weight-hanging"></i> Load: <span id="sysLoad">--</span></div>
+                <div class="sys-item"><i class="fa-solid fa-fire"></i> Engine: <span id="sysEngine">memory</span></div>
+            </div>
+
+            <div class="dashboard-grid" style="margin-bottom:20px">
+                <div class="card">
+                    <div class="card-header"><i class="fa-solid fa-radar"></i><h3>Traffic Visibility</h3></div>
+                    <div class="card-body">
+                        <div class="stats-grid" style="margin-bottom:12px">
+                            <div class="stat-card"><div class="stat-info"><span class="stat-value" id="visConnections">0</span><span class="stat-label">Active Connections</span></div></div>
+                            <div class="stat-card"><div class="stat-info"><span class="stat-value" id="visRemoteIPs">0</span><span class="stat-label">Unique Remote IPs</span></div></div>
+                            <div class="stat-card"><div class="stat-info"><span class="stat-value" id="visBlocked">0</span><span class="stat-label">Recent Blocked</span></div></div>
+                            <div class="stat-card"><div class="stat-info"><span class="stat-value" id="visAllowed">0</span><span class="stat-label">Recent Allowed</span></div></div>
+                        </div>
+                        <table class="table" id="visTopProtocols">
+                            <thead><tr><th>Top Protocols</th><th>Count</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><i class="fa-solid fa-file-shield"></i><h3>Firewall Backend Logs</h3></div>
+                    <div class="card-body">
+                        <div id="firewallLogs" style="max-height:260px;overflow:auto;font-family:monospace;font-size:12px;line-height:1.5"></div>
+                    </div>
+                </div>
             </div>
 
             <!-- Stat Cards -->
@@ -441,6 +466,26 @@
         <section class="page" id="page-settings">
             <div class="page-toolbar">
                 <h2>Settings</h2>
+            </div>
+
+            <div class="card settings-card" style="margin-bottom:20px">
+                <div class="card-header">
+                    <i class="fa-solid fa-layer-group"></i>
+                    <h3>Firewall Engine</h3>
+                </div>
+                <div class="card-body" style="padding:20px">
+                    <p class="settings-desc">Select the active packet filtering engine. KaliWall can run with nftables, iptables, ufw, or in-memory mode.</p>
+                    <div class="form-group">
+                        <label for="firewallEngineSelect">Active Engine</label>
+                        <div class="input-with-btn">
+                            <select id="firewallEngineSelect"></select>
+                            <button class="btn btn-primary" id="btnSaveFirewallEngine"><i class="fa-solid fa-floppy-disk"></i> Apply</button>
+                        </div>
+                    </div>
+                    <div class="api-key-status" style="margin-top:12px">
+                        <span class="badge badge-disabled" id="firewallEngineStatus">Not loaded</span>
+                    </div>
+                </div>
             </div>
 
             <!-- Threat Intelligence API Key -->

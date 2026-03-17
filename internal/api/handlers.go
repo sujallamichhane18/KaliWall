@@ -39,12 +39,67 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/blocked/", h.handleBlockedIPByAddr)
 	mux.HandleFunc("/api/v1/websites", h.handleWebsiteBlocks)
 	mux.HandleFunc("/api/v1/websites/", h.handleWebsiteBlockByDomain)
+	mux.HandleFunc("/api/v1/firewall/engine", h.handleFirewallEngine)
+	mux.HandleFunc("/api/v1/firewall/logs", h.handleFirewallLogs)
+	mux.HandleFunc("/api/v1/traffic/visibility", h.handleTrafficVisibility)
 
 	// Serve web UI from the "web" directory
 	fs := http.FileServer(http.Dir("web"))
 	mux.Handle("/", fs)
 
 	return mux
+}
+
+// ---------- Firewall Engine & Visibility ----------
+
+func (h *handlers) handleFirewallEngine(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Data: h.fw.EngineInfo()})
+	case http.MethodPost:
+		var body struct {
+			Engine string `json:"engine"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "invalid JSON"})
+			return
+		}
+		if err := h.fw.SwitchEngine(body.Engine); err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "Firewall engine switched", Data: h.fw.EngineInfo()})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *handlers) handleFirewallLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	limit := 200
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 5000 {
+			limit = v
+		}
+	}
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: h.fw.FirewallLogs(limit)})
+}
+
+func (h *handlers) handleTrafficVisibility(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	limit := 1000
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 5000 {
+			limit = v
+		}
+	}
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: h.fw.TrafficVisibility(limit)})
 }
 
 // handlers holds dependencies for HTTP handler methods.

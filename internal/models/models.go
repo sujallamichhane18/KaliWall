@@ -73,6 +73,35 @@ type DashboardStats struct {
 	LoadAvg           string  `json:"load_average"`
 	NetRxBytes        uint64  `json:"net_rx_bytes"`
 	NetTxBytes        uint64  `json:"net_tx_bytes"`
+	FirewallEngine    string  `json:"firewall_engine"`
+	EngineLiveMode    bool    `json:"engine_live_mode"`
+}
+
+// FirewallEngineInfo reports detected and active packet-filter engines.
+type FirewallEngineInfo struct {
+	CurrentEngine  string   `json:"current_engine"`
+	Available      []string `json:"available_engines"`
+	LiveMode       bool     `json:"live_mode"`
+	Root           bool     `json:"root"`
+	LastError      string   `json:"last_error,omitempty"`
+}
+
+// NameCount is a generic counter item used for protocol/IP/port summaries.
+type NameCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// TrafficVisibility provides low-overhead packet/flow visibility for the UI.
+type TrafficVisibility struct {
+	CaptureSource      string      `json:"capture_source"`
+	ActiveConnections  int         `json:"active_connections"`
+	UniqueRemoteIPs    int         `json:"unique_remote_ips"`
+	TopProtocols       []NameCount `json:"top_protocols"`
+	TopRemoteIPs       []NameCount `json:"top_remote_ips"`
+	TopDestinationPorts []NameCount `json:"top_destination_ports"`
+	RecentBlocked      int         `json:"recent_blocked"`
+	RecentAllowed      int         `json:"recent_allowed"`
 }
 
 // BlockedIP represents a manually blocked IP address.

@@ -963,3 +963,13 @@ body {
 .threat-cell .badge {
     cursor: default;
 }
+
+#firewallLogs {
+    background: var(--bg-body);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 12px;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}

@@ -8,7 +8,7 @@
 <h1 align="center">🛡️ KaliWall</h1>
 
 <p align="center">
-  <strong>Enterprise-Grade Linux Firewall Management System</strong><br>
+  <strong>Linux Firewall Management System</strong><br>
   <em>Real-time dashboard • IP blocking • Website filtering • Threat intelligence • CLI & Web UI</em>
 </p>
 
@@ -20,7 +20,7 @@
 
 ---
 
-A professional, web-based Linux firewall manager built with **Go**. Features a clean FortiGate-inspired dashboard for managing `iptables` rules, blocking IPs & websites, monitoring connections with live charts, and VirusTotal threat intelligence — all controllable via both a **Web UI** and a full **CLI tool**.
+A web-based Linux firewall manager built with **Go**. Features a clean FortiGate-inspired dashboard for managing firewall rules, blocking IPs and websites, monitoring connections with live charts, and VirusTotal threat intelligence via both a **Web UI** and **CLI tool**.
 
 ## ✨ Features
 
@@ -60,16 +60,23 @@ A professional, web-based Linux firewall manager built with **Go**. Features a c
 chmod +x setup.sh && ./setup.sh
 ```
 
+### Start Firewall
+
+```bash
+chmod +x start.sh && ./start.sh
+```
+
 ### Daemon Mode (Background)
 
 ```bash
-sudo ./setup.sh --daemon
+sudo ./start.sh --daemon
 ```
 
 ### Systemd Service
 
 ```bash
 sudo ./setup.sh --service
+sudo ./start.sh --service
 ```
 
 ## 🔧 Manual Setup
@@ -99,7 +106,8 @@ Open **http://localhost:8080** in your browser.
 KaliWall/
 ├── main.go                          # Entry point — daemon, DB init, signal handling
 ├── go.mod                           # Go module (kaliwall)
-├── setup.sh                         # Setup script (foreground / daemon / systemd)
+├── setup.sh                         # Setup script (build + optional systemd install)
+├── start.sh                         # Start script (foreground / daemon / systemd start)
 ├── cmd/
 │   └── kaliwall-cli/
 │       └── main.go                  # CLI tool — full firewall management
@@ -111,7 +119,7 @@ KaliWall/
 │   ├── database/
 │   │   └── database.go              # JSON-file persistent store
 │   ├── firewall/
-│   │   └── firewall.go              # iptables engine — rules, IP/website blocking
+│   │   └── firewall.go              # Firewall engine — rules, IP/website blocking
 │   ├── logger/
 │   │   └── logger.go                # Traffic & event logger
 │   ├── models/
@@ -234,7 +242,7 @@ KaliWall/
 
 ## 🛡️ Security Notes
 
-- Run with `sudo` for live iptables integration
+- Run with `sudo` for live firewall integration
 - Without root, KaliWall operates in monitoring/demo mode
 - VirusTotal API keys are stored locally in `data/kaliwall.json`
 - All user inputs are validated and sanitized server-side
@@ -250,23 +258,9 @@ KaliWall/
 ---
 
 <p align="center">
-  Made with ❤️ by <strong>Sujal Lamichhane</strong>
+  made with &lt;3 by <strong>sujal lamichhane</strong>
 </p>
 
 <p align="center">
   <em>If you find this project useful, consider giving it a ⭐</em>
 </p>
-
-### Example: List Rules
-
-```bash
-curl http://localhost:8080/api/v1/rules | jq
-```
-
-## Requirements
-
-- **Linux** (for iptables integration; demo mode works anywhere)
-- **Go 1.21+**
-- **Root access** (for live firewall rule application)
-
-## Open-Source
