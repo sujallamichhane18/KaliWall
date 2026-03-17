@@ -1,119 +1,91 @@
 <div align="center">
 
-# KW KaliWall
+#  KaliWall
+### Next-Gen Linux Firewall Dashboard
 
-**Simple Linux Firewall Dashboard**  
-Rules | Live Traffic | GeoIP | Threat Intel
+[![Go Version](https://img.shields.io/github/go-mod/go-version/lamic/KaliWall?style=for-the-badge&logo=go&logoColor=white&color=00ADD8)](https://golang.org)
+[![License](https://img.shields.io/github/license/lamic/KaliWall?style=for-the-badge&color=blue)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Linux-orange?style=for-the-badge&logo=linux&logoColor=white)](https://www.linux.org)
+[![Status](https://img.shields.io/badge/Status-Active-success?style=for-the-badge)](https://github.com/lamic/KaliWall)
+
+<br/>
+
+<!-- Replace with actual GIF URL when available -->
+<img src="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExM3czamx6NDZ2YmV6YmR4aDV2a3ZnOGZ5d3JrdGdqaDIzbGZ5djJ6OSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/3o7bu3XilJ5BOiSGic/giphy.gif" alt="KaliWall Dashboard Demo" width="100%" style="border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+
+<br/>
+
+**KaliWall** transforms your Linux server into a powerful firewall appliance with a FortiGate-inspired web interface.  
+Manage iptables/nftables, visualize traffic, and block threats in real-time.
+
+[Getting Started](#-quick-start) • [Features](#-key-features) • [Configuration](#-configuration)
 
 </div>
 
 ---
 
-KaliWall is a clean, FortiGate-style firewall manager built with Go.
-It gives you a web dashboard and CLI to manage rules, inspect traffic, and monitor public threat sources in real time.
+## ⚡ Key Features
 
-## Highlights
+| Feature | Description |
+| :--- | :--- |
+| **Visual Dashboard** | FortiGate-style interface with real-time bandwidth and event monitoring. |
+| **Firewall Management** | Create, edit, and toggle rules effortlessly from the web UI. |
+| **GeoIP Intelligence** | Integrated world map visualizing public IP traffic sources. |
+| **Threat Blocking** | Native integration with VirusTotal for IP and domain reputation checks. |
+| **Live Traffic** | Real-time packet inspection and flow visualization using Netlink/PCAP. |
+| **Persistent Storage** | Reliable disk-based JSON database ensures rules survive restarts. |
 
-- Firewall rules: create, edit, enable/disable, delete
-- Block lists: IP and website/domain blocking
-- Live dashboard: bandwidth, events, traffic visibility
-- GeoIP widget: live public-source traffic map/table (private IPs excluded)
-- DPI controls: enable/disable from dashboard
-- Threat intel: VirusTotal integration with cached verdicts
-- Persistent storage: settings and rules saved in local JSON DB
+## 🚀 Quick Start
 
-## New Branding
+### Prerequisites
 
-- Sidebar includes a new KaliWall logo mark: `KW`
-- Top-right dashboard controls include:
-  - `Stop` (switch firewall backend to memory mode)
-  - `Restart` (switch back to first available live backend)
+- **OS**: Linux (Ubuntu/Debian recommended)
+- **Permissions**: Root privileges required for firewall manipulation.
 
-## Quick Start
+### Installation
 
-### 1) Setup
+1.  **Clone & Setup**
+    ```bash
+    git clone https://github.com/sujallamichhane18/KaliWall.git
+    cd KaliWall
+    chmod +x setup.sh && ./setup.sh
+    ```
 
-```bash
-chmod +x setup.sh && ./setup.sh
-```
+2.  **Run Service**
+    By default, the script runs in background mode (daemon).
+    ```bash
+    chmod +x start.sh && ./start.sh
+    ```
+    
+    *To run in foreground for debugging:*
+    ```bash
+    ./start.sh --foreground
+    ```
 
-### 2) Start (Default: Background)
+3.  **Access Dashboard**
+    Open your browser and navigate to:
+    > **http://localhost:8080**
 
-```bash
-chmod +x start.sh && ./start.sh
-```
+## 🛠 Configuration
 
-`start.sh` now starts KaliWall in daemon/background mode by default.
+The system automatically detects GeoIP databases if placed in the root directory.
 
-### 3) Open Dashboard
+| File | Purpose |
+| :--- | :--- |
+| `GeoLite2-City.mmdb` | MaxMind City Database (Optional) |
+| `IP2LOCATION-LITE-DB1.CSV` | IP2Location CSV Database (Optional) |
+| `config.json` | Main configuration file (auto-generated) |
 
-- http://localhost:8080
+## 🏗 Architecture
 
-## Start Script Commands
+KaliWall is built with performance and simplicity in mind:
 
-```bash
-./start.sh                 # start in background (default)
-./start.sh --foreground    # run in foreground
-./start.sh --daemon        # explicit background start
-./start.sh --stop          # stop daemon
-./start.sh --status        # show status
-./start.sh --logs          # show recent logs
-./start.sh --logs-follow   # tail logs live
-```
-
-## GeoIP Database Support
-
-KaliWall supports both:
-
-- `GeoLite2-City.mmdb`
-- `IP2LOCATION-LITE-DB1.CSV`
-
-Auto-detected paths include project root, `data/`, `configs/`, and `internal/database/`.
-
-You can also force path:
-
-```bash
-./kaliwall --geo-db /path/to/database-file
-```
-
-Or env var:
-
-```bash
-KALIWALL_GEO_DB=/path/to/database-file ./start.sh
-```
-
-## Dashboard Firewall Controls
-
-In the top-right of Dashboard:
-
-- `Stop`: moves engine to `memory`
-- `Restart`: moves engine to first available live backend (`nftables`, `iptables`, or `ufw`)
-
-## Requirements
-
-- Go 1.21+
-- Linux
-- Root/sudo for live firewall enforcement
-- Optional: VirusTotal API key
-
-## Project Layout
-
-```text
-main.go
-start.sh
-setup.sh
-internal/
-  api/
-  firewall/
-  geoip/
-  dpi/
-  database/
-web/
-  index.html
-  css/style.css
-  js/app.js
-```
+- **Backend**: Golang (High performance, concurrent network handling)
+- **Frontend**: Vanilla JS/CSS (Lightweight, no framework overhead)
+- **Driver**: iptables/nftables (Native Linux kernel firewall)
 
 ---
 
-Built for fast local firewall operations with a simple UI and practical defaults.
+<div align="center">
+    <sub>Built with ❤️ for the Open Source Community</sub>
+</div>
