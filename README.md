@@ -50,6 +50,12 @@ A web-based Linux firewall manager built with **Go**. Features a clean FortiGate
 - **DPI Decisions in Traffic Logs** — `ALLOW`, `LOG`, and `BLOCK` entries include decoded context (HTTP/DNS/TLS signals)
 - **Logs Table Customization** — Resize height, compact/comfortable rows, wrap details, DPI-only filter, and hide/show columns
 
+### 🌍 GeoIP Real-Time Attack Map
+- **Live Geo Attack Stream** — Firewall/DPI events are enriched with GeoLite2 location data and streamed in real time
+- **Interactive World Map** — Leaflet-based map with severity-colored markers for incoming attack sources
+- **Hotspot Table** — Top countries by attack volume and severity pressure
+- **Cached Lookups** — In-memory GeoIP caching reduces repeated lookup overhead
+
 ### 🛡️ Threat Intelligence
 - **VirusTotal Integration** — Automatic IP reputation lookups on active connections
 - **Threat Dashboard** — Cached VT results with malicious/suspicious/safe counts, country, ASN, connection status
@@ -101,6 +107,20 @@ Optional flags:
 
 - `--dpi-bpf "tcp or udp port 53"` to reduce capture volume.
 - `--dpi-rate 5000` to set per-source packet rate limiting.
+
+### GeoIP Database Setup (Free MaxMind GeoLite2)
+
+1. Create a free MaxMind account: https://www.maxmind.com
+2. Download the **GeoLite2 City** database (`GeoLite2-City.mmdb`).
+3. Place the file in the project root, or pass a custom path.
+
+Run with custom DB path:
+
+```bash
+sudo ./kaliwall --geo-db /path/to/GeoLite2-City.mmdb
+```
+
+If the DB file is missing or invalid, KaliWall still starts and logs `GeoIP disabled`.
 
 `start.sh` now enables DPI by default. You can override at launch:
 
@@ -198,6 +218,8 @@ KaliWall/
 │   │   └── database.go              # JSON-file persistent store
 │   ├── firewall/
 │   │   └── firewall.go              # Firewall engine — rules, IP/website blocking
+│   ├── geoip/
+│   │   └── geoip.go                 # GeoLite2 lookup service with cache
 │   ├── logger/
 │   │   └── logger.go                # Traffic & event logger
 │   ├── models/
@@ -233,6 +255,8 @@ KaliWall/
 | GET    | `/api/v1/logs/stream`   | SSE real-time log stream        |
 | GET    | `/api/v1/analytics`     | Bandwidth & chart data snapshot |
 | GET    | `/api/v1/analytics/stream` | SSE live bandwidth stream    |
+| GET    | `/api/v1/geo/attacks?limit=N` | Geo-enriched attack snapshot |
+| GET    | `/api/v1/geo/stream`    | SSE live geo-attack stream      |
 
 ### Firewall Rules
 

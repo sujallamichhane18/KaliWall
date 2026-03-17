@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KaliWall &mdash; Firewall Management</title>
     <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
 
@@ -87,6 +89,7 @@
                     <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-visibility"><i class="fa-solid fa-radar"></i> Visibility</button>
                     <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-gauges"><i class="fa-solid fa-microchip"></i> Resources</button>
                     <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-charts"><i class="fa-solid fa-chart-line"></i> Charts</button>
+                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-geo"><i class="fa-solid fa-earth-americas"></i> GeoIP</button>
                     <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-events"><i class="fa-solid fa-shield-halved"></i> Events</button>
                 </div>
                 <div class="dashboard-nav-controls">
@@ -106,6 +109,127 @@
                     </select>
                 </div>
             </div>
+
+            <section class="soc-dashboard" id="socDashboard">
+                <div class="soc-header">
+                    <h2>SOC Firewall Command</h2>
+                    <span class="soc-live"><i class="fa-solid fa-circle"></i> Live Stream</span>
+                </div>
+
+                <div class="soc-kpi-grid">
+                    <div class="soc-kpi-card"><span class="label">Firewall</span><span class="value" id="socFwState">ACTIVE</span></div>
+                    <div class="soc-kpi-card"><span class="label">DPI</span><span class="value" id="socDpiState">OFF</span></div>
+                    <div class="soc-kpi-card"><span class="label">TI Feed</span><span class="value" id="socTiFreshness">-</span></div>
+                    <div class="soc-kpi-card"><span class="label">Events/sec</span><span class="value" id="socEventsRate">0</span></div>
+                    <div class="soc-kpi-card"><span class="label">Packets/sec</span><span class="value" id="socPacketsRate">0</span></div>
+                    <div class="soc-kpi-card"><span class="label">Critical / High / Medium / Low</span><span class="value" id="socSeverityMix">0 / 0 / 0 / 0</span></div>
+                </div>
+
+                <div class="soc-grid">
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-fire"></i><h3>Firewall Throughput</h3></div>
+                        <div class="card-body"><canvas id="chartFirewallFlow"></canvas></div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-plug-circle-bolt"></i><h3>Top Active Connections</h3></div>
+                        <div class="card-body table-responsive dashboard-table-wrap">
+                            <table class="table" id="socConnectionsTable">
+                                <thead><tr><th>Protocol</th><th>Local</th><th>Remote</th><th>State</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-chart-simple"></i><h3>Port / Protocol Stats</h3></div>
+                        <div class="card-body table-responsive dashboard-table-wrap">
+                            <table class="table" id="socProtocolPortTable">
+                                <thead><tr><th>Type</th><th>Name</th><th>Count</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-bell"></i><h3>Actionable Alerts</h3></div>
+                        <div class="card-body table-responsive dashboard-table-wrap">
+                            <table class="table" id="socAlertsTable">
+                                <thead><tr><th>Time</th><th>Severity</th><th>Type</th><th>Action</th><th>Source</th><th>Detail</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="soc-grid">
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-magnifying-glass-chart"></i><h3>Top Triggered DPI Rules</h3></div>
+                        <div class="card-body table-responsive dashboard-table-wrap">
+                            <table class="table" id="socDPIRulesTable">
+                                <thead><tr><th>Rule</th><th>Hits</th><th>Action</th><th>Severity</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-layer-group"></i><h3>DPI Protocol/Application Mix</h3></div>
+                        <div class="card-body"><canvas id="chartDPIProtocolMix"></canvas></div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-fingerprint"></i><h3>Sanitized Signatures</h3></div>
+                        <div class="card-body table-responsive dashboard-table-wrap">
+                            <table class="table" id="socDPISignaturesTable">
+                                <thead><tr><th>Signature</th><th>Protocol</th><th>Pair</th><th>Confidence</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-triangle-exclamation"></i><h3>DPI Severity Pressure</h3></div>
+                        <div class="card-body table-responsive dashboard-table-wrap">
+                            <table class="table" id="socDPISeverityTable">
+                                <thead><tr><th>Severity</th><th>Hits</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="soc-grid" data-dashboard-section="dashboard-geo">
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-skull-crossbones"></i><h3>Known Bad IOCs</h3></div>
+                        <div class="card-body table-responsive dashboard-table-wrap">
+                            <table class="table" id="socIOCTable">
+                                <thead><tr><th>IOC</th><th>Threat</th><th>Country</th><th>Blocked</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-earth-americas"></i><h3>GeoIP Attack Map (Realtime)</h3></div>
+                        <div class="card-body">
+                            <div id="socGeoMap" class="geo-map-canvas"></div>
+                        </div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-location-dot"></i><h3>Geo Threat Hotspots</h3></div>
+                        <div class="card-body table-responsive dashboard-table-wrap">
+                            <table class="table" id="socGeoTable">
+                                <thead><tr><th>Country</th><th>Hits</th><th>Top Threat</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-diagram-project"></i><h3>MITRE ATT&CK Breakdown</h3></div>
+                        <div class="card-body"><canvas id="chartMitreBreakdown"></canvas></div>
+                    </div>
+                    <div class="card soc-card">
+                        <div class="card-header"><i class="fa-solid fa-lightbulb"></i><h3>Recommendations</h3></div>
+                        <div class="card-body">
+                            <ul id="socRecommendations" class="warning-list"></ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
             <!-- System Info Banner -->
             <div class="system-banner" id="systemBanner" data-dashboard-section="dashboard-system">

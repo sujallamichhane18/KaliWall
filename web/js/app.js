@@ -6,8 +6,17 @@
 
     const API = "/api/v1";
     var bandwidthChart = null; // Hoisted for theme access
+    var socFirewallFlowChart = null;
+    var socDPIProtocolChart = null;
+    var socMitreChart = null;
     var firewallEventSource = null;
+    var geoAttackEventSource = null;
+    var geoMap = null;
+    var geoLayer = null;
+    var geoMarkers = [];
+    var geoCountryAgg = {};
     var maxEventRows = 120;
+    var maxGeoMarkers = 450;
     var peerHostMap = {};
     var dpiRunning = false;
     const SIDEBAR_WIDTH_KEY = "kaliwall_sidebar_width";
@@ -32,6 +41,7 @@
         autoRefreshSec: 10,
     };
     var dashboardAutoRefreshTimer = null;
+    var socFlowHistory = [];
 
     // ---------- Theme Management ----------
     const themeToggle = document.getElementById("themeToggle");
@@ -157,6 +167,7 @@
                 loadAnalytics();
                 startBandwidthStream();
                 startDashboardAutoRefresh();
+                loadSOCDashboard();
                 break;
             case "rules":
                 loadRules();
@@ -183,6 +194,7 @@
         }
         if (page !== "dashboard") stopBandwidthStream();
         if (page !== "dashboard") stopFirewallEventStream();
+        if (page !== "dashboard") stopGeoAttackStream();
     }
 
     async function apiFetch(endpoint) {
@@ -309,6 +321,8 @@
         if (!res.success) return;
         const d = res.data;
 
+        updateSOCFlowChart(d.allowed_today || 0, d.blocked_today || 0);
+
         // Firewall stat cards
         document.getElementById("statTotalRules").textContent = d.total_rules;
         document.getElementById("statActiveRules").textContent = d.active_rules;
@@ -339,6 +353,452 @@
         // Network totals
         document.getElementById("netRxValue").textContent = formatBytes(d.net_rx_bytes || 0);
         document.getElementById("netTxValue").textContent = formatBytes(d.net_tx_bytes || 0);
+    }
+
+    async function loadSOCDashboard() {
+        await Promise.all([
+            loadSOCOverview(),
+            loadSOCConnections(),
+            loadSOCPortProtocolStats(),
+            loadSOCAlerts(),
+            loadSOCDPIRulesAndSignatures(),
+            loadSOCGeoAttacks(),
+            loadSOCThreatIntel(),
+        ]);
+        startGeoAttackStream();
+    }
+
+    async function loadSOCOverview() {
+        const [statsRes, dpiRes, threatRes] = await Promise.all([
+            apiFetch("/stats"),
+            apiFetch("/dpi/status"),
+            apiFetch("/threat/apikey"),
+        ]);
+
+        if (statsRes.success) {
+            const s = statsRes.data || {};
+            setText("socFwState", (s.engine_live_mode ? "LIVE" : "MEMORY") + " / " + (s.firewall_engine || "memory").toUpperCase());
+            const packetsRate = Math.max(0, Math.floor(((s.net_rx_bytes || 0) + (s.net_tx_bytes || 0)) / 1024));
+            setText("socPacketsRate", packetsRate);
+        }
+
+        if (dpiRes.success) {
+            const d = dpiRes.data || {};
+            setText("socDpiState", d.running ? "RUNNING" : "OFF");
+            setText("socEventsRate", d.packets_seen ? Math.floor((d.packets_seen || 0) / Math.max((d.uptime_sec || 1), 1)) : 0);
+        } else {
+            setText("socDpiState", "UNAVAILABLE");
+            setText("socEventsRate", 0);
+        }
+
+        if (threatRes.success) {
+            const t = threatRes.data || {};
+            setText("socTiFreshness", t.configured ? "configured" : "not configured");
+        }
+    }
+
+    async function loadSOCConnections() {
+        const res = await apiFetch("/connections");
+        if (!res.success) return;
+        const tbody = document.querySelector("#socConnectionsTable tbody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        (res.data || []).slice(0, 12).forEach(function (c) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td>" + escapeHtml(c.protocol) + "</td>" +
+                "<td>" + escapeHtml(c.local_ip) + ":" + escapeHtml(c.local_port) + "</td>" +
+                "<td>" + escapeHtml(c.remote_ip) + ":" + escapeHtml(c.remote_port) + "</td>" +
+                "<td>" + stateBadge(c.state) + "</td>";
+            tbody.appendChild(tr);
+        });
+    }
+
+    async function loadSOCPortProtocolStats() {
+        const res = await apiFetch("/traffic/visibility?limit=1200");
+        if (!res.success) return;
+        const data = res.data || {};
+        const tbody = document.querySelector("#socProtocolPortTable tbody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+
+        (data.top_protocols || []).slice(0, 6).forEach(function (p) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = "<td>Protocol</td><td>" + escapeHtml(p.name) + "</td><td>" + (p.count || 0) + "</td>";
+            tbody.appendChild(tr);
+        });
+        (data.top_destination_ports || []).slice(0, 6).forEach(function (p) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = "<td>Port</td><td>" + escapeHtml(p.name) + "</td><td>" + (p.count || 0) + "</td>";
+            tbody.appendChild(tr);
+        });
+
+        renderSOCProtocolChart(data.top_protocols || []);
+    }
+
+    async function loadSOCAlerts() {
+        const res = await apiFetch("/events?limit=80");
+        if (!res.success) return;
+        const rows = res.data || [];
+        const tbody = document.querySelector("#socAlertsTable tbody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+
+        var sev = { critical: 0, high: 0, medium: 0, low: 0 };
+        rows.slice(0, 20).forEach(function (ev) {
+            const s = mapSeverity(ev);
+            sev[s] = (sev[s] || 0) + 1;
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td>" + formatTime(ev.timestamp) + "</td>" +
+                "<td>" + severityBadge(s) + "</td>" +
+                "<td>" + eventTypeBadge(ev.event_type || "event") + "</td>" +
+                "<td>" + actionBadge(ev.action || "-") + "</td>" +
+                "<td>" + escapeHtml(ev.src_ip || "-") + "</td>" +
+                "<td>" + escapeHtml((ev.detail || "-").slice(0, 80)) + "</td>";
+            tbody.appendChild(tr);
+        });
+
+        setText("socSeverityMix", (sev.critical || 0) + " / " + (sev.high || 0) + " / " + (sev.medium || 0) + " / " + (sev.low || 0));
+        renderSOCMitre(rows);
+    }
+
+    async function loadSOCDPIRulesAndSignatures() {
+        const res = await apiFetch("/logs?limit=400");
+        if (!res.success) return;
+        const logs = (res.data || []).filter(isDPILogEntry);
+
+        const ruleHits = {};
+        const sigRows = [];
+        const severityHits = { critical: 0, high: 0, medium: 0, low: 0 };
+
+        logs.forEach(function (entry) {
+            const detail = String(entry.detail || "");
+            const rule = extractTag(detail, "rule") || "unknown";
+            const action = (entry.action || "ALLOW").toUpperCase();
+            if (!ruleHits[rule]) ruleHits[rule] = { hits: 0, action: action, severity: mapSeverityFromAction(action) };
+            ruleHits[rule].hits++;
+            severityHits[ruleHits[rule].severity]++;
+
+            if (sigRows.length < 20) {
+                sigRows.push({
+                    sig: sanitizeSignature(detail),
+                    proto: entry.protocol || "-",
+                    pair: (entry.src_ip || "-") + " -> " + (entry.dst_ip || "-"),
+                    conf: action === "BLOCK" ? "0.95" : action === "LOG" ? "0.72" : "0.60",
+                });
+            }
+        });
+
+        const topRules = Object.keys(ruleHits)
+            .map(function (k) { return { name: k, hits: ruleHits[k].hits, action: ruleHits[k].action, severity: ruleHits[k].severity }; })
+            .sort(function (a, b) { return b.hits - a.hits; })
+            .slice(0, 12);
+
+        const rulesBody = document.querySelector("#socDPIRulesTable tbody");
+        if (rulesBody) {
+            rulesBody.innerHTML = "";
+            topRules.forEach(function (r) {
+                const tr = document.createElement("tr");
+                tr.innerHTML =
+                    "<td>" + escapeHtml(r.name) + "</td>" +
+                    "<td>" + r.hits + "</td>" +
+                    "<td>" + actionBadge(r.action) + "</td>" +
+                    "<td>" + severityBadge(r.severity) + "</td>";
+                rulesBody.appendChild(tr);
+            });
+        }
+
+        const sigBody = document.querySelector("#socDPISignaturesTable tbody");
+        if (sigBody) {
+            sigBody.innerHTML = "";
+            sigRows.forEach(function (r) {
+                const tr = document.createElement("tr");
+                tr.innerHTML =
+                    "<td>" + escapeHtml(r.sig) + "</td>" +
+                    "<td>" + escapeHtml(r.proto) + "</td>" +
+                    "<td>" + escapeHtml(r.pair) + "</td>" +
+                    "<td>" + escapeHtml(r.conf) + "</td>";
+                sigBody.appendChild(tr);
+            });
+        }
+
+        const sevBody = document.querySelector("#socDPISeverityTable tbody");
+        if (sevBody) {
+            sevBody.innerHTML = "";
+            ["critical", "high", "medium", "low"].forEach(function (k) {
+                const tr = document.createElement("tr");
+                tr.innerHTML = "<td>" + severityBadge(k) + "</td><td>" + (severityHits[k] || 0) + "</td>";
+                sevBody.appendChild(tr);
+            });
+        }
+    }
+
+    async function loadSOCThreatIntel() {
+        const res = await apiFetch("/threat/cache");
+        if (!res.success) return;
+        const items = res.data || [];
+
+        const iocBody = document.querySelector("#socIOCTable tbody");
+        if (iocBody) {
+            iocBody.innerHTML = "";
+            items.slice(0, 15).forEach(function (i) {
+                const tr = document.createElement("tr");
+                tr.innerHTML =
+                    "<td>" + escapeHtml(i.ip || "-") + "</td>" +
+                    "<td>" + threatBadge({ threat_level: i.threat_level || "unknown" }) + "</td>" +
+                    "<td>" + escapeHtml(i.country || "-") + "</td>" +
+                    "<td>" + (i.is_blocked ? enabledBadge(true) : enabledBadge(false)) + "</td>";
+                iocBody.appendChild(tr);
+            });
+        }
+
+        renderSOCRecommendations(items);
+    }
+
+    async function loadSOCGeoAttacks() {
+        initGeoMap();
+        geoCountryAgg = {};
+        const res = await apiFetch("/geo/attacks?limit=300");
+        clearGeoMarkers();
+        if (!res.success) {
+            renderSOCGeoTable();
+            return;
+        }
+        (res.data || []).forEach(function (point) {
+            ingestGeoPoint(point, false);
+        });
+        renderSOCGeoTable();
+    }
+
+    function startGeoAttackStream() {
+        stopGeoAttackStream();
+        geoAttackEventSource = new EventSource(API + "/geo/stream");
+        geoAttackEventSource.addEventListener("geo-attack", function (e) {
+            try {
+                var point = JSON.parse(e.data);
+                ingestGeoPoint(point, true);
+                renderSOCGeoTable();
+            } catch (_) {}
+        });
+    }
+
+    function stopGeoAttackStream() {
+        if (geoAttackEventSource) {
+            geoAttackEventSource.close();
+            geoAttackEventSource = null;
+        }
+    }
+
+    function initGeoMap() {
+        if (geoMap || !window.L) return;
+        var canvas = document.getElementById("socGeoMap");
+        if (!canvas) return;
+        geoMap = L.map("socGeoMap", { zoomControl: true, worldCopyJump: true }).setView([20, 0], 2);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            maxZoom: 18,
+            attribution: "&copy; OpenStreetMap contributors",
+        }).addTo(geoMap);
+        geoLayer = L.layerGroup().addTo(geoMap);
+    }
+
+    function clearGeoMarkers() {
+        geoMarkers = [];
+        if (geoLayer) geoLayer.clearLayers();
+    }
+
+    function ingestGeoPoint(point, keepView) {
+        if (!point || !point.source) return;
+        initGeoMap();
+        var src = point.source || {};
+        var lat = Number(src.latitude || 0);
+        var lon = Number(src.longitude || 0);
+        if (!isFinite(lat) || !isFinite(lon) || (lat === 0 && lon === 0)) return;
+
+        var sev = mapSeverity(point);
+        var country = src.country || "Unknown";
+        if (!geoCountryAgg[country]) geoCountryAgg[country] = { hits: 0, threat: {} };
+        geoCountryAgg[country].hits++;
+        geoCountryAgg[country].threat[sev] = (geoCountryAgg[country].threat[sev] || 0) + 1;
+
+        if (!geoLayer || !window.L) return;
+        var marker = L.circleMarker([lat, lon], {
+            radius: sev === "critical" ? 8 : sev === "high" ? 7 : 6,
+            color: geoSeverityColor(sev),
+            fillColor: geoSeverityColor(sev),
+            fillOpacity: 0.55,
+            weight: 1,
+        });
+        var target = point.target || {};
+        marker.bindPopup(
+            "<strong>" + escapeHtml(country) + "</strong><br>" +
+            "IP: " + escapeHtml(src.ip || "-") + "<br>" +
+            "Action: " + escapeHtml((point.action || "-").toUpperCase()) + "<br>" +
+            "Severity: " + escapeHtml(sev) + "<br>" +
+            "Target: " + escapeHtml(target.ip || "-")
+        );
+        marker.addTo(geoLayer);
+        geoMarkers.push(marker);
+
+        while (geoMarkers.length > maxGeoMarkers) {
+            var old = geoMarkers.shift();
+            geoLayer.removeLayer(old);
+        }
+
+        if (!keepView && geoMarkers.length === 1) {
+            geoMap.setView([lat, lon], 3);
+        }
+    }
+
+    function renderSOCGeoTable() {
+        const geoBody = document.querySelector("#socGeoTable tbody");
+        if (!geoBody) return;
+        geoBody.innerHTML = "";
+        var countries = Object.keys(geoCountryAgg);
+        if (countries.length === 0) {
+            geoBody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#9ca3af">No geo attack data yet</td></tr>';
+            return;
+        }
+        countries
+            .sort(function (a, b) { return geoCountryAgg[b].hits - geoCountryAgg[a].hits; })
+            .slice(0, 10)
+            .forEach(function (c) {
+                var levels = geoCountryAgg[c].threat || {};
+                var topThreat = Object.keys(levels).sort(function (a, b) { return (levels[b] || 0) - (levels[a] || 0); })[0] || "low";
+                const tr = document.createElement("tr");
+                tr.innerHTML = "<td>" + escapeHtml(c) + "</td><td>" + (geoCountryAgg[c].hits || 0) + "</td><td>" + severityBadge(topThreat) + "</td>";
+                geoBody.appendChild(tr);
+            });
+    }
+
+    function geoSeverityColor(sev) {
+        if (sev === "critical") return "#ef4444";
+        if (sev === "high") return "#f97316";
+        if (sev === "medium") return "#f59e0b";
+        return "#22c55e";
+    }
+
+    function renderSOCRecommendations(items) {
+        const list = document.getElementById("socRecommendations");
+        if (!list) return;
+        list.innerHTML = "";
+
+        const blocked = items.filter(function (i) { return !!i.is_blocked; }).length;
+        const malicious = items.filter(function (i) { return (i.threat_level || "").toLowerCase() === "malicious"; }).length;
+        const recs = [];
+
+        if (malicious > 0) recs.push({ level: "critical", text: "Block all malicious IOC sources and isolate hosts with repeated contact." });
+        if (blocked < malicious) recs.push({ level: "high", text: "Enable auto-block for high-confidence threat intel matches." });
+        recs.push({ level: "medium", text: "Tighten outbound policy for script-like clients and unknown TLS fingerprints." });
+        recs.push({ level: "low", text: "Review top 10 DPI rules weekly and tune noisy LOG-only signatures." });
+
+        recs.forEach(function (r) {
+            const li = document.createElement("li");
+            li.className = "warning-item";
+            li.innerHTML = severityBadge(r.level) + " " + escapeHtml(r.text);
+            list.appendChild(li);
+        });
+    }
+
+    function updateSOCFlowChart(allowed, blocked) {
+        if (!document.getElementById("chartFirewallFlow") || !window.Chart) return;
+        socFlowHistory.push({ t: new Date().toLocaleTimeString([], { hour12: false }), a: allowed, b: blocked });
+        if (socFlowHistory.length > 24) socFlowHistory.shift();
+
+        if (!socFirewallFlowChart) {
+            const ctx = document.getElementById("chartFirewallFlow");
+            socFirewallFlowChart = new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: socFlowHistory.map(function (x) { return x.t; }),
+                    datasets: [
+                        { label: "Allowed", data: socFlowHistory.map(function (x) { return x.a; }), borderColor: "#22c55e", backgroundColor: "rgba(34,197,94,0.18)", fill: true, tension: 0.25 },
+                        { label: "Blocked", data: socFlowHistory.map(function (x) { return x.b; }), borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,0.18)", fill: true, tension: 0.25 },
+                    ],
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#93a4c5" }, grid: { color: "#1f2a44" } }, y: { ticks: { color: "#93a4c5" }, grid: { color: "#1f2a44" } } } },
+            });
+            return;
+        }
+
+        socFirewallFlowChart.data.labels = socFlowHistory.map(function (x) { return x.t; });
+        socFirewallFlowChart.data.datasets[0].data = socFlowHistory.map(function (x) { return x.a; });
+        socFirewallFlowChart.data.datasets[1].data = socFlowHistory.map(function (x) { return x.b; });
+        socFirewallFlowChart.update("none");
+    }
+
+    function renderSOCProtocolChart(protocols) {
+        if (!document.getElementById("chartDPIProtocolMix") || !window.Chart) return;
+        const labels = (protocols || []).slice(0, 6).map(function (p) { return p.name || "-"; });
+        const values = (protocols || []).slice(0, 6).map(function (p) { return p.count || 0; });
+        if (!socDPIProtocolChart) {
+            const ctx = document.getElementById("chartDPIProtocolMix");
+            socDPIProtocolChart = new Chart(ctx, {
+                type: "doughnut",
+                data: { labels: labels, datasets: [{ data: values, backgroundColor: ["#3b82f6", "#22c55e", "#eab308", "#f97316", "#ef4444", "#a78bfa"] }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: "#cbd5e1" } } } },
+            });
+            return;
+        }
+        socDPIProtocolChart.data.labels = labels;
+        socDPIProtocolChart.data.datasets[0].data = values;
+        socDPIProtocolChart.update("none");
+    }
+
+    function renderSOCMitre(events) {
+        if (!document.getElementById("chartMitreBreakdown") || !window.Chart) return;
+        const buckets = { "Initial Access": 0, Execution: 0, Discovery: 0, "Command and Control": 0, Exfiltration: 0, "Lateral Movement": 0 };
+        (events || []).forEach(function (e) {
+            const text = ((e.event_type || "") + " " + (e.detail || "")).toLowerCase();
+            if (text.indexOf("login") >= 0 || text.indexOf("sqli") >= 0) buckets["Initial Access"]++;
+            if (text.indexOf("exec") >= 0 || text.indexOf("powershell") >= 0) buckets.Execution++;
+            if (text.indexOf("scan") >= 0 || text.indexOf("dns") >= 0) buckets.Discovery++;
+            if (text.indexOf("dpi") >= 0 || text.indexOf("c2") >= 0) buckets["Command and Control"]++;
+            if (text.indexOf("exfil") >= 0 || text.indexOf("upload") >= 0) buckets.Exfiltration++;
+            if (text.indexOf("smb") >= 0 || text.indexOf("rdp") >= 0 || text.indexOf("winrm") >= 0) buckets["Lateral Movement"]++;
+        });
+        const labels = Object.keys(buckets);
+        const vals = labels.map(function (k) { return buckets[k]; });
+
+        if (!socMitreChart) {
+            const ctx = document.getElementById("chartMitreBreakdown");
+            socMitreChart = new Chart(ctx, {
+                type: "bar",
+                data: { labels: labels, datasets: [{ label: "Count", data: vals, backgroundColor: "#f59e0b" }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: "#cbd5e1" }, grid: { color: "#1f2a44" } }, y: { ticks: { color: "#cbd5e1" }, grid: { color: "#1f2a44" } } } },
+            });
+            return;
+        }
+        socMitreChart.data.labels = labels;
+        socMitreChart.data.datasets[0].data = vals;
+        socMitreChart.update("none");
+    }
+
+    function extractTag(detail, key) {
+        const m = String(detail || "").match(new RegExp(key + "=([^\\s]+)"));
+        return m ? m[1] : "";
+    }
+
+    function sanitizeSignature(detail) {
+        const d = String(detail || "");
+        if (!d) return "-";
+        const reduced = d.replace(/\b([0-9]{1,3}\.){3}[0-9]{1,3}\b/g, "x.x.x.x").replace(/[A-Za-z0-9]{24,}/g, "sig_token");
+        return reduced.slice(0, 72);
+    }
+
+    function mapSeverity(ev) {
+        const s = String((ev && ev.severity) || "").toLowerCase();
+        if (s === "critical") return "critical";
+        if (s === "warning" || s === "high") return "high";
+        if (s === "medium") return "medium";
+        return "low";
+    }
+
+    function mapSeverityFromAction(action) {
+        const a = String(action || "").toUpperCase();
+        if (a === "BLOCK" || a === "DROP") return "critical";
+        if (a === "LOG") return "medium";
+        return "low";
     }
 
     async function loadTrafficVisibility() {

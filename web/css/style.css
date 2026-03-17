@@ -357,26 +357,166 @@ body {
     display: block;
 }
 
+.soc-dashboard {
+    background: #0b1220;
+    border: 1px solid #1f2a44;
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    margin-bottom: 22px;
+    color: #cbd5e1;
+}
+
+.soc-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.soc-header h2 {
+    font-size: 1.05rem;
+    color: #f8fafc;
+}
+
+.soc-live {
+    color: #22c55e;
+    font-size: 0.82rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.soc-live i {
+    font-size: 8px;
+    animation: pulse 1.2s infinite;
+}
+
+.soc-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.soc-kpi-card {
+    border: 1px solid #243352;
+    border-radius: 10px;
+    padding: 10px;
+    background: #111a2d;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.soc-kpi-card .label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #94a3b8;
+}
+
+.soc-kpi-card .value {
+    font-family: "Consolas", "SFMono-Regular", "Menlo", monospace;
+    color: #e2e8f0;
+    font-weight: 700;
+}
+
+.soc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.soc-card {
+    margin-bottom: 0;
+    background: #0f172a;
+    border-color: #22314d;
+}
+
+.soc-card .card-header {
+    background: #131f36;
+    border-bottom-color: #22314d;
+}
+
+.soc-card .card-header h3 {
+    color: #f8fafc;
+    font-size: 0.95rem;
+}
+
+.soc-card .card-body {
+    padding: 12px;
+}
+
+.soc-card .table {
+    min-width: 520px;
+    font-family: "Consolas", "SFMono-Regular", "Menlo", monospace;
+    font-size: 0.82rem;
+}
+
+.soc-card .table th {
+    background: #101a2f;
+    color: #93c5fd;
+    border-bottom-color: #25344f;
+}
+
+.soc-card .table td {
+    border-bottom-color: #1f2a44;
+    color: #dbe7ff;
+}
+
+.soc-card .table tr:hover td {
+    background: #13203a;
+}
+
+.geo-map-canvas {
+    height: 320px;
+    width: 100%;
+    border: 1px solid #25344f;
+    border-radius: 10px;
+    overflow: hidden;
+    background: radial-gradient(circle at 30% 20%, #152544, #0b1220 65%);
+}
+
+.geo-map-canvas .leaflet-control-attribution {
+    font-size: 10px;
+}
+
 .dashboard-nav {
     position: sticky;
     top: calc(var(--topbar-height) + 10px);
     z-index: 25;
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 14px;
-    padding: 10px;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding: 8px 10px;
     border: 1px solid var(--border-color);
     border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-card) 96%, #fff 4%), var(--bg-card));
     backdrop-filter: blur(6px);
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
 }
 
 .dashboard-nav-links {
     display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 6px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+}
+
+.dashboard-nav-links .btn {
+    border: 1px solid var(--border-color);
+    background: var(--bg-body);
+    color: var(--text-secondary);
+}
+
+.dashboard-nav-links .btn:hover {
+    border-color: color-mix(in srgb, var(--color-primary) 35%, var(--border-color));
+    color: var(--color-primary-dark);
 }
 
 .dashboard-nav-controls {
@@ -386,11 +526,16 @@ body {
     flex-wrap: wrap;
     color: var(--text-secondary);
     font-size: 0.84rem;
+    margin-left: auto;
+    background: color-mix(in srgb, var(--bg-body) 70%, transparent);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 6px 10px;
 }
 
 .dashboard-nav-controls select {
     border: 1px solid var(--border-color);
-    border-radius: var(--radius);
+    border-radius: 8px;
     background: var(--bg-white);
     color: var(--text-primary);
     padding: 4px 8px;
@@ -1313,10 +1458,23 @@ body {
     .dashboard-nav-links,
     .dashboard-nav-controls {
         justify-content: flex-start;
+        margin-left: 0;
+    }
+
+    .dashboard-nav-controls {
+        border-radius: var(--radius);
+    }
+
+    .soc-grid {
+        grid-template-columns: 1fr;
     }
 
     .card-body {
         padding: 16px;
+    }
+
+    .geo-map-canvas {
+        height: 280px;
     }
 }
 
@@ -1348,5 +1506,9 @@ body {
 
     .gauge-grid {
         grid-template-columns: 1fr;
+    }
+
+    .geo-map-canvas {
+        height: 240px;
     }
 }

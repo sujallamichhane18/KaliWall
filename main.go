@@ -19,6 +19,7 @@ import (
 	"kaliwall/internal/database"
 	"kaliwall/internal/dpi/pipeline"
 	"kaliwall/internal/firewall"
+	"kaliwall/internal/geoip"
 	"kaliwall/internal/logger"
 	"kaliwall/internal/netmon"
 	"kaliwall/internal/threatintel"
@@ -43,6 +44,7 @@ func main() {
 	dpiPromisc := flag.Bool("dpi-promisc", true, "Enable promiscuous capture mode for DPI")
 	dpiBPF := flag.String("dpi-bpf", "", "Optional BPF filter for DPI capture")
 	dpiRateLimit := flag.Int("dpi-rate", 5000, "Per-source packet rate limit per second")
+	geoDBPath := flag.String("geo-db", "GeoLite2-City.mmdb", "Path to MaxMind GeoLite2 City database (.mmdb)")
 	flag.Parse()
 
 	// If --daemon, fork to background
@@ -95,6 +97,17 @@ func main() {
 	analyticsService := analytics.New(trafficLogger)
 	analyticsService.Start()
 
+	var geoSvc *geoip.Service
+	if *geoDBPath != "" {
+		if svc, err := geoip.New(*geoDBPath); err != nil {
+			log.Printf("GeoIP disabled (failed to load %s): %v", *geoDBPath, err)
+		} else {
+			geoSvc = svc
+			defer geoSvc.Close()
+			fmt.Printf("[+] GeoIP enabled with DB: %s\n", *geoDBPath)
+		}
+	}
+
 	var dpiPipe *pipeline.Pipeline
 	dpiProvider := api.NewDPIProvider(nil)
 	resolvedIface := *dpiIface
@@ -125,7 +138,7 @@ func main() {
 	}
 
 	// Initialize REST API and web server
-	handler := api.NewRouter(fw, trafficLogger, ti, analyticsService, dpiProvider)
+	handler := api.NewRouter(fw, trafficLogger, ti, analyticsService, dpiProvider, geoSvc)
 
 	// Graceful shutdown on SIGINT/SIGTERM
 	stop := make(chan os.Signal, 1)

@@ -15,6 +15,7 @@ import (
 	"kaliwall/internal/analytics"
 	"kaliwall/internal/dpi/pipeline"
 	"kaliwall/internal/firewall"
+	"kaliwall/internal/geoip"
 	"kaliwall/internal/logger"
 	"kaliwall/internal/models"
 	"kaliwall/internal/sysinfo"
@@ -82,10 +83,10 @@ func (p *DPIProvider) SetEnabled(enabled bool) error {
 }
 
 // NewRouter creates the HTTP mux with all API routes and static file serving.
-func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Service, an *analytics.Service, dpi *DPIProvider) http.Handler {
+func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Service, an *analytics.Service, dpi *DPIProvider, geo *geoip.Service) http.Handler {
 	mux := http.NewServeMux()
 
-	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi}
+	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo}
 
 	// REST API v1 endpoints
 	mux.HandleFunc("/api/v1/rules", h.handleRules)
@@ -116,6 +117,8 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/dns/refresh", h.handleDNSRefresh)
 	mux.HandleFunc("/api/v1/dpi/status", h.handleDPIStatus)
 	mux.HandleFunc("/api/v1/dpi/control", h.handleDPIControl)
+	mux.HandleFunc("/api/v1/geo/attacks", h.handleGeoAttacks)
+	mux.HandleFunc("/api/v1/geo/stream", h.handleGeoStream)
 
 	// Serve web UI from the "web" directory
 	fs := http.FileServer(http.Dir("web"))
@@ -329,6 +332,93 @@ type handlers struct {
 	threat    *threatintel.Service
 	analytics *analytics.Service
 	dpi       *DPIProvider
+	geo       *geoip.Service
+}
+
+func (h *handlers) handleGeoAttacks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if h.geo == nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "GeoIP unavailable"})
+		return
+	}
+	limit := 300
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 2000 {
+			limit = v
+		}
+	}
+	points := make([]models.GeoAttackPoint, 0, limit)
+	for _, ev := range h.logger.RecentFirewallEvents(limit) {
+		if p, ok := h.toGeoAttackPoint(ev); ok {
+			points = append(points, p)
+		}
+	}
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: points})
+}
+
+func (h *handlers) handleGeoStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if h.geo == nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "GeoIP unavailable"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	subID, ch := h.logger.SubscribeFirewallEvents()
+	defer h.logger.UnsubscribeFirewallEvents(subID)
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			point, ok := h.toGeoAttackPoint(ev)
+			if !ok {
+				continue
+			}
+			data, _ := json.Marshal(point)
+			fmt.Fprintf(w, "event: geo-attack\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
+}
+
+func (h *handlers) toGeoAttackPoint(ev models.FirewallEvent) (models.GeoAttackPoint, bool) {
+	if h.geo == nil {
+		return models.GeoAttackPoint{}, false
+	}
+	src, srcOK := h.geo.Lookup(ev.SrcIP)
+	dst, dstOK := h.geo.Lookup(ev.DstIP)
+	if !srcOK && !dstOK {
+		return models.GeoAttackPoint{}, false
+	}
+	return models.GeoAttackPoint{
+		Timestamp: ev.Timestamp,
+		EventType: ev.EventType,
+		Action:    ev.Action,
+		Severity:  ev.Severity,
+		RuleID:    ev.RuleID,
+		Detail:    ev.Detail,
+		Source:    src,
+		Target:    dst,
+	}, true
 }
 
 // ---------- Rules ----------

@@ -186,3 +186,24 @@ type APIResponse struct {
 	Message string      `json:"message,omitempty"`
 	Data    interface{} `json:"data,omitempty"`
 }
+
+// GeoLocation represents a GeoIP lookup result for visualization.
+type GeoLocation struct {
+	IP        string  `json:"ip"`
+	Country   string  `json:"country"`
+	City      string  `json:"city"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
+
+// GeoAttackPoint is an enriched firewall/DPI event with map coordinates.
+type GeoAttackPoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	EventType string    `json:"event_type"`
+	Action    string    `json:"action"`
+	Severity  string    `json:"severity"`
+	RuleID    string    `json:"rule_id"`
+	Detail    string    `json:"detail"`
+	Source    GeoLocation `json:"source"`
+	Target    GeoLocation `json:"target"`
+}
