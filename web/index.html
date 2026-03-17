@@ -292,6 +292,32 @@
                 </div>
             </div>
 
+            <div class="card" style="margin-bottom:20px" data-dashboard-section="dashboard-geo">
+                <div class="card-header">
+                    <i class="fa-solid fa-earth-americas"></i>
+                    <h3>GeoIP Live Public Traffic Sources</h3>
+                    <span class="live-indicator chart-live-dot"><i class="fa-solid fa-circle live-dot"></i> LIVE</span>
+                    <span class="badge badge-enabled" id="geoPublicCount">0 public sources</span>
+                </div>
+                <div class="card-body">
+                    <div class="dashboard-grid" style="margin-bottom:0">
+                        <div class="card" style="margin-bottom:0">
+                            <div class="card-body">
+                                <div id="geoWidgetMap" class="geo-map-canvas"></div>
+                            </div>
+                        </div>
+                        <div class="card" style="margin-bottom:0">
+                            <div class="card-body table-responsive dashboard-table-wrap">
+                                <table class="table" id="geoWidgetTable">
+                                    <thead><tr><th>Country</th><th>Public Hits</th><th>Top Severity</th></tr></thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Stat Cards -->
             <div class="stats-grid">
                 <div class="stat-card" data-page-target="rules">

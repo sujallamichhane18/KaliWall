@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
-<h1 align="center">🛡️ KaliWall</h1>
+<h1 align="center"> KaliWall</h1>
 
 <p align="center">
   <strong>Linux Firewall Management System</strong><br>

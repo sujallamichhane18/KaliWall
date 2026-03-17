@@ -406,8 +406,11 @@ func (h *handlers) toGeoAttackPoint(ev models.FirewallEvent) (models.GeoAttackPo
 	}
 	src, srcOK := h.geo.Lookup(ev.SrcIP)
 	dst, dstOK := h.geo.Lookup(ev.DstIP)
-	if !srcOK && !dstOK {
+	if !srcOK {
 		return models.GeoAttackPoint{}, false
+	}
+	if !dstOK {
+		dst = models.GeoLocation{}
 	}
 	return models.GeoAttackPoint{
 		Timestamp: ev.Timestamp,

@@ -165,6 +165,8 @@
                 startFirewallEventStream();
                 loadAnalytics();
                 startBandwidthStream();
+                loadSOCGeoAttacks();
+                startGeoAttackStream();
                 startDashboardAutoRefresh();
                 break;
             case "rules":
@@ -590,9 +592,9 @@
 
     function initGeoMap() {
         if (geoMap || !window.L) return;
-        var canvas = document.getElementById("socGeoMap");
+        var canvas = document.getElementById("geoWidgetMap") || document.getElementById("socGeoMap");
         if (!canvas) return;
-        geoMap = L.map("socGeoMap", { zoomControl: true, worldCopyJump: true }).setView([20, 0], 2);
+        geoMap = L.map(canvas.id, { zoomControl: true, worldCopyJump: true }).setView([20, 0], 2);
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
             maxZoom: 18,
             attribution: "&copy; OpenStreetMap contributors",
@@ -649,10 +651,11 @@
     }
 
     function renderSOCGeoTable() {
-        const geoBody = document.querySelector("#socGeoTable tbody");
+        const geoBody = document.querySelector("#geoWidgetTable tbody") || document.querySelector("#socGeoTable tbody");
         if (!geoBody) return;
         geoBody.innerHTML = "";
         var countries = Object.keys(geoCountryAgg);
+        setText("geoPublicCount", countries.length + " public sources");
         if (countries.length === 0) {
             geoBody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#9ca3af">No geo attack data yet</td></tr>';
             return;
