@@ -32,6 +32,7 @@ const (
 	logDir     = "logs"
 	logFile    = "logs/kaliwall.log"
 	dbFile     = "data/kaliwall.json"
+	defaultGeoDBFile = "GeoLite2-City.mmdb"
 )
 
 func main() {
@@ -44,7 +45,7 @@ func main() {
 	dpiPromisc := flag.Bool("dpi-promisc", true, "Enable promiscuous capture mode for DPI")
 	dpiBPF := flag.String("dpi-bpf", "", "Optional BPF filter for DPI capture")
 	dpiRateLimit := flag.Int("dpi-rate", 5000, "Per-source packet rate limit per second")
-	geoDBPath := flag.String("geo-db", "GeoLite2-City.mmdb", "Path to MaxMind GeoLite2 City database (.mmdb)")
+	geoDBPath := flag.String("geo-db", defaultGeoDBFile, "Path to MaxMind GeoLite2 City database (.mmdb)")
 	flag.Parse()
 
 	// If --daemon, fork to background
@@ -98,14 +99,16 @@ func main() {
 	analyticsService.Start()
 
 	var geoSvc *geoip.Service
-	if *geoDBPath != "" {
-		if svc, err := geoip.New(*geoDBPath); err != nil {
-			log.Printf("GeoIP disabled (failed to load %s): %v", *geoDBPath, err)
+	if resolvedGeoDBPath, ok := resolveGeoDBPath(*geoDBPath); ok {
+		if svc, err := geoip.New(resolvedGeoDBPath); err != nil {
+			log.Printf("GeoIP disabled (failed to load %s): %v", resolvedGeoDBPath, err)
 		} else {
 			geoSvc = svc
 			defer geoSvc.Close()
-			fmt.Printf("[+] GeoIP enabled with DB: %s\n", *geoDBPath)
+			fmt.Printf("[+] GeoIP enabled with DB: %s\n", resolvedGeoDBPath)
 		}
+	} else {
+		log.Printf("GeoIP disabled: %s not found. Set --geo-db <path> or KALIWALL_GEO_DB, or place DB in project root/data/configs.", defaultGeoDBFile)
 	}
 
 	var dpiPipe *pipeline.Pipeline
@@ -189,6 +192,52 @@ func defaultCaptureInterface() string {
 		return devs[0].Name
 	}
 	return ""
+}
+
+func resolveGeoDBPath(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	seen := make(map[string]struct{})
+	candidates := make([]string, 0, 12)
+
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		clean := filepath.Clean(p)
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		candidates = append(candidates, clean)
+	}
+
+	if envPath := strings.TrimSpace(os.Getenv("KALIWALL_GEO_DB")); envPath != "" {
+		add(envPath)
+	}
+	if raw != "" {
+		add(raw)
+	}
+
+	if raw == "" || raw == defaultGeoDBFile {
+		add(defaultGeoDBFile)
+		add(filepath.Join("data", defaultGeoDBFile))
+		add(filepath.Join("configs", defaultGeoDBFile))
+		add(filepath.Join("geoip", defaultGeoDBFile))
+		if exe, err := os.Executable(); err == nil {
+			dir := filepath.Dir(exe)
+			add(filepath.Join(dir, defaultGeoDBFile))
+			add(filepath.Join(dir, "data", defaultGeoDBFile))
+			add(filepath.Join(dir, "configs", defaultGeoDBFile))
+		}
+	}
+
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c, true
+		}
+	}
+	return "", false
 }
 
 // runDaemon forks the process into background.
