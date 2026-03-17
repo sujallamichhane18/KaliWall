@@ -82,6 +82,8 @@ func New(l *logger.TrafficLogger, db *database.Store) *Engine {
 		}
 	}
 
+	e.ensureDefaultRules()
+
 	if e.liveMode {
 		e.syncLiveConfig()
 	}
@@ -136,6 +138,116 @@ func detectAvailableBackends() []string {
 		available = append(available, engineUFW)
 	}
 	return available
+}
+
+// ensureDefaultRules seeds a safe starter policy only on first-run.
+func (e *Engine) ensureDefaultRules() {
+	e.mu.Lock()
+	if len(e.rules) > 0 {
+		e.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	e.rules = []models.Rule{
+		{
+			ID:        uuid.New().String(),
+			Chain:     "INPUT",
+			Protocol:  "all",
+			SrcIP:     "127.0.0.1",
+			DstIP:     "127.0.0.1",
+			SrcPort:   "any",
+			DstPort:   "any",
+			Action:    "ACCEPT",
+			Comment:   "Default: allow loopback inbound",
+			Enabled:   true,
+			CreatedAt: now,
+		},
+		{
+			ID:        uuid.New().String(),
+			Chain:     "OUTPUT",
+			Protocol:  "all",
+			SrcIP:     "127.0.0.1",
+			DstIP:     "127.0.0.1",
+			SrcPort:   "any",
+			DstPort:   "any",
+			Action:    "ACCEPT",
+			Comment:   "Default: allow loopback outbound",
+			Enabled:   true,
+			CreatedAt: now,
+		},
+		{
+			ID:        uuid.New().String(),
+			Chain:     "OUTPUT",
+			Protocol:  "udp",
+			SrcIP:     "any",
+			DstIP:     "any",
+			SrcPort:   "any",
+			DstPort:   "53",
+			Action:    "ACCEPT",
+			Comment:   "Default: allow DNS over UDP",
+			Enabled:   true,
+			CreatedAt: now,
+		},
+		{
+			ID:        uuid.New().String(),
+			Chain:     "OUTPUT",
+			Protocol:  "tcp",
+			SrcIP:     "any",
+			DstIP:     "any",
+			SrcPort:   "any",
+			DstPort:   "53",
+			Action:    "ACCEPT",
+			Comment:   "Default: allow DNS over TCP",
+			Enabled:   true,
+			CreatedAt: now,
+		},
+		{
+			ID:        uuid.New().String(),
+			Chain:     "OUTPUT",
+			Protocol:  "tcp",
+			SrcIP:     "any",
+			DstIP:     "any",
+			SrcPort:   "any",
+			DstPort:   "80",
+			Action:    "ACCEPT",
+			Comment:   "Default: allow HTTP outbound",
+			Enabled:   true,
+			CreatedAt: now,
+		},
+		{
+			ID:        uuid.New().String(),
+			Chain:     "OUTPUT",
+			Protocol:  "tcp",
+			SrcIP:     "any",
+			DstIP:     "any",
+			SrcPort:   "any",
+			DstPort:   "443",
+			Action:    "ACCEPT",
+			Comment:   "Default: allow HTTPS outbound",
+			Enabled:   true,
+			CreatedAt: now,
+		},
+		{
+			ID:        uuid.New().String(),
+			Chain:     "INPUT",
+			Protocol:  "tcp",
+			SrcIP:     "any",
+			DstIP:     "any",
+			SrcPort:   "any",
+			DstPort:   "22",
+			Action:    "ACCEPT",
+			Comment:   "Default (optional): allow SSH inbound",
+			Enabled:   false,
+			CreatedAt: now,
+		},
+	}
+	rulesCount := len(e.rules)
+	e.mu.Unlock()
+
+	if e.db != nil {
+		e.db.SaveRules(e.ListRules())
+	}
+	e.logger.Log("CONFIG", "-", "-", "-", fmt.Sprintf("Seeded %d default firewall rules", rulesCount))
 }
 
 // EngineInfo returns current firewall backend status for API/UI visibility.
