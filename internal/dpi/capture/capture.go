@@ -59,7 +59,7 @@ func (c *PcapCapturer) Start(ctx context.Context) error {
 	c.handle = h
 	if c.cfg.BPF != "" {
 		if err := c.handle.SetBPFFilter(c.cfg.BPF); err != nil {
-			_ = c.handle.Close()
+			c.handle.Close()
 			return fmt.Errorf("bpf filter failed: %w", err)
 		}
 	}
