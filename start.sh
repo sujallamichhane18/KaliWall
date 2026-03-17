@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # KaliWall start script
 # Usage:
-#   ./start.sh                 # start in foreground
+#   ./start.sh                 # start in background (default)
+#   ./start.sh --foreground    # start in foreground
 #   ./start.sh --daemon        # start in background
 #   ./start.sh --stop          # stop daemon started by this script
 #   ./start.sh --status        # show daemon/service status
@@ -36,6 +37,7 @@ usage() {
 Usage: ./start.sh [option]
 
 Options:
+    --foreground    Start in foreground (interactive)
   --daemon        Start in background and write PID to ${PID_FILE}
   --stop          Stop background process from ${PID_FILE}
   --status        Show daemon and systemd status
@@ -69,6 +71,12 @@ fi
 mkdir -p logs data
 
 case "${1:-}" in
+    --foreground)
+        echo -e "${GREEN}[+] Starting KaliWall in foreground...${NC}"
+        echo -e "${GREEN}[+] Web UI: http://localhost:8080${NC}"
+        echo -e "${YELLOW}[!] Run with sudo for live firewall integration${NC}"
+        ./kaliwall "${DPI_ARGS[@]}"
+        ;;
     --daemon)
         if [[ -f "$PID_FILE" ]]; then
             OLD_PID=$(cat "$PID_FILE" 2>/dev/null || true)
@@ -152,10 +160,25 @@ case "${1:-}" in
         journalctl -u kaliwall -n 120 --no-pager
         ;;
     "")
-        echo -e "${GREEN}[+] Starting KaliWall...${NC}"
+        if [[ -f "$PID_FILE" ]]; then
+            OLD_PID=$(cat "$PID_FILE" 2>/dev/null || true)
+            if [[ -n "${OLD_PID}" ]] && is_running_pid "$OLD_PID"; then
+                echo -e "${YELLOW}[!] KaliWall already running with PID ${OLD_PID}${NC}"
+                echo "Made with ❤️ by Sujal Lamichhane"
+                exit 0
+            fi
+            rm -f "$PID_FILE"
+        fi
+        rotate_log_if_needed
+        echo -e "${GREEN}[+] Starting KaliWall in daemon mode (default)...${NC}"
+        nohup ./kaliwall "${DPI_ARGS[@]}" > "$LOG_FILE" 2>&1 &
+        DAEMON_PID=$!
+        echo "$DAEMON_PID" > "$PID_FILE"
+        echo -e "${GREEN}[+] KaliWall started (PID: ${DAEMON_PID})${NC}"
         echo -e "${GREEN}[+] Web UI: http://localhost:8080${NC}"
-        echo -e "${YELLOW}[!] Run with sudo for live firewall integration${NC}"
-        ./kaliwall "${DPI_ARGS[@]}"
+        echo -e "${GREEN}[+] Logs:   ./start.sh --logs${NC}"
+        echo -e "${GREEN}[+] Follow: ./start.sh --logs-follow${NC}"
+        echo -e "${YELLOW}[!] Stop:   ./start.sh --stop${NC}"
         ;;
     *)
         usage
