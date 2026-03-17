@@ -522,8 +522,12 @@ body {
 /* ---------- Dashboard Grid ---------- */
 .dashboard-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
     gap: 24px;
+}
+
+.dashboard-grid > * {
+    min-width: 0;
 }
 
 /* ---------- Cards ---------- */
@@ -686,6 +690,16 @@ body {
     min-width: 720px;
     border-collapse: collapse;
     font-size: 0.95rem;
+}
+
+.dashboard-table-wrap {
+    overflow-x: auto;
+    width: 100%;
+    -webkit-overflow-scrolling: touch;
+}
+
+.dashboard-table-wrap .table {
+    min-width: 560px;
 }
 
 .table th {
@@ -1254,6 +1268,10 @@ body {
 @media (max-width: 640px) {
     .table {
         min-width: 640px;
+    }
+
+    .dashboard-table-wrap .table {
+        min-width: 480px;
     }
 
     .system-banner {
