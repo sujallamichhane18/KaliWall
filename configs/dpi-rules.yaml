@@ -50,12 +50,12 @@
 
 - id: payload-auth-basic-log
   type: payload
-  pattern: authorization: basic
+  pattern: 'authorization: basic'
   action: LOG
 
 - id: payload-auth-bearer-log
   type: payload
-  pattern: authorization: bearer
+  pattern: 'authorization: bearer'
   action: LOG
 
 - id: payload-aws-key-leak
@@ -471,7 +471,7 @@
 
 - id: RULE-216
   type: payload
-  pattern: Content-Length: [1-9][0-9]{6,}
+  pattern: 'Content-Length: [1-9][0-9]{6,}'
   regex: true
   action: LOG
 
