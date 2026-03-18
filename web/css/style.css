@@ -641,6 +641,38 @@ body {
     gap: 26px;
 }
 
+#page-dashboard {
+    display: flex;
+    flex-direction: column;
+}
+
+#page-dashboard > * {
+    order: 30;
+}
+
+#dashboardNav { order: 1; }
+#systemBanner { order: 2; }
+#resourcesSection { order: 3; }
+#interfacesSection { order: 4; }
+#statsSection { order: 5; }
+#dpiMonitorSection { order: 12; }
+#visibilitySection { order: 13; }
+#visibilityBrandSection { order: 14; }
+#geoSection { order: 15; }
+#page-dashboard [data-dashboard-section="dashboard-charts"] { order: 16; }
+#page-dashboard [data-dashboard-section="dashboard-events"] { order: 17; }
+#socDashboard { order: 28; }
+
+#dpiMonitorSection .card-header,
+#resourcesSection .card-header,
+#interfacesSection .card-header {
+    background: linear-gradient(180deg, #ffffff, #f8fafc);
+}
+
+#dpiMonitorSection {
+    border: 1px solid color-mix(in srgb, var(--border-color) 75%, #9aa4b2 25%);
+}
+
 .page-toolbar {
     display: flex;
     justify-content: space-between;

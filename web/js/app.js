@@ -971,8 +971,6 @@
                 ifaceIP = stats.top_src_ips[0].ip || "-";
             }
             setText("dpiIfaceIPBadge", "iface ip: " + ifaceIP);
-
-            renderDPIQuickProtocolChart(stats);
         }
 
         await loadDPIAlertRows();
@@ -1591,13 +1589,19 @@
     }
 
     async function exportLogs(format) {
-        const res = await apiFetch("/logs?limit=2000");
-        if (!res.success) {
-            toast(res.message || "Failed to export logs", "error");
+        let rows = [];
+        const res = await apiFetch("/logs?limit=1000");
+        if (res.success && Array.isArray(res.data)) {
+            rows = res.data;
+        }
+        if (!rows || rows.length === 0) {
+            rows = collectLogRowsFromTable();
+        }
+        if (!rows || rows.length === 0) {
+            toast("No logs available to export", "error");
             return;
         }
 
-        const rows = res.data || [];
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         if (format === "json") {
             downloadTextFile("kaliwall-logs-" + stamp + ".json", JSON.stringify(rows, null, 2), "application/json;charset=utf-8");
@@ -1618,6 +1622,24 @@
         });
         downloadTextFile("kaliwall-logs-" + stamp + ".csv", csv.join("\n"), "text/csv;charset=utf-8");
         toast("Logs exported as CSV", "success");
+    }
+
+    function collectLogRowsFromTable() {
+        var rows = [];
+        var tableRows = document.querySelectorAll("#logsTable tbody tr");
+        tableRows.forEach(function (tr) {
+            var cells = tr.querySelectorAll("td");
+            if (!cells || cells.length < 6) return;
+            rows.push({
+                timestamp: cells[0].textContent.trim(),
+                action: cells[1].textContent.trim(),
+                src_ip: cells[2].textContent.trim(),
+                dst_ip: cells[3].textContent.trim(),
+                protocol: cells[4].textContent.trim(),
+                detail: cells[5].textContent.trim(),
+            });
+        });
+        return rows;
     }
 
     function csvCell(value) {
