@@ -58,6 +58,9 @@ func main() {
 	maliciousDomainsPath := flag.String("malicious-domains", defaultMaliciousDomainsFile, "Path to malicious domains list file")
 	proxyBlockedLogPath := flag.String("http-proxy-blocklog", proxyBlockLogFile, "JSONL path for blocked HTTP requests")
 	proxyReloadInterval := flag.Duration("http-proxy-reload-interval", 10*time.Second, "Malicious domain list auto-reload interval")
+	proxyEscalationEnable := flag.Bool("http-proxy-escalation", true, "Enable automatic source-IP blocking when VT malicious score exceeds threshold")
+	proxyEscalationThreshold := flag.Int("http-proxy-escalation-threshold", 5, "VT malicious detections threshold for auto-escalation")
+	proxyEscalationPrivate := flag.Bool("http-proxy-escalation-private-ip", false, "Allow auto-escalation to block private/local attacker IPs")
 	flag.Parse()
 	_ = dpiRules
 	_ = dpiRateLimit
@@ -174,7 +177,11 @@ func main() {
 		}
 		defer blockedEventLogger.Close()
 
-		httpProxy = proxy.NewFirewallProxy(domainBlocklist, blockedEventLogger, trafficLogger, ti)
+		httpProxy = proxy.NewFirewallProxy(domainBlocklist, blockedEventLogger, trafficLogger, ti, fw, proxy.EscalationConfig{
+			Enabled:              *proxyEscalationEnable,
+			VTMaliciousThreshold: *proxyEscalationThreshold,
+			AllowPrivateIPBlock:  *proxyEscalationPrivate,
+		})
 		for _, entry := range fw.ListWebsiteBlocks() {
 			if strings.TrimSpace(entry.Domain) == "" {
 				continue
@@ -201,6 +208,7 @@ func main() {
 			fmt.Printf("[+] HTTP proxy:      http://localhost%s\n", *httpProxyAddr)
 			fmt.Printf("[+] Malicious list:  %s\n", *maliciousDomainsPath)
 			fmt.Printf("[+] Proxy block log: %s\n", *proxyBlockedLogPath)
+			fmt.Printf("[+] VT escalation:   enabled=%t threshold=%d private_ip=%t\n", *proxyEscalationEnable, *proxyEscalationThreshold, *proxyEscalationPrivate)
 		}
 		fmt.Println("[+] Press Ctrl+C to stop the daemon.\n")
 

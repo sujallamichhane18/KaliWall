@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,10 +18,34 @@ import (
 	"github.com/google/uuid"
 
 	"kaliwall/internal/logger"
+	"kaliwall/internal/models"
 	"kaliwall/internal/threatintel"
 )
 
 const blockReasonMaliciousDomain = "Malicious Domain"
+
+// EscalationConfig controls automatic source-IP blocking when VT score is high.
+type EscalationConfig struct {
+	Enabled                 bool
+	VTMaliciousThreshold    int
+	AllowPrivateIPBlock     bool
+}
+
+// EscalationResult describes whether auto-escalation was triggered.
+type EscalationResult struct {
+	Enabled     bool   `json:"enabled"`
+	Triggered   bool   `json:"triggered"`
+	Reason      string `json:"reason"`
+	Threshold   int    `json:"threshold"`
+	DomainScore int    `json:"domain_score"`
+	URLScore    int    `json:"url_score"`
+	AppliedIP   string `json:"applied_ip,omitempty"`
+}
+
+type sourceIPBlocker interface {
+	BlockIP(ip, reason string) (models.BlockedIP, error)
+	IsIPBlocked(ip string) bool
+}
 
 // BlockedEvent is a machine-readable blocked-request record.
 type BlockedEvent struct {
@@ -33,6 +58,7 @@ type BlockedEvent struct {
 	Path       string    `json:"path"`
 	UserAgent  string    `json:"user_agent"`
 	VirusTotal threatintel.DomainURLAssessment `json:"virustotal"`
+	Escalation EscalationResult `json:"escalation"`
 }
 
 // BlockedEventLogger appends blocked events as JSON lines.
@@ -99,16 +125,23 @@ type FirewallProxy struct {
 	events    *BlockedEventLogger
 	logger    *logger.TrafficLogger
 	threat    *threatintel.Service
+	srcBlocker sourceIPBlocker
+	escalation EscalationConfig
 	transport *http.Transport
 }
 
 // NewFirewallProxy builds a proxy handler that blocks malicious hosts.
-func NewFirewallProxy(blocklist *DomainBlocklist, eventLogger *BlockedEventLogger, tl *logger.TrafficLogger, ti *threatintel.Service) *FirewallProxy {
+func NewFirewallProxy(blocklist *DomainBlocklist, eventLogger *BlockedEventLogger, tl *logger.TrafficLogger, ti *threatintel.Service, blocker sourceIPBlocker, escalation EscalationConfig) *FirewallProxy {
+	if escalation.VTMaliciousThreshold <= 0 {
+		escalation.VTMaliciousThreshold = 5
+	}
 	return &FirewallProxy{
 		blocklist: blocklist,
 		events:    eventLogger,
 		logger:    tl,
 		threat:    ti,
+		srcBlocker: blocker,
+		escalation: escalation,
 		transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
@@ -290,6 +323,7 @@ func (p *FirewallProxy) blockRequest(w http.ResponseWriter, r *http.Request, hos
 	attacker := clientIP(r)
 	requestURL := rawRequestURL(r, host)
 	vtAssessment := threatintel.DomainURLAssessment{}
+	escalation := EscalationResult{Enabled: p.escalation.Enabled, Threshold: p.escalation.VTMaliciousThreshold}
 	if p.threat != nil {
 		if res, err := p.threat.CheckDomainAndURL(host, requestURL); err != nil {
 			vtAssessment = res
@@ -300,6 +334,7 @@ func (p *FirewallProxy) blockRequest(w http.ResponseWriter, r *http.Request, hos
 			vtAssessment = res
 		}
 	}
+	escalation = p.maybeEscalate(attacker, host, eventID, vtAssessment)
 
 	ev := BlockedEvent{
 		EventID:    eventID,
@@ -311,6 +346,7 @@ func (p *FirewallProxy) blockRequest(w http.ResponseWriter, r *http.Request, hos
 		Path:       r.URL.Path,
 		UserAgent:  r.UserAgent(),
 		VirusTotal: vtAssessment,
+		Escalation: escalation,
 	}
 	if p.events != nil {
 		_ = p.events.Log(ev)
@@ -330,6 +366,89 @@ func (p *FirewallProxy) blockRequest(w http.ResponseWriter, r *http.Request, hos
 		"VTDomain":   vtAssessment.Domain.ThreatLevel,
 		"VTURL":      vtAssessment.URL.ThreatLevel,
 	})
+}
+
+func (p *FirewallProxy) maybeEscalate(attackerIP, domain, eventID string, assessment threatintel.DomainURLAssessment) EscalationResult {
+	res := EscalationResult{Enabled: p.escalation.Enabled, Threshold: p.escalation.VTMaliciousThreshold}
+	res.DomainScore = assessment.Domain.Malicious
+	res.URLScore = assessment.URL.Malicious
+
+	if !p.escalation.Enabled {
+		res.Reason = "disabled"
+		return res
+	}
+	maxScore := res.DomainScore
+	if res.URLScore > maxScore {
+		maxScore = res.URLScore
+	}
+	if maxScore < p.escalation.VTMaliciousThreshold {
+		res.Reason = "below_threshold"
+		return res
+	}
+
+	ip := strings.TrimSpace(attackerIP)
+	if net.ParseIP(ip) == nil {
+		res.Reason = "attacker_ip_invalid"
+		return res
+	}
+	if !p.escalation.AllowPrivateIPBlock && !isPublicIP(ip) {
+		res.Reason = "attacker_ip_not_public"
+		return res
+	}
+	if p.srcBlocker == nil {
+		res.Reason = "no_source_blocker"
+		return res
+	}
+	if p.srcBlocker.IsIPBlocked(ip) {
+		res.Triggered = true
+		res.AppliedIP = ip
+		res.Reason = "already_blocked"
+		return res
+	}
+
+	reason := "Auto-escalation: VT malicious score=" + strconv.Itoa(maxScore) + " domain=" + domain + " event_id=" + eventID
+	if _, err := p.srcBlocker.BlockIP(ip, reason); err != nil {
+		res.Reason = "block_failed: " + err.Error()
+		if p.logger != nil {
+			p.logger.Log("ERROR", ip, domain, "HTTP", fmt.Sprintf("auto escalation failed event_id=%s err=%v", eventID, err))
+		}
+		return res
+	}
+
+	res.Triggered = true
+	res.AppliedIP = ip
+	res.Reason = "blocked"
+	if p.logger != nil {
+		p.logger.Log("BLOCK", ip, domain, "HTTP", fmt.Sprintf("auto escalation source block applied event_id=%s score=%d threshold=%d", eventID, maxScore, p.escalation.VTMaliciousThreshold))
+	}
+	return res
+}
+
+func isPublicIP(ipStr string) bool {
+	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	if ip == nil {
+		return false
+	}
+	privateCIDRs := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"::1/128",
+		"fe80::/10",
+		"fc00::/7",
+	}
+	for _, cidr := range privateCIDRs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func targetHost(r *http.Request) string {
