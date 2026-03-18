@@ -23,7 +23,7 @@ cd "$SCRIPT_DIR"
 PID_FILE="kaliwall.pid"
 LOG_FILE="logs/kaliwall-daemon.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
-DPI_ARGS=("--dpi" "--dpi-rules" "configs/dpi-rules.yaml")
+DPI_ARGS=("--dpi" "--dpi-rules" "configs/dpi-rules.json")
 
 if [[ "${KALIWALL_DPI:-1}" == "0" ]]; then
     DPI_ARGS=()

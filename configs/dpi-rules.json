@@ -1,0 +1,282 @@
+[
+  {
+    "id": "sql-union-select",
+    "type": "payload",
+    "pattern": "(?i)\\bunion\\s+select\\b",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "sql-tautology",
+    "type": "payload",
+    "pattern": "(?i)'\\s*or\\s*'1'='1",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "sql-time-based",
+    "type": "payload",
+    "pattern": "(?i)\\b(sleep|benchmark)\\s*\\(",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "xss-script-tag",
+    "type": "payload",
+    "pattern": "(?i)<script[^>]*>",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "xss-javascript-uri",
+    "type": "payload",
+    "pattern": "(?i)javascript:",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "xss-onerror",
+    "type": "payload",
+    "pattern": "(?i)onerror\\s*=",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "rce-shellshock",
+    "type": "payload",
+    "pattern": "\\(\\)\\s*\\{\\s*:\\s*;\\s*\\}",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "rce-log4shell",
+    "type": "payload",
+    "pattern": "(?i)\\$\\{jndi:",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "rce-cmd-injection-separators",
+    "type": "payload",
+    "pattern": "(?i)(;\\s*(wget|curl)|\\|\\s*(wget|curl)|&&\\s*(wget|curl))",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "rce-powershell-enc",
+    "type": "payload",
+    "pattern": "(?i)powershell\\s+(-enc|encodedcommand)",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "lfi-path-traversal",
+    "type": "payload",
+    "pattern": "(?i)(\\.\\./|%2e%2e%2f)",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "lfi-php-filter",
+    "type": "payload",
+    "pattern": "(?i)php://filter",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "lfi-expect-wrapper",
+    "type": "payload",
+    "pattern": "(?i)expect://",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "credential-aws-key",
+    "type": "payload",
+    "pattern": "AKIA[0-9A-Z]{16}",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "credential-private-key",
+    "type": "payload",
+    "pattern": "-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "ssrf-cloud-metadata-ip",
+    "type": "payload",
+    "pattern": "169.254.169.254",
+    "regex": false,
+    "action": "BLOCK"
+  },
+  {
+    "id": "ssrf-cloud-metadata-url",
+    "type": "http_url",
+    "pattern": "(?i)/latest/meta-data/",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "sensitive-dotenv",
+    "type": "http_url",
+    "pattern": "(?i)/\\.env",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "sensitive-git-folder",
+    "type": "http_url",
+    "pattern": "(?i)/\\.git/",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "sensitive-k8s-secrets",
+    "type": "http_url",
+    "pattern": "(?i)/var/run/secrets/kubernetes\\.io",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "webshell-upload-php",
+    "type": "payload",
+    "pattern": "(?i)filename\\s*=\\s*[^;]*\\.php",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "webshell-upload-jsp",
+    "type": "payload",
+    "pattern": "(?i)filename\\s*=\\s*[^;]*\\.jsp",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "malware-transfer-exe",
+    "type": "http_url",
+    "pattern": "(?i)\\.(exe|dll|scr|bat|ps1|vbs|js)(\\?|$)",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "suspicious-admin-path",
+    "type": "http_url",
+    "pattern": "(?i)/(admin|wp-admin|wp-login\\.php|xmlrpc\\.php)",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "scan-sqlmap",
+    "type": "payload",
+    "pattern": "(?i)sqlmap",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "scan-nikto",
+    "type": "payload",
+    "pattern": "(?i)nikto",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "scan-nmap",
+    "type": "payload",
+    "pattern": "(?i)nmap",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "dns-tunnel-dnscat",
+    "type": "payload",
+    "pattern": "(?i)dnscat",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "dns-tunnel-iodine",
+    "type": "payload",
+    "pattern": "(?i)iodine",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "dns-long-label",
+    "type": "domain",
+    "pattern": "(?i)^[a-z0-9-]{40,}\\.",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "dns-base32-label",
+    "type": "domain",
+    "pattern": "(?i)^[a-z2-7]{30,}\\.",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "dns-punycode",
+    "type": "domain",
+    "pattern": "xn--",
+    "regex": false,
+    "action": "LOG"
+  },
+  {
+    "id": "c2-teamserver",
+    "type": "sni",
+    "pattern": "(?i)teamserver",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "c2-metasploit",
+    "type": "payload",
+    "pattern": "(?i)(meterpreter|metsrv|stdapi)",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "lateral-psexec",
+    "type": "payload",
+    "pattern": "(?i)(psexesvc|remcomsvc)",
+    "regex": true,
+    "action": "BLOCK"
+  },
+  {
+    "id": "auth-bruteforce-signal",
+    "type": "payload",
+    "pattern": "(?i)(status_logon_failure|nt_status_wrong_password|krb5kdc_err_preauth_failed)",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "exfil-large-content-length",
+    "type": "payload",
+    "pattern": "(?i)content-length:\\s*[1-9][0-9]{6,}",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "exfil-archive-upload",
+    "type": "payload",
+    "pattern": "(?i)filename\\s*=\\s*[^;]*\\.(zip|7z|rar|tar|gz)",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "suspicious-auth-header-basic",
+    "type": "payload",
+    "pattern": "(?i)authorization:\\s*basic",
+    "regex": true,
+    "action": "LOG"
+  },
+  {
+    "id": "suspicious-auth-header-bearer",
+    "type": "payload",
+    "pattern": "(?i)authorization:\\s*bearer",
+    "regex": true,
+    "action": "LOG"
+  }
+]

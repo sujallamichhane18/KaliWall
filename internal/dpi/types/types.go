@@ -3,6 +3,9 @@ package types
 import (
 	"errors"
 	"time"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 )
 
 // Action describes what to do with inspected traffic.
@@ -34,6 +37,9 @@ type DecodedPacket struct {
 	Tuple     FiveTuple
 	SrcMAC    string
 	DstMAC    string
+	NetworkFlow   gopacket.Flow
+	TransportFlow gopacket.Flow
+	TCPSegment    *layers.TCP
 	TCPSeq    uint32
 	TCPAck    uint32
 	Payload   []byte
@@ -57,6 +63,7 @@ type InspectResult struct {
 	HTTPMethod     string
 	HTTPHost       string
 	HTTPURL        string
+	HTTPHeaders    map[string]string
 	DNSDomain      string
 	TLSSNI         string
 	Payload        []byte

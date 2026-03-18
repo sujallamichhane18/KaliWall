@@ -3,6 +3,7 @@ package inspect
 import (
 	"bytes"
 	"encoding/binary"
+	"sort"
 	"strings"
 
 	"kaliwall/internal/dpi/types"
@@ -42,10 +43,11 @@ func (e *Engine) Inspect(payload types.AppPayload) types.InspectResult {
 		}
 	}
 
-	if method, host, url, ok := parseHTTP(payload.Payload); ok {
+	if method, host, url, headers, ok := parseHTTP(payload.Payload); ok {
 		res.HTTPMethod = method
 		res.HTTPHost = host
 		res.HTTPURL = url
+		res.HTTPHeaders = headers
 		res.Protocol = "http"
 	}
 
@@ -59,37 +61,73 @@ func (e *Engine) Inspect(payload types.AppPayload) types.InspectResult {
 	return res
 }
 
-func parseHTTP(buf []byte) (method, host, path string, ok bool) {
+func parseHTTP(buf []byte) (method, host, path string, headers map[string]string, ok bool) {
 	lineEnd := bytes.Index(buf, []byte("\r\n"))
 	if lineEnd <= 0 {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	line := string(buf[:lineEnd])
 	parts := strings.Split(line, " ")
 	if len(parts) < 2 {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	m := parts[0]
-	if m != "GET" && m != "POST" && m != "PUT" && m != "DELETE" && m != "HEAD" && m != "OPTIONS" {
-		return "", "", "", false
+	if !isHTTPMethod(m) {
+		return "", "", "", nil, false
 	}
-	host = extractHeader(buf, "Host")
-	return m, host, parts[1], true
+	headers = extractHeaders(buf)
+	host = headers["host"]
+	return m, host, parts[1], headers, true
 }
 
-func extractHeader(buf []byte, name string) string {
-	target := []byte(strings.ToLower(name) + ":")
+func isHTTPMethod(method string) bool {
+	switch method {
+	case "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractHeaders(buf []byte) map[string]string {
+	headers := make(map[string]string)
 	lines := bytes.Split(buf, []byte("\r\n"))
-	for _, line := range lines {
-		l := bytes.ToLower(line)
-		if bytes.HasPrefix(l, target) {
-			parts := bytes.SplitN(line, []byte(":"), 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(string(parts[1]))
-			}
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		if len(line) == 0 {
+			break
+		}
+		parts := bytes.SplitN(line, []byte(":"), 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(string(parts[0])))
+		v := strings.TrimSpace(string(parts[1]))
+		if k != "" {
+			headers[k] = v
 		}
 	}
-	return ""
+	return headers
+}
+
+// HeaderSummary returns deterministic small header previews for logging/debug.
+func HeaderSummary(headers map[string]string, max int) string {
+	if len(headers) == 0 || max <= 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) > max {
+		keys = keys[:max]
+	}
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+headers[k])
+	}
+	return strings.Join(parts, ";")
 }
 
 // parseTLSSNI extracts server_name from a TLS ClientHello without decrypting traffic.

@@ -62,7 +62,7 @@
     --bg-card: #1e293b;
     --bg-sidebar: #0b1120;
     --bg-sidebar-hover: #1e293b;
-    
+
     --text-primary: #f3f4f6;
     --text-secondary: #9ca3af;
     --text-muted: #6b7280;
@@ -409,11 +409,11 @@ body {
 
 .soc-header h2 {
     font-size: 1.05rem;
-    color: #f8fafc;
+    color: var(--text-primary);
 }
 
 .soc-live {
-    color: #22c55e;
+    color: #166534;
     font-size: 0.82rem;
     display: inline-flex;
     align-items: center;
@@ -433,10 +433,10 @@ body {
 }
 
 .soc-kpi-card {
-    border: 1px solid #243352;
+    border: 1px solid var(--border-color);
     border-radius: 10px;
     padding: 10px;
-    background: #111a2d;
+    background: var(--bg-card);
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -446,12 +446,12 @@ body {
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: #94a3b8;
+    color: var(--text-secondary);
 }
 
 .soc-kpi-card .value {
     font-family: "Consolas", "SFMono-Regular", "Menlo", monospace;
-    color: #e2e8f0;
+    color: var(--text-primary);
     font-weight: 700;
 }
 
@@ -464,17 +464,17 @@ body {
 
 .soc-card {
     margin-bottom: 0;
-    background: #0f172a;
-    border-color: #22314d;
+    background: var(--bg-card);
+    border-color: var(--border-color);
 }
 
 .soc-card .card-header {
-    background: #131f36;
-    border-bottom-color: #22314d;
+    background: var(--bg-card);
+    border-bottom-color: var(--border-color);
 }
 
 .soc-card .card-header h3 {
-    color: #f8fafc;
+    color: var(--text-primary);
     font-size: 0.95rem;
 }
 
@@ -489,27 +489,66 @@ body {
 }
 
 .soc-card .table th {
-    background: #101a2f;
-    color: #93c5fd;
-    border-bottom-color: #25344f;
+    background: #f9fafb;
+    color: var(--text-secondary);
+    border-bottom-color: var(--border-color);
 }
 
 .soc-card .table td {
-    border-bottom-color: #1f2a44;
-    color: #dbe7ff;
+    border-bottom-color: var(--border-color);
+    color: var(--text-primary);
 }
 
 .soc-card .table tr:hover td {
-    background: #13203a;
+    background: #f9fafb;
 }
 
 .geo-map-canvas {
     height: 320px;
     width: 100%;
-    border: 1px solid #25344f;
+    border: 1px solid var(--border-color);
     border-radius: 10px;
     overflow: hidden;
-    background: radial-gradient(circle at 30% 20%, #152544, #0b1220 65%);
+    background: radial-gradient(circle at 35% 25%, #ffffff, #eef2f7 75%);
+}
+
+.stat-card-alert {
+    border-color: #b91c1c;
+    background: #fef2f2;
+}
+
+.stat-card-alert .stat-value {
+    color: #b91c1c;
+}
+
+.dpi-decode-panel {
+    margin-top: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 12px;
+    background: #fcfcfd;
+}
+
+.dpi-decode-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.dpi-decode-panel-head h4 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.dpi-decode-panel-head h4 i {
+    color: #b91c1c;
 }
 
 .geo-map-canvas .leaflet-control-attribution {

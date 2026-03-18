@@ -129,6 +129,7 @@
                 <div class="soc-kpi-grid">
                     <div class="soc-kpi-card"><span class="label">Firewall</span><span class="value" id="socFwState">ACTIVE</span></div>
                     <div class="soc-kpi-card"><span class="label">DPI</span><span class="value" id="socDpiState">OFF</span></div>
+                    <div class="soc-kpi-card"><span class="label">Decode Errors</span><span class="value" id="socDecodeErrors">0</span></div>
                     <div class="soc-kpi-card"><span class="label">TI Feed</span><span class="value" id="socTiFreshness">-</span></div>
                     <div class="soc-kpi-card"><span class="label">Events/sec</span><span class="value" id="socEventsRate">0</span></div>
                     <div class="soc-kpi-card"><span class="label">Packets/sec</span><span class="value" id="socPacketsRate">0</span></div>
@@ -258,7 +259,7 @@
                         <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiPacketsSeen">0</span><span class="stat-label">Packets Seen</span></div></div>
                         <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiBlockedCount">0</span><span class="stat-label">Blocked</span></div></div>
                         <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiLoggedCount">0</span><span class="stat-label">Logged</span></div></div>
-                        <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiDecodeErrors">0</span><span class="stat-label">Decode Errors</span></div></div>
+                        <div class="stat-card compact" id="dpiDecodeCard"><div class="stat-info"><span class="stat-value" id="dpiDecodeErrors">0</span><span class="stat-label">Decode Errors</span></div></div>
                     </div>
                     <div class="toolbar-actions">
                         <span class="badge badge-disabled" id="dpiIfaceBadge">iface: -</span>
@@ -266,6 +267,18 @@
                         <span class="badge badge-disabled" id="dpiUptimeBadge">uptime: 0s</span>
                         <button class="btn btn-primary" id="btnToggleDPI"><i class="fa-solid fa-power-off"></i> Turn ON DPI</button>
                         <button class="btn btn-secondary" id="btnRefreshDPIStatus"><i class="fa-solid fa-arrows-rotate"></i> Refresh DPI</button>
+                    </div>
+                    <div class="dpi-decode-panel">
+                        <div class="dpi-decode-panel-head">
+                            <h4><i class="fa-solid fa-triangle-exclamation"></i> Recent DPI Decode Errors</h4>
+                            <span class="badge badge-disabled" id="dpiDecodeLastSeen">last seen: -</span>
+                        </div>
+                        <div class="table-responsive dashboard-table-wrap">
+                            <table class="table" id="dpiDecodeErrorsTable">
+                                <thead><tr><th>Time</th><th>Source</th><th>Protocol</th><th>Reason</th></tr></thead>
+                                <tbody><tr><td colspan="4" style="text-align:center;color:#6b7280;padding:16px">No decode errors detected</td></tr></tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>

@@ -110,6 +110,37 @@
 - 🔁 Optional DPI pipeline with **runtime on/off controls**
 - ⚙️ Configurable interface, workers, BPF filter, promiscuous mode, and rate limiting
 - 📍 DPI status endpoint for **dashboard observability**
+- 🧩 TCP stream-aware L7 extraction for HTTP, DNS, and TLS metadata
+
+#### DPI Validation
+
+Start KaliWall with DPI enabled:
+
+```bash
+./kaliwall --dpi --dpi-interface eth0 --dpi-rules configs/dpi-rules.json
+```
+
+Run traffic generation tests:
+
+```bash
+curl -v http://example.com/test
+curl -vk https://google.com
+dig openai.com
+```
+
+Expected runtime verification logs include:
+
+```text
+[HTTP] GET /test Host: example.com
+[TLS] SNI: google.com
+[DNS] Query: openai.com
+```
+
+You can also confirm engine health via API:
+
+```bash
+curl -s http://localhost:8080/api/v1/dpi/status
+```
 
 <br/>
 

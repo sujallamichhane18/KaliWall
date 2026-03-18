@@ -22,6 +22,8 @@ func New(trafficLog *logger.TrafficLogger) *Engine {
 }
 
 func (e *Engine) Handle(result types.InspectResult, decision rules.Decision) {
+	e.emitVerificationLogs(result)
+
 	entry := map[string]interface{}{
 		"ts":       result.Timestamp,
 		"src_ip":   result.Tuple.SrcIP,
@@ -93,6 +95,19 @@ func (e *Engine) Handle(result types.InspectResult, decision rules.Decision) {
 				Severity:  "info",
 			})
 		}
+	}
+}
+
+func (e *Engine) emitVerificationLogs(result types.InspectResult) {
+	if result.HTTPMethod != "" {
+		host := fallback(result.HTTPHost, "-")
+		log.Printf("[HTTP] %s %s Host: %s", result.HTTPMethod, fallback(result.HTTPURL, "/"), host)
+	}
+	if result.DNSDomain != "" {
+		log.Printf("[DNS] Query: %s", result.DNSDomain)
+	}
+	if result.TLSSNI != "" {
+		log.Printf("[TLS] SNI: %s", result.TLSSNI)
 	}
 }
 

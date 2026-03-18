@@ -47,8 +47,9 @@ func (d *GopacketDecoder) Decode(packet gopacket.Packet) (*types.DecodedPacket, 
 			DstIP:    ip4.DstIP.String(),
 			Protocol: strings.ToLower(ip4.Protocol.String()),
 		},
-		SrcMAC: eth.SrcMAC.String(),
-		DstMAC: eth.DstMAC.String(),
+		SrcMAC:      eth.SrcMAC.String(),
+		DstMAC:      eth.DstMAC.String(),
+		NetworkFlow: ip4.NetworkFlow(),
 	}
 	if md := packet.Metadata(); md != nil && !md.Timestamp.IsZero() {
 		decoded.Timestamp = md.Timestamp
@@ -59,9 +60,12 @@ func (d *GopacketDecoder) Decode(packet gopacket.Packet) (*types.DecodedPacket, 
 		if !ok {
 			return nil, types.ErrMalformedPacket
 		}
+		tcpCopy := *tcp
 		decoded.Tuple.Protocol = "tcp"
 		decoded.Tuple.SrcPort = uint16(tcp.SrcPort)
 		decoded.Tuple.DstPort = uint16(tcp.DstPort)
+		decoded.TransportFlow = tcp.TransportFlow()
+		decoded.TCPSegment = &tcpCopy
 		decoded.TCPSeq = tcp.Seq
 		decoded.TCPAck = tcp.Ack
 		if len(tcp.Payload) > 0 {
@@ -78,6 +82,7 @@ func (d *GopacketDecoder) Decode(packet gopacket.Packet) (*types.DecodedPacket, 
 		decoded.Tuple.Protocol = "udp"
 		decoded.Tuple.SrcPort = uint16(udp.SrcPort)
 		decoded.Tuple.DstPort = uint16(udp.DstPort)
+		decoded.TransportFlow = udp.TransportFlow()
 		if len(udp.Payload) > 0 {
 			decoded.Payload = append([]byte(nil), udp.Payload...)
 		}

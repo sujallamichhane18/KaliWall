@@ -2,8 +2,14 @@ package reassembly
 
 import (
 	"fmt"
+	"io"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/tcpassembly"
+	"github.com/google/gopacket/tcpassembly/tcpreader"
 
 	"kaliwall/internal/dpi/types"
 )
@@ -38,6 +44,22 @@ type StreamReassembler struct {
 	flows  map[types.FiveTuple]*streamState
 	cfg    Config
 	stopCh chan struct{}
+
+	asmMu      sync.Mutex
+	streamPool *tcpassembly.StreamPool
+	assembler  *tcpassembly.Assembler
+	outputCh   chan types.AppPayload
+}
+
+type streamFactory struct {
+	reassembler *StreamReassembler
+}
+
+func (f *streamFactory) New(netFlow, transportFlow gopacket.Flow) tcpassembly.Stream {
+	reader := tcpreader.NewReaderStream()
+	tuple := tupleFromFlows(netFlow, transportFlow)
+	go f.reassembler.consumeStream(tuple, &reader)
+	return &reader
 }
 
 func New(cfg Config) *StreamReassembler {
@@ -53,11 +75,16 @@ func New(cfg Config) *StreamReassembler {
 	if cfg.CleanupInterval <= 0 {
 		cfg.CleanupInterval = 30 * time.Second
 	}
-	return &StreamReassembler{
+	r := &StreamReassembler{
 		flows:  make(map[types.FiveTuple]*streamState, 4096),
 		cfg:    cfg,
 		stopCh: make(chan struct{}),
+		outputCh: make(chan types.AppPayload, 4096),
 	}
+	factory := &streamFactory{reassembler: r}
+	r.streamPool = tcpassembly.NewStreamPool(factory)
+	r.assembler = tcpassembly.NewAssembler(r.streamPool)
+	return r
 }
 
 func (r *StreamReassembler) Start() {
@@ -88,6 +115,14 @@ func (r *StreamReassembler) Process(pkt *types.DecodedPacket) ([]types.AppPayloa
 			Reassembled: false,
 		}}, nil
 	}
+
+	if pkt.TCPSegment != nil && len(pkt.NetworkFlow.Src().Raw()) > 0 {
+		r.asmMu.Lock()
+		r.assembler.AssembleWithTimestamp(pkt.NetworkFlow, pkt.TCPSegment, pkt.Timestamp)
+		r.asmMu.Unlock()
+		return r.drainOutput(), nil
+	}
+
 	if len(pkt.Payload) == 0 {
 		return nil, nil
 	}
@@ -139,10 +174,11 @@ func (r *StreamReassembler) Process(pkt *types.DecodedPacket) ([]types.AppPayloa
 		if !ok {
 			break
 		}
+		key := st.ExpectedSeq
 		assembled = append(assembled, next...)
 		st.ExpectedSeq += uint32(len(next))
 		st.Buffered -= len(next)
-		delete(st.Pending, st.ExpectedSeq-uint32(len(next)))
+		delete(st.Pending, key)
 	}
 
 	if len(assembled) == 0 {
@@ -166,6 +202,63 @@ func (r *StreamReassembler) Process(pkt *types.DecodedPacket) ([]types.AppPayloa
 		DNSQuery:    pkt.DNSQuery,
 		Reassembled: true,
 	}}, nil
+}
+
+func (r *StreamReassembler) consumeStream(tuple types.FiveTuple, reader *tcpreader.ReaderStream) {
+	buf := make([]byte, r.cfg.MaxWindowBytes)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			payload := make([]byte, n)
+			copy(payload, buf[:n])
+			select {
+			case r.outputCh <- types.AppPayload{
+				Timestamp:   time.Now(),
+				Tuple:       tuple,
+				Payload:     payload,
+				Reassembled: true,
+			}:
+			default:
+				// Back-pressure guard under heavy load.
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			return
+		}
+	}
+}
+
+func (r *StreamReassembler) drainOutput() []types.AppPayload {
+	out := make([]types.AppPayload, 0, 8)
+	for {
+		select {
+		case p := <-r.outputCh:
+			out = append(out, p)
+		default:
+			return out
+		}
+	}
+}
+
+func tupleFromFlows(netFlow, transportFlow gopacket.Flow) types.FiveTuple {
+	var srcPort uint16
+	if n, err := strconv.Atoi(transportFlow.Src().String()); err == nil && n >= 0 && n <= 65535 {
+		srcPort = uint16(n)
+	}
+	var dstPort uint16
+	if n, err := strconv.Atoi(transportFlow.Dst().String()); err == nil && n >= 0 && n <= 65535 {
+		dstPort = uint16(n)
+	}
+	return types.FiveTuple{
+		SrcIP:    netFlow.Src().String(),
+		DstIP:    netFlow.Dst().String(),
+		SrcPort:  srcPort,
+		DstPort:  dstPort,
+		Protocol: "tcp",
+	}
 }
 
 func (r *StreamReassembler) cleanupLoop() {

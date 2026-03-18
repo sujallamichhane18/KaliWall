@@ -165,8 +165,6 @@
                 startFirewallEventStream();
                 loadAnalytics();
                 startBandwidthStream();
-                loadSOCGeoAttacks();
-                startGeoAttackStream();
                 startDashboardAutoRefresh();
                 break;
             case "rules":
@@ -362,6 +360,7 @@
             loadSOCPortProtocolStats(),
             loadSOCAlerts(),
             loadSOCDPIRulesAndSignatures(),
+            loadDPIDecodeErrorRows(),
             loadSOCGeoAttacks(),
             loadSOCThreatIntel(),
         ]);
@@ -386,9 +385,11 @@
             const d = dpiRes.data || {};
             setText("socDpiState", d.running ? "RUNNING" : "OFF");
             setText("socEventsRate", d.packets_seen ? Math.floor((d.packets_seen || 0) / Math.max((d.uptime_sec || 1), 1)) : 0);
+            setText("socDecodeErrors", d.decode_errors || 0);
         } else {
             setText("socDpiState", "UNAVAILABLE");
             setText("socEventsRate", 0);
+            setText("socDecodeErrors", 0);
         }
 
         if (threatRes.success) {
@@ -703,6 +704,7 @@
 
     function updateSOCFlowChart(allowed, blocked) {
         if (!document.getElementById("chartFirewallFlow") || !window.Chart) return;
+        const chartTheme = getChartThemeColors();
         socFlowHistory.push({ t: new Date().toLocaleTimeString([], { hour12: false }), a: allowed, b: blocked });
         if (socFlowHistory.length > 24) socFlowHistory.shift();
 
@@ -717,7 +719,7 @@
                         { label: "Blocked", data: socFlowHistory.map(function (x) { return x.b; }), borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,0.18)", fill: true, tension: 0.25 },
                     ],
                 },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#93a4c5" }, grid: { color: "#1f2a44" } }, y: { ticks: { color: "#93a4c5" }, grid: { color: "#1f2a44" } } } },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: chartTheme.textColor } } }, scales: { x: { ticks: { color: chartTheme.textColor }, grid: { color: chartTheme.gridColor } }, y: { ticks: { color: chartTheme.textColor }, grid: { color: chartTheme.gridColor } } } },
             });
             return;
         }
@@ -730,6 +732,7 @@
 
     function renderSOCProtocolChart(protocols) {
         if (!document.getElementById("chartDPIProtocolMix") || !window.Chart) return;
+        const chartTheme = getChartThemeColors();
         const labels = (protocols || []).slice(0, 6).map(function (p) { return p.name || "-"; });
         const values = (protocols || []).slice(0, 6).map(function (p) { return p.count || 0; });
         if (!socDPIProtocolChart) {
@@ -737,7 +740,7 @@
             socDPIProtocolChart = new Chart(ctx, {
                 type: "doughnut",
                 data: { labels: labels, datasets: [{ data: values, backgroundColor: ["#3b82f6", "#22c55e", "#eab308", "#f97316", "#ef4444", "#a78bfa"] }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: "#cbd5e1" } } } },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: chartTheme.textColor } } } },
             });
             return;
         }
@@ -748,6 +751,7 @@
 
     function renderSOCMitre(events) {
         if (!document.getElementById("chartMitreBreakdown") || !window.Chart) return;
+        const chartTheme = getChartThemeColors();
         const buckets = { "Initial Access": 0, Execution: 0, Discovery: 0, "Command and Control": 0, Exfiltration: 0, "Lateral Movement": 0 };
         (events || []).forEach(function (e) {
             const text = ((e.event_type || "") + " " + (e.detail || "")).toLowerCase();
@@ -766,7 +770,7 @@
             socMitreChart = new Chart(ctx, {
                 type: "bar",
                 data: { labels: labels, datasets: [{ label: "Count", data: vals, backgroundColor: "#f59e0b" }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: "#cbd5e1" }, grid: { color: "#1f2a44" } }, y: { ticks: { color: "#cbd5e1" }, grid: { color: "#1f2a44" } } } },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: chartTheme.textColor }, grid: { color: chartTheme.gridColor } }, y: { ticks: { color: chartTheme.textColor }, grid: { color: chartTheme.gridColor } } } },
             });
             return;
         }
@@ -862,7 +866,8 @@
         setText("dpiPacketsSeen", s.packets_seen || 0);
         setText("dpiBlockedCount", s.blocked || 0);
         setText("dpiLoggedCount", s.logged || 0);
-        setText("dpiDecodeErrors", s.decode_errors || 0);
+        const decodeErrors = s.decode_errors || 0;
+        setText("dpiDecodeErrors", decodeErrors);
 
         setText("dpiIfaceBadge", "iface: " + (s.interface || "-"));
         setText("dpiWorkersBadge", "workers: " + (s.workers || 0));
@@ -870,6 +875,11 @@
 
         const statusEl = document.getElementById("dpiStatusText");
         if (statusEl) statusEl.style.color = on ? "var(--color-success)" : "var(--color-danger)";
+
+        const decodeCard = document.getElementById("dpiDecodeCard");
+        if (decodeCard) {
+            decodeCard.classList.toggle("stat-card-alert", decodeErrors > 0);
+        }
 
         const btn = document.getElementById("btnToggleDPI");
         if (btn) {
@@ -884,6 +894,41 @@
         if (!res.success && res.message) {
             toast(res.message, "error");
         }
+
+        await loadDPIDecodeErrorRows();
+    }
+
+    async function loadDPIDecodeErrorRows() {
+        const tbody = document.querySelector("#dpiDecodeErrorsTable tbody");
+        if (!tbody) return;
+
+        const res = await apiFetch("/logs?limit=600");
+        if (!res.success) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#6b7280;padding:16px">Unable to load decode errors</td></tr>';
+            setText("dpiDecodeLastSeen", "last seen: -");
+            return;
+        }
+
+        const rows = (res.data || []).filter(isDPIDecodeErrorEntry).slice(0, 12);
+        tbody.innerHTML = "";
+
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#6b7280;padding:16px">No decode errors detected</td></tr>';
+            setText("dpiDecodeLastSeen", "last seen: -");
+            return;
+        }
+
+        rows.forEach(function (entry) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td>" + formatTime(entry.timestamp) + "</td>" +
+                "<td>" + escapeHtml((entry.src_ip || "-") + " -> " + (entry.dst_ip || "-")) + "</td>" +
+                "<td>" + escapeHtml(entry.protocol || "-") + "</td>" +
+                "<td>" + escapeHtml(extractDecodeErrorReason(entry.detail || "-")) + "</td>";
+            tbody.appendChild(tr);
+        });
+
+        setText("dpiDecodeLastSeen", "last seen: " + formatTime(rows[0].timestamp));
     }
 
     async function toggleDPI() {
@@ -1199,6 +1244,32 @@
         if (!entry) return false;
         var detail = String(entry.detail || "").toLowerCase();
         return detail.indexOf("dpi:") === 0;
+    }
+
+    function isDPIDecodeErrorEntry(entry) {
+        if (!entry) return false;
+        var detail = String(entry.detail || "").toLowerCase();
+        return detail.indexOf("decode error") >= 0 ||
+            detail.indexOf("decode_error") >= 0 ||
+            detail.indexOf("failed to decode") >= 0 ||
+            (detail.indexOf("dpi") >= 0 && detail.indexOf("decode") >= 0 && detail.indexOf("error") >= 0);
+    }
+
+    function extractDecodeErrorReason(detail) {
+        var text = String(detail || "").trim();
+        if (!text) return "decode error";
+        var normalized = text.replace(/^dpi:\s*/i, "");
+        var m = normalized.match(/(decode[_\s-]*error[^|;,.]*)/i);
+        if (m && m[1]) return m[1].trim();
+        if (normalized.length > 90) return normalized.slice(0, 90) + "...";
+        return normalized;
+    }
+
+    function getChartThemeColors() {
+        var styles = getComputedStyle(document.documentElement);
+        var textColor = (styles.getPropertyValue("--text-secondary") || "#4b5563").trim();
+        var gridColor = (styles.getPropertyValue("--border-color") || "#e5e7eb").trim();
+        return { textColor: textColor, gridColor: gridColor };
     }
 
     function initLogTableControls() {

@@ -41,7 +41,7 @@ func main() {
 	daemon := flag.Bool("daemon", false, "Run in background daemon mode")
 	dpiEnable := flag.Bool("dpi", false, "Enable deep packet inspection pipeline")
 	dpiIface := flag.String("dpi-interface", "", "Network interface for DPI capture (e.g. eth0)")
-	dpiRules := flag.String("dpi-rules", "configs/dpi-rules.yaml", "Path to DPI rules file (yaml/json)")
+	dpiRules := flag.String("dpi-rules", "configs/dpi-rules.json", "Path to DPI rules file (yaml/json)")
 	dpiWorkers := flag.Int("dpi-workers", 0, "Number of DPI workers (default: CPU cores)")
 	dpiPromisc := flag.Bool("dpi-promisc", true, "Enable promiscuous capture mode for DPI")
 	dpiBPF := flag.String("dpi-bpf", "", "Optional BPF filter for DPI capture")
