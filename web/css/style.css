@@ -126,41 +126,64 @@ body {
 .sidebar-header {
     display: flex;
     align-items: center;
-    padding: 8px 14px;
-    height: var(--topbar-height);
+    gap: 12px;
+    padding: 10px 14px;
+    min-height: var(--topbar-height);
     border-bottom: 1px solid var(--border-sidebar);
 }
 
+.sidebar-logo-badge {
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
+    background: radial-gradient(circle at 25% 20%, rgba(59, 130, 246, 0.2) 0%, rgba(30, 41, 59, 0.78) 55%, rgba(15, 23, 42, 0.95) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    box-shadow: 0 10px 20px rgba(2, 6, 23, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    flex-shrink: 0;
+}
+
 .sidebar-brand-logo {
-    width: 100%;
-    max-width: 220px;
-    height: 48px;
+    width: 92%;
+    height: 92%;
     object-fit: contain;
-    object-position: left center;
+    object-position: center;
     display: block;
+    filter: drop-shadow(0 2px 6px rgba(15, 23, 42, 0.55));
 }
 
-.sidebar-title {
-    font-size: 20px;
-    font-weight: 700;
-    color: #fff;
-    letter-spacing: -0.5px;
+.sidebar-brand-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
 }
 
-.sidebar-title .brand-kali {
+.sidebar-brand-name {
+    font-size: 1.42rem;
+    line-height: 1;
+    font-weight: 800;
+    letter-spacing: -0.4px;
+    white-space: nowrap;
+}
+
+.brand-kali {
     color: #ef4444;
 }
 
-.sidebar-title .brand-wall {
+.brand-wall {
     color: #ffffff;
 }
 
-.sidebar-title .brand-edition {
+.brand-edition {
     display: block;
-    font-size: 0.68rem;
-    margin-top: -3px;
-    color: #93c5fd;
-    letter-spacing: 0.6px;
+    margin-top: 4px;
+    color: #cbd5e1;
+    font-size: 0.7rem;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
     font-weight: 600;
 }
 
@@ -1496,12 +1519,23 @@ body {
 
 @media (max-width: 640px) {
     .sidebar-header {
-        padding: 8px 12px;
+        gap: 10px;
+        padding: 10px 12px;
     }
 
-    .sidebar-brand-logo {
-        max-width: 200px;
-        height: 44px;
+    .sidebar-logo-badge {
+        width: 46px;
+        height: 46px;
+        border-radius: 12px;
+    }
+
+    .sidebar-brand-name {
+        font-size: 1.24rem;
+    }
+
+    .brand-edition {
+        font-size: 0.64rem;
+        letter-spacing: 1px;
     }
 
     .table {
