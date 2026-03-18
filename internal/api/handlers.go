@@ -34,6 +34,10 @@ type dpiDetailedStatsProvider interface {
 	DetailedStats() interface{}
 }
 
+type dpiWorkersProvider interface {
+	SetWorkers(workers int) error
+}
+
 // DPIProvider provides synchronized access to an optional DPI pipeline.
 type DPIProvider struct {
 	mu       sync.RWMutex
@@ -103,6 +107,24 @@ func (p *DPIProvider) DetailedStats() (interface{}, bool) {
 	return nil, false
 }
 
+// SetWorkers updates DPI worker concurrency when provider supports it.
+func (p *DPIProvider) SetWorkers(workers int) error {
+	if p == nil {
+		return errors.New("DPI provider unavailable")
+	}
+	p.mu.RLock()
+	provider := p.provider
+	p.mu.RUnlock()
+	if provider == nil {
+		return errors.New("DPI provider unavailable")
+	}
+	ctrl, ok := provider.(dpiWorkersProvider)
+	if !ok {
+		return errors.New("DPI worker control not supported")
+	}
+	return ctrl.SetWorkers(workers)
+}
+
 // NewRouter creates the HTTP mux with all API routes and static file serving.
 func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Service, an *analytics.Service, dpi *DPIProvider, geo *geoip.Service) http.Handler {
 	mux := http.NewServeMux()
@@ -139,6 +161,7 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/dpi/status", h.handleDPIStatus)
 	mux.HandleFunc("/api/v1/dpi/stats", h.handleDPIStats)
 	mux.HandleFunc("/api/v1/dpi/control", h.handleDPIControl)
+	mux.HandleFunc("/api/v1/dpi/workers", h.handleDPIWorkers)
 	mux.HandleFunc("/api/v1/geo/attacks", h.handleGeoAttacks)
 	mux.HandleFunc("/api/v1/geo/stream", h.handleGeoStream)
 
@@ -213,6 +236,34 @@ func (h *handlers) handleDPIStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: status})
+}
+
+func (h *handlers) handleDPIWorkers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if h.dpi == nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "DPI pipeline unavailable"})
+		return
+	}
+	var body struct {
+		Workers int `json:"workers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "workers is required"})
+		return
+	}
+	if body.Workers < 1 || body.Workers > 128 {
+		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "workers must be between 1 and 128"})
+		return
+	}
+	if err := h.dpi.SetWorkers(body.Workers); err != nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	status, _ := h.dpi.Status()
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "DPI workers updated", Data: status})
 }
 
 // ---------- Firewall Engine & Visibility ----------

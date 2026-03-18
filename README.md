@@ -105,19 +105,20 @@
 
 <br/>
 
-### 🔬 DPI Pipeline
+### 🔬 DPI (Lite Module)
 
-- 🔁 Optional DPI pipeline with **runtime on/off controls**
-- ⚙️ Configurable interface, workers, BPF filter, promiscuous mode, and rate limiting
+- 🔁 Lightweight IDS/DPI module with **runtime on/off controls**
+- ⚙️ Configurable interface, workers, BPF filter, promiscuous mode
 - 📍 DPI status endpoint for **dashboard observability**
-- 🧩 TCP stream-aware L7 extraction for HTTP, DNS, and TLS metadata
+- 🧩 Stream-aware L7 extraction for HTTP, DNS, and TLS metadata
+- 🌐 L3 telemetry: IPv4/IPv6, TCP/UDP/ICMP counters, unique IPs, and top talkers
 
 #### DPI Validation
 
 Start KaliWall with DPI enabled:
 
 ```bash
-./kaliwall --dpi --dpi-interface eth0 --dpi-rules configs/dpi-rules.json
+./kaliwall --dpi --dpi-lite --dpi-interface eth0
 ```
 
 Run traffic generation tests:
@@ -161,6 +162,12 @@ Detailed protocol counters and last-seen artifacts are available at:
 ```bash
 curl -s http://localhost:8080/api/v1/dpi/stats
 ```
+
+The response includes Layer 7 detections and Layer 3 telemetry such as:
+
+- `http_detected`, `dns_detected`, `tls_detected`
+- `ipv4_packets`, `ipv6_packets`, `tcp_packets`, `udp_packets`, `icmp_packets`
+- `unique_src_ips`, `unique_dst_ips`, `top_src_ips`, `top_dst_ips`
 
 <br/>
 

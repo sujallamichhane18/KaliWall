@@ -614,6 +614,16 @@ body {
     padding: 4px 8px;
 }
 
+.dashboard-nav-controls input[type="range"] {
+    width: 130px;
+    accent-color: var(--color-primary);
+}
+
+#dashboardAutoRefreshLabel {
+    min-width: 62px;
+    text-align: center;
+}
+
 #page-dashboard.dashboard-compact .card-body {
     padding: 14px;
 }
@@ -810,6 +820,54 @@ body {
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+}
+
+.input-inline-sm {
+    min-height: 36px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    padding: 6px 10px;
+    font-size: 0.88rem;
+}
+
+.input-inline-wide {
+    min-width: 170px;
+}
+
+.dpi-status-card .stat-value {
+    font-weight: 800;
+}
+
+.dpi-proto-grid {
+    margin-top: 12px;
+}
+
+#chartDPIProtoQuick,
+#chartVisProtocolDist {
+    min-height: 240px;
+}
+
+#dpiAlertsTable .badge-severity[data-severity="critical"] {
+    background: var(--color-danger-light);
+    color: var(--color-danger);
+}
+
+#dpiAlertsTable .badge-severity[data-severity="warning"] {
+    background: var(--color-warning-light);
+    color: var(--color-warning);
+}
+
+#dpiAlertsTable .badge-severity[data-severity="info"] {
+    background: var(--color-success-light);
+    color: var(--color-success);
+}
+
+#visTopTalkersTable,
+#dpiAlertsTable,
+#dpiDecodeErrorsTable {
+    min-width: 620px;
 }
 
 /* ---------- System Banner ---------- */
@@ -1541,6 +1599,14 @@ body {
 
     .dashboard-nav-controls {
         border-radius: var(--radius);
+    }
+
+    .dashboard-nav-controls input[type="range"] {
+        width: 100%;
+    }
+
+    .input-inline-wide {
+        min-width: 100%;
     }
 
     .soc-grid {

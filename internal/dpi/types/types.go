@@ -35,6 +35,7 @@ type FiveTuple struct {
 type DecodedPacket struct {
 	Timestamp time.Time
 	Tuple     FiveTuple
+	IPVersion uint8
 	SrcMAC    string
 	DstMAC    string
 	NetworkFlow   gopacket.Flow

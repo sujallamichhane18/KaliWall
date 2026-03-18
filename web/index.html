@@ -110,13 +110,8 @@
                         <option value="comfortable">Comfortable</option>
                     </select>
                     <label for="dashboardAutoRefreshSec">Auto refresh</label>
-                    <select id="dashboardAutoRefreshSec">
-                        <option value="0">Off</option>
-                        <option value="5">5 sec</option>
-                        <option value="10" selected>10 sec</option>
-                        <option value="20">20 sec</option>
-                        <option value="30">30 sec</option>
-                    </select>
+                    <input type="range" id="dashboardAutoRefreshSec" min="0" max="60" step="5" value="10">
+                    <span class="badge badge-disabled" id="dashboardAutoRefreshLabel">10 sec</span>
                 </div>
             </div>
 
@@ -255,18 +250,39 @@
                 <div class="card-header"><i class="fa-solid fa-magnifying-glass-chart"></i><h3>DPI Monitor</h3></div>
                 <div class="card-body">
                     <div class="stats-grid compact-stats" style="margin-bottom:12px">
-                        <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiStatusText">OFF</span><span class="stat-label">Status</span></div></div>
+                        <div class="stat-card compact dpi-status-card" id="dpiStatusCard" title="Current DPI pipeline state">
+                            <div class="stat-info"><span class="stat-value" id="dpiStatusText">OFF</span><span class="stat-label">Status</span></div>
+                        </div>
                         <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiPacketsSeen">0</span><span class="stat-label">Packets Seen</span></div></div>
+                        <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiPacketsPerSec">0</span><span class="stat-label">Packets/sec</span></div></div>
                         <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiBlockedCount">0</span><span class="stat-label">Blocked</span></div></div>
                         <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiLoggedCount">0</span><span class="stat-label">Logged</span></div></div>
                         <div class="stat-card compact" id="dpiDecodeCard"><div class="stat-info"><span class="stat-value" id="dpiDecodeErrors">0</span><span class="stat-label">Decode Errors</span></div></div>
+                        <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiHTTPDetected">0</span><span class="stat-label">HTTP Detected</span></div></div>
+                        <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiDNSDetected">0</span><span class="stat-label">DNS Detected</span></div></div>
+                        <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiTLSDetected">0</span><span class="stat-label">TLS Detected</span></div></div>
                     </div>
                     <div class="toolbar-actions">
                         <span class="badge badge-disabled" id="dpiIfaceBadge">iface: -</span>
+                        <span class="badge badge-disabled" id="dpiIfaceIPBadge">iface ip: -</span>
                         <span class="badge badge-disabled" id="dpiWorkersBadge">workers: 0</span>
+                        <span class="badge badge-disabled" id="dpiWorkerCpuBadge">worker cpu est: -</span>
                         <span class="badge badge-disabled" id="dpiUptimeBadge">uptime: 0s</span>
                         <button class="btn btn-primary" id="btnToggleDPI"><i class="fa-solid fa-power-off"></i> Turn ON DPI</button>
                         <button class="btn btn-secondary" id="btnRefreshDPIStatus"><i class="fa-solid fa-arrows-rotate"></i> Refresh DPI</button>
+                    </div>
+                    <div class="toolbar-actions" style="margin-top:10px">
+                        <label for="dpiWorkersInput">Workers</label>
+                        <input type="number" id="dpiWorkersInput" min="1" max="128" value="4" class="input-inline-sm">
+                        <button class="btn btn-secondary" id="btnApplyDPIWorkers"><i class="fa-solid fa-microchip"></i> Apply Workers</button>
+                    </div>
+                    <div class="dpi-proto-grid">
+                        <div class="card" style="margin-bottom:0">
+                            <div class="card-header"><i class="fa-solid fa-chart-pie"></i><h3>DPI Protocol Breakdown</h3></div>
+                            <div class="card-body chart-body chart-body-sm">
+                                <canvas id="chartDPIProtoQuick"></canvas>
+                            </div>
+                        </div>
                     </div>
                     <div class="dpi-decode-panel">
                         <div class="dpi-decode-panel-head">
@@ -277,6 +293,31 @@
                             <table class="table" id="dpiDecodeErrorsTable">
                                 <thead><tr><th>Time</th><th>Source</th><th>Protocol</th><th>Reason</th></tr></thead>
                                 <tbody><tr><td colspan="4" style="text-align:center;color:#6b7280;padding:16px">No decode errors detected</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="dpi-decode-panel">
+                        <div class="dpi-decode-panel-head">
+                            <h4><i class="fa-solid fa-bell"></i> DPI Alerts (Blocked / Malicious)</h4>
+                            <span class="badge badge-disabled" id="dpiAlertsCount">0 alerts</span>
+                        </div>
+                        <div class="toolbar-actions" style="margin-bottom:10px">
+                            <input type="text" id="dpiAlertFilterSource" placeholder="Filter source IP" class="input-inline-sm input-inline-wide">
+                            <select id="dpiAlertFilterProtocol" class="input-inline-sm">
+                                <option value="">All Protocols</option>
+                                <option value="http">HTTP</option>
+                                <option value="dns">DNS</option>
+                                <option value="tls">TLS</option>
+                                <option value="tcp">TCP</option>
+                                <option value="udp">UDP</option>
+                            </select>
+                            <input type="text" id="dpiAlertFilterReason" placeholder="Filter reason" class="input-inline-sm input-inline-wide">
+                            <button class="btn btn-secondary" id="btnFilterDPIAlerts"><i class="fa-solid fa-filter"></i> Filter</button>
+                        </div>
+                        <div class="table-responsive dashboard-table-wrap">
+                            <table class="table" id="dpiAlertsTable">
+                                <thead><tr><th>Time</th><th>Severity</th><th>Action</th><th>Source</th><th>Protocol</th><th>Reason</th></tr></thead>
+                                <tbody><tr><td colspan="6" style="text-align:center;color:#6b7280;padding:16px">No alerts yet</td></tr></tbody>
                             </table>
                         </div>
                     </div>
@@ -303,7 +344,25 @@
                     <div class="card-header"><i class="fa-solid fa-earth-asia"></i><h3>Connected Hosts (nslookup)</h3></div>
                     <div class="card-body table-responsive">
                         <table class="table" id="visPeersTable">
-                            <thead><tr><th>Remote IP</th><th>Host</th><th>Connections</th></tr></thead>
+                            <thead><tr><th>Remote IP</th><th>Host</th><th>Connections</th><th>Duration</th><th>Volume</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="dashboard-grid" style="margin-bottom:20px">
+                <div class="card">
+                    <div class="card-header"><i class="fa-solid fa-chart-pie"></i><h3>Visibility Protocol Distribution</h3></div>
+                    <div class="card-body chart-body chart-body-sm">
+                        <canvas id="chartVisProtocolDist"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><i class="fa-solid fa-ranking-star"></i><h3>Top Talkers (Visibility)</h3></div>
+                    <div class="card-body table-responsive dashboard-table-wrap">
+                        <table class="table" id="visTopTalkersTable">
+                            <thead><tr><th>IP</th><th>Events</th></tr></thead>
                             <tbody></tbody>
                         </table>
                     </div>
@@ -739,6 +798,12 @@
                     </button>
                     <button class="btn btn-secondary" id="btnRefreshLogs">
                         <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                    </button>
+                    <button class="btn btn-secondary" id="btnExportLogsJSON">
+                        <i class="fa-solid fa-file-export"></i> Export JSON
+                    </button>
+                    <button class="btn btn-secondary" id="btnExportLogsCSV">
+                        <i class="fa-solid fa-file-csv"></i> Export CSV
                     </button>
                 </div>
             </div>

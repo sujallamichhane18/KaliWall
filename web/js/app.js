@@ -42,6 +42,10 @@
     };
     var dashboardAutoRefreshTimer = null;
     var socFlowHistory = [];
+    var dpiQuickProtocolChart = null;
+    var visProtocolDistChart = null;
+    var dpiAlertRows = [];
+    var dpiLastPacketsSample = { count: 0, ts: 0 };
 
     // ---------- Theme Management ----------
     const themeToggle = document.getElementById("themeToggle");
@@ -242,6 +246,11 @@
 
         if (autoRefresh) {
             autoRefresh.value = String(dashboardPrefs.autoRefreshSec);
+            updateDashboardAutoRefreshLabel(dashboardPrefs.autoRefreshSec);
+            autoRefresh.addEventListener("input", function () {
+                const next = parseInt(autoRefresh.value, 10) || 0;
+                updateDashboardAutoRefreshLabel(next);
+            });
             autoRefresh.addEventListener("change", function () {
                 dashboardPrefs.autoRefreshSec = parseInt(autoRefresh.value, 10) || 0;
                 persistDashboardPrefs();
@@ -285,6 +294,14 @@
         page.classList.remove("dashboard-compact", "dashboard-comfortable");
         if (dashboardPrefs.density === "compact") page.classList.add("dashboard-compact");
         if (dashboardPrefs.density === "comfortable") page.classList.add("dashboard-comfortable");
+        updateDashboardAutoRefreshLabel(dashboardPrefs.autoRefreshSec);
+    }
+
+    function updateDashboardAutoRefreshLabel(sec) {
+        var label = document.getElementById("dashboardAutoRefreshLabel");
+        if (!label) return;
+        var n = parseInt(sec, 10) || 0;
+        label.textContent = n <= 0 ? "off" : n + " sec";
     }
 
     function startDashboardAutoRefresh() {
@@ -821,13 +838,30 @@
         const protocols = v.top_protocols || [];
         if (protocols.length === 0) {
             tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#9ca3af">No traffic sample yet</td></tr>';
-            return;
+        } else {
+            protocols.forEach(function (p) {
+                const tr = document.createElement("tr");
+                tr.innerHTML = "<td>" + escapeHtml(p.name) + "</td><td>" + (p.count || 0) + "</td>";
+                tbody.appendChild(tr);
+            });
         }
-        protocols.forEach(function (p) {
-            const tr = document.createElement("tr");
-            tr.innerHTML = "<td>" + escapeHtml(p.name) + "</td><td>" + (p.count || 0) + "</td>";
-            tbody.appendChild(tr);
-        });
+
+        renderVisProtocolDistChart(protocols);
+
+        const talkersBody = document.querySelector("#visTopTalkersTable tbody");
+        if (talkersBody) {
+            talkersBody.innerHTML = "";
+            const talkers = (v.top_remote_ips || []).slice(0, 10);
+            if (talkers.length === 0) {
+                talkersBody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#9ca3af">No talker data yet</td></tr>';
+            } else {
+                talkers.forEach(function (t) {
+                    const tr = document.createElement("tr");
+                    tr.innerHTML = "<td>" + escapeHtml(t.name) + "</td><td>" + (t.count || 0) + "</td>";
+                    talkersBody.appendChild(tr);
+                });
+            }
+        }
 
         const peersTbody = document.querySelector("#visPeersTable tbody");
         if (!peersTbody) return;
@@ -843,11 +877,15 @@
                 host: peer.host || "unresolved",
                 verified: !!peer.verified,
             };
+            const approxDuration = (peer.count || 0) > 1 ? (peer.count || 0) * 5 + "s" : "-";
+            const approxVolume = formatBytes((peer.count || 0) * 1800);
             const tr = document.createElement("tr");
             tr.innerHTML =
                 "<td><strong>" + escapeHtml(peer.ip) + "</strong></td>" +
                 "<td>" + renderHostBadge(peer.host || "unresolved", !!peer.verified) + "</td>" +
-                "<td>" + (peer.count || 0) + "</td>";
+                "<td>" + (peer.count || 0) + "</td>" +
+                "<td>" + approxDuration + "</td>" +
+                "<td>" + approxVolume + "</td>";
             peersTbody.appendChild(tr);
         });
     }
@@ -871,7 +909,13 @@
 
         setText("dpiIfaceBadge", "iface: " + (s.interface || "-"));
         setText("dpiWorkersBadge", "workers: " + (s.workers || 0));
+        setText("dpiWorkerCpuBadge", "worker cpu est: " + Math.max(0.1, ((s.workers || 1) * 100) / Math.max(1, (navigator.hardwareConcurrency || 4))).toFixed(1) + "%");
         setText("dpiUptimeBadge", "uptime: " + formatDurationSeconds(s.uptime_sec || 0));
+
+        const workersInput = document.getElementById("dpiWorkersInput");
+        if (workersInput && s.workers) {
+            workersInput.value = String(s.workers);
+        }
 
         const statusEl = document.getElementById("dpiStatusText");
         if (statusEl) statusEl.style.color = on ? "var(--color-success)" : "var(--color-danger)";
@@ -895,7 +939,221 @@
             toast(res.message, "error");
         }
 
+        const statsRes = await apiFetch("/dpi/stats");
+        if (statsRes.success) {
+            const stats = statsRes.data || {};
+            updateDPIPacketsPerSec(stats.packets_seen || s.packets_seen || 0);
+            setText("dpiHTTPDetected", stats.http_detected || 0);
+            setText("dpiDNSDetected", stats.dns_detected || 0);
+            setText("dpiTLSDetected", stats.tls_detected || 0);
+
+            var ifaceIP = "-";
+            if (stats.top_src_ips && stats.top_src_ips.length > 0) {
+                ifaceIP = stats.top_src_ips[0].ip || "-";
+            }
+            setText("dpiIfaceIPBadge", "iface ip: " + ifaceIP);
+
+            renderDPIQuickProtocolChart(stats);
+        }
+
+        await loadDPIAlertRows();
+
         await loadDPIDecodeErrorRows();
+    }
+
+    function updateDPIPacketsPerSec(packetCount) {
+        var now = Date.now();
+        var pps = 0;
+        if (dpiLastPacketsSample.ts > 0 && packetCount >= dpiLastPacketsSample.count) {
+            var elapsed = (now - dpiLastPacketsSample.ts) / 1000;
+            if (elapsed > 0) {
+                pps = (packetCount - dpiLastPacketsSample.count) / elapsed;
+            }
+        }
+        dpiLastPacketsSample = { count: packetCount, ts: now };
+        setText("dpiPacketsPerSec", pps.toFixed(1));
+    }
+
+    async function loadDPIAlertRows() {
+        const tbody = document.querySelector("#dpiAlertsTable tbody");
+        if (!tbody) return;
+
+        const res = await apiFetch("/logs?limit=900");
+        if (!res.success) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#6b7280;padding:16px">Unable to load DPI alerts</td></tr>';
+            setText("dpiAlertsCount", "0 alerts");
+            return;
+        }
+
+        dpiAlertRows = (res.data || [])
+            .filter(isDPIAlertEntry)
+            .slice(0, 80)
+            .map(function (entry) {
+                return {
+                    timestamp: entry.timestamp,
+                    severity: detectDPIAlertSeverity(entry),
+                    action: (entry.action || "-").toUpperCase(),
+                    src: entry.src_ip || "-",
+                    protocol: String(entry.protocol || "-").toLowerCase(),
+                    reason: extractDPIAlertReason(entry.detail || "-"),
+                };
+            });
+
+        renderDPIAlertsFromState();
+    }
+
+    function renderDPIAlertsFromState() {
+        const tbody = document.querySelector("#dpiAlertsTable tbody");
+        if (!tbody) return;
+
+        var srcNeedle = (document.getElementById("dpiAlertFilterSource") || {}).value || "";
+        var protoNeedle = (document.getElementById("dpiAlertFilterProtocol") || {}).value || "";
+        var reasonNeedle = (document.getElementById("dpiAlertFilterReason") || {}).value || "";
+
+        srcNeedle = srcNeedle.trim().toLowerCase();
+        protoNeedle = protoNeedle.trim().toLowerCase();
+        reasonNeedle = reasonNeedle.trim().toLowerCase();
+
+        const filtered = dpiAlertRows.filter(function (row) {
+            if (srcNeedle && row.src.toLowerCase().indexOf(srcNeedle) === -1) return false;
+            if (protoNeedle && row.protocol.indexOf(protoNeedle) === -1) return false;
+            if (reasonNeedle && row.reason.toLowerCase().indexOf(reasonNeedle) === -1) return false;
+            return true;
+        });
+
+        setText("dpiAlertsCount", filtered.length + " alerts");
+        tbody.innerHTML = "";
+        if (filtered.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#6b7280;padding:16px">No alerts match current filters</td></tr>';
+            return;
+        }
+
+        filtered.forEach(function (row) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td>" + formatTime(row.timestamp) + "</td>" +
+                "<td>" + severityBadge(row.severity) + "</td>" +
+                "<td>" + actionBadge(row.action) + "</td>" +
+                "<td>" + escapeHtml(row.src) + "</td>" +
+                "<td>" + escapeHtml(row.protocol.toUpperCase()) + "</td>" +
+                "<td>" + escapeHtml(row.reason) + "</td>";
+            tbody.appendChild(tr);
+        });
+    }
+
+    function isDPIAlertEntry(entry) {
+        if (!entry) return false;
+        const action = String(entry.action || "").toLowerCase();
+        const detail = String(entry.detail || "").toLowerCase();
+        if (action === "block" || action === "drop" || action === "reject") return true;
+        return detail.indexOf("dpi:") === 0 && (
+            detail.indexOf("malicious") >= 0 ||
+            detail.indexOf("exploit") >= 0 ||
+            detail.indexOf("attack") >= 0 ||
+            detail.indexOf("sqli") >= 0 ||
+            detail.indexOf("xss") >= 0 ||
+            detail.indexOf("c2") >= 0
+        );
+    }
+
+    function detectDPIAlertSeverity(entry) {
+        const action = String(entry.action || "").toLowerCase();
+        const detail = String(entry.detail || "").toLowerCase();
+        if (action === "block" || action === "drop" || detail.indexOf("critical") >= 0) return "critical";
+        if (action === "reject" || detail.indexOf("malicious") >= 0 || detail.indexOf("exploit") >= 0) return "warning";
+        return "info";
+    }
+
+    function extractDPIAlertReason(detail) {
+        var text = String(detail || "").replace(/^dpi:\s*/i, "").trim();
+        if (!text) return "alert";
+        if (text.length > 120) return text.slice(0, 120) + "...";
+        return text;
+    }
+
+    function renderDPIQuickProtocolChart(stats) {
+        if (!window.Chart) return;
+        const canvas = document.getElementById("chartDPIProtoQuick");
+        if (!canvas) return;
+
+        const labels = ["HTTP", "DNS", "TLS", "ICMP", "TCP", "UDP"];
+        const values = [
+            stats.http_detected || 0,
+            stats.dns_detected || 0,
+            stats.tls_detected || 0,
+            stats.icmp_detected || 0,
+            stats.tcp_packets || 0,
+            stats.udp_packets || 0,
+        ];
+        const chartTheme = getChartThemeColors();
+
+        if (!dpiQuickProtocolChart) {
+            dpiQuickProtocolChart = new Chart(canvas, {
+                type: "doughnut",
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: ["#1f6feb", "#0ea5a5", "#f59e0b", "#ef4444", "#8b5cf6", "#10b981"],
+                        borderWidth: 2,
+                        borderColor: "#ffffff",
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: "bottom", labels: { color: chartTheme.textColor, boxWidth: 10 } },
+                    },
+                },
+            });
+            return;
+        }
+
+        dpiQuickProtocolChart.data.labels = labels;
+        dpiQuickProtocolChart.data.datasets[0].data = values;
+        dpiQuickProtocolChart.update("none");
+    }
+
+    function renderVisProtocolDistChart(protocols) {
+        if (!window.Chart) return;
+        const canvas = document.getElementById("chartVisProtocolDist");
+        if (!canvas) return;
+
+        const labels = (protocols || []).slice(0, 8).map(function (p) { return p.name || "-"; });
+        const values = (protocols || []).slice(0, 8).map(function (p) { return p.count || 0; });
+        const chartTheme = getChartThemeColors();
+
+        if (!visProtocolDistChart) {
+            visProtocolDistChart = new Chart(canvas, {
+                type: "bar",
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: "Traffic count",
+                        data: values,
+                        backgroundColor: "rgba(31, 111, 235, 0.78)",
+                        borderColor: "rgba(31, 111, 235, 1)",
+                        borderWidth: 1,
+                        borderRadius: 6,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { ticks: { color: chartTheme.textColor }, grid: { color: chartTheme.gridColor } },
+                        y: { ticks: { color: chartTheme.textColor }, grid: { color: chartTheme.gridColor }, beginAtZero: true },
+                    },
+                },
+            });
+            return;
+        }
+
+        visProtocolDistChart.data.labels = labels;
+        visProtocolDistChart.data.datasets[0].data = values;
+        visProtocolDistChart.update("none");
     }
 
     async function loadDPIDecodeErrorRows() {
@@ -1238,6 +1496,53 @@
         // Refresh logs data from backend and keep live stream attached.
         await refreshLogsFromBackend();
         startLogStream(false);
+    }
+
+    async function exportLogs(format) {
+        const res = await apiFetch("/logs?limit=2000");
+        if (!res.success) {
+            toast(res.message || "Failed to export logs", "error");
+            return;
+        }
+
+        const rows = res.data || [];
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        if (format === "json") {
+            downloadTextFile("kaliwall-logs-" + stamp + ".json", JSON.stringify(rows, null, 2), "application/json;charset=utf-8");
+            toast("Logs exported as JSON", "success");
+            return;
+        }
+
+        var csv = ["timestamp,action,src_ip,dst_ip,protocol,detail"];
+        rows.forEach(function (r) {
+            csv.push([
+                csvCell(r.timestamp),
+                csvCell(r.action),
+                csvCell(r.src_ip),
+                csvCell(r.dst_ip),
+                csvCell(r.protocol),
+                csvCell(r.detail),
+            ].join(","));
+        });
+        downloadTextFile("kaliwall-logs-" + stamp + ".csv", csv.join("\n"), "text/csv;charset=utf-8");
+        toast("Logs exported as CSV", "success");
+    }
+
+    function csvCell(value) {
+        var text = String(value == null ? "" : value);
+        return '"' + text.replace(/"/g, '""') + '"';
+    }
+
+    function downloadTextFile(fileName, content, mimeType) {
+        var blob = new Blob([content], { type: mimeType || "text/plain;charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var link = document.createElement("a");
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
     }
 
     function isDPILogEntry(entry) {
@@ -1769,8 +2074,38 @@
     document.getElementById("btnRefreshDNSStats").addEventListener("click", () => loadDNSStats());
     document.getElementById("btnRefreshDPIStatus").addEventListener("click", () => loadDPIStatus());
     document.getElementById("btnToggleDPI").addEventListener("click", () => toggleDPI());
+    document.getElementById("btnFilterDPIAlerts").addEventListener("click", () => renderDPIAlertsFromState());
+    document.getElementById("dpiAlertFilterSource").addEventListener("input", () => renderDPIAlertsFromState());
+    document.getElementById("dpiAlertFilterProtocol").addEventListener("change", () => renderDPIAlertsFromState());
+    document.getElementById("dpiAlertFilterReason").addEventListener("input", () => renderDPIAlertsFromState());
     document.getElementById("btnFirewallStop").addEventListener("click", () => stopFirewallFromTopbar());
     document.getElementById("btnFirewallRestart").addEventListener("click", () => restartFirewallFromTopbar());
+
+    document.getElementById("btnApplyDPIWorkers").addEventListener("click", async function () {
+        var input = document.getElementById("dpiWorkersInput");
+        if (!input) return;
+        var workers = parseInt(input.value, 10) || 0;
+        if (workers < 1 || workers > 128) {
+            toast("Workers must be between 1 and 128", "error");
+            return;
+        }
+        try {
+            const resp = await fetch(API + "/dpi/workers", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ workers: workers }),
+            });
+            const raw = await resp.text();
+            var data = raw ? JSON.parse(raw) : {};
+            if (!data.success) {
+                throw new Error(data.message || "Failed to update workers");
+            }
+            toast("DPI workers updated", "success");
+            loadDPIStatus();
+        } catch (err) {
+            toast((err && err.message) || "Failed to update workers", "error");
+        }
+    });
 
     document.getElementById("btnClearDNSCache").addEventListener("click", async function () {
         const res = await fetch(API + "/dns/cache", { method: "DELETE" });
@@ -1793,6 +2128,14 @@
     document.getElementById("btnClearLogs").addEventListener("click", function () {
         var tbody = document.querySelector("#logsTable tbody");
         if (tbody) tbody.innerHTML = "";
+    });
+
+    document.getElementById("btnExportLogsJSON").addEventListener("click", function () {
+        exportLogs("json");
+    });
+
+    document.getElementById("btnExportLogsCSV").addEventListener("click", function () {
+        exportLogs("csv");
     });
 
     // ---------- Block IP Modal ----------

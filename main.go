@@ -18,7 +18,6 @@ import (
 	"kaliwall/internal/api"
 	"kaliwall/internal/database"
 	"kaliwall/internal/dpi/lite"
-	"kaliwall/internal/dpi/pipeline"
 	"kaliwall/internal/firewall"
 	"kaliwall/internal/geoip"
 	"kaliwall/internal/logger"
@@ -42,14 +41,16 @@ func main() {
 	daemon := flag.Bool("daemon", false, "Run in background daemon mode")
 	dpiEnable := flag.Bool("dpi", false, "Enable deep packet inspection pipeline")
 	dpiIface := flag.String("dpi-interface", "", "Network interface for DPI capture (e.g. eth0)")
-	dpiRules := flag.String("dpi-rules", "configs/dpi-rules.json", "Path to DPI rules file (yaml/json)")
+	dpiRules := flag.String("dpi-rules", "configs/dpi-rules.json", "Deprecated in lite mode; kept for CLI compatibility")
 	dpiWorkers := flag.Int("dpi-workers", 0, "Number of DPI workers (default: CPU cores)")
 	dpiPromisc := flag.Bool("dpi-promisc", true, "Enable promiscuous capture mode for DPI")
 	dpiBPF := flag.String("dpi-bpf", "", "Optional BPF filter for DPI capture")
-	dpiRateLimit := flag.Int("dpi-rate", 5000, "Per-source packet rate limit per second")
-	dpiLite := flag.Bool("dpi-lite", false, "Use lightweight IDS/DPI engine (HTTP/DNS/TLS extraction + stats)")
+	dpiRateLimit := flag.Int("dpi-rate", 5000, "Deprecated in lite mode; kept for CLI compatibility")
+	dpiLite := flag.Bool("dpi-lite", true, "Run lightweight IDS/DPI engine (HTTP/DNS/TLS + L3/L7 stats)")
 	geoDBPath := flag.String("geo-db", defaultGeoDBFile, "Path to GeoIP database (.mmdb or IP2Location CSV)")
 	flag.Parse()
+	_ = dpiRules
+	_ = dpiRateLimit
 
 	// If --daemon, fork to background
 	if *daemon {
@@ -122,48 +123,24 @@ func main() {
 		log.Printf("GeoIP disabled: no database found. Set --geo-db <path> or KALIWALL_GEO_DB, or place %s / %s in project root/data/configs/internal/database.", defaultGeoDBFile, defaultGeoCSVFile)
 	}
 
-	type dpiRuntime interface {
-		SetEnabled(enabled bool) error
-		Status() pipeline.Status
-		Stop()
-	}
-
-	var dpiRuntimeMgr dpiRuntime
 	dpiProvider := api.NewDPIProvider(nil)
 	resolvedIface := *dpiIface
 	if resolvedIface == "" {
 		resolvedIface = defaultCaptureInterface()
 	}
-	if *dpiLite {
-		liteEngine := lite.New(lite.Config{
-			Interface:   resolvedIface,
-			Promiscuous: *dpiPromisc,
-			BPF:         *dpiBPF,
-			Workers:     *dpiWorkers,
-		}, trafficLogger)
-		dpiRuntimeMgr = liteEngine
-		dpiProvider.Set(liteEngine)
-		fmt.Printf("[+] DPI mode: lightweight IDS/DPI\n")
-	} else {
-		dpiCfg := pipeline.Config{
-			Interface:       resolvedIface,
-			Promiscuous:     *dpiPromisc,
-			BPF:             *dpiBPF,
-			RulesPath:       *dpiRules,
-			Workers:         *dpiWorkers,
-			FlowTimeout:     2 * time.Minute,
-			CleanupInterval: 30 * time.Second,
-			MaxFlowBytes:    1 << 20,
-			MaxWindowBytes:  8192,
-			RateLimitPerSec: *dpiRateLimit,
-		}
-		dpiManager := pipeline.NewManager(dpiCfg, trafficLogger)
-		dpiRuntimeMgr = dpiManager
-		dpiProvider.Set(dpiManager)
-		fmt.Printf("[+] DPI mode: full pipeline\n")
+	if !*dpiLite {
+		fmt.Printf("[!] --dpi-lite=false ignored: KaliWall now runs lite DPI engine only\n")
 	}
+	liteEngine := lite.New(lite.Config{
+		Interface:   resolvedIface,
+		Promiscuous: *dpiPromisc,
+		BPF:         *dpiBPF,
+		Workers:     *dpiWorkers,
+	}, trafficLogger)
+	dpiProvider.Set(liteEngine)
+	fmt.Printf("[+] DPI mode: lightweight IDS/DPI (L3 + L7)\n")
 	if *dpiEnable {
-		if err := dpiRuntimeMgr.SetEnabled(true); err != nil {
+		if err := liteEngine.SetEnabled(true); err != nil {
 			log.Printf("DPI requested but failed to start: %v", err)
 		} else {
 			fmt.Printf("[+] DPI enabled on interface: %s\n", resolvedIface)
@@ -189,9 +166,7 @@ func main() {
 
 	<-stop
 	fmt.Println("\n[*] Shutting down KaliWall daemon...")
-	if dpiRuntimeMgr != nil {
-		dpiRuntimeMgr.Stop()
-	}
+	liteEngine.Stop()
 	monitor.Stop()
 	analyticsService.Stop()
 	// Persist VT key

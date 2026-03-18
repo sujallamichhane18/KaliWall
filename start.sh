@@ -23,16 +23,13 @@ cd "$SCRIPT_DIR"
 PID_FILE="kaliwall.pid"
 LOG_FILE="logs/kaliwall-daemon.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
-DPI_ARGS=("--dpi" "--dpi-rules" "configs/dpi-rules.json")
+DPI_ARGS=("--dpi" "--dpi-lite")
 
 if [[ "${KALIWALL_DPI:-1}" == "0" ]]; then
     DPI_ARGS=()
 fi
 if [[ -n "${KALIWALL_DPI_INTERFACE:-}" ]]; then
     DPI_ARGS+=("--dpi-interface" "${KALIWALL_DPI_INTERFACE}")
-fi
-if [[ "${KALIWALL_DPI_LITE:-0}" == "1" ]]; then
-    DPI_ARGS+=("--dpi-lite")
 fi
 
 usage() {

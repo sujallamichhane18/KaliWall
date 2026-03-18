@@ -2,8 +2,10 @@ package lite
 
 import (
     "context"
+    "fmt"
     "log"
     "runtime"
+    "sort"
     "sync"
     "sync/atomic"
     "time"
@@ -14,9 +16,15 @@ import (
     "kaliwall/internal/dpi/decode"
     "kaliwall/internal/dpi/inspect"
     "kaliwall/internal/dpi/pipeline"
+    "kaliwall/internal/dpi/reassembly"
     "kaliwall/internal/dpi/types"
     "kaliwall/internal/logger"
 )
+
+type IPCount struct {
+    IP    string `json:"ip"`
+    Count uint64 `json:"count"`
+}
 
 // Config controls lightweight IDS/DPI runtime behavior.
 type Config struct {
@@ -39,6 +47,17 @@ type Stats struct {
     HTTPDetected uint64    `json:"http_detected"`
     DNSDetected  uint64    `json:"dns_detected"`
     TLSDetected  uint64    `json:"tls_detected"`
+    ICMPDetected uint64    `json:"icmp_detected"`
+
+    IPv4Packets  uint64    `json:"ipv4_packets"`
+    IPv6Packets  uint64    `json:"ipv6_packets"`
+    TCPPackets   uint64    `json:"tcp_packets"`
+    UDPPackets   uint64    `json:"udp_packets"`
+    ICMPPackets  uint64    `json:"icmp_packets"`
+    UniqueSrcIPs uint64    `json:"unique_src_ips"`
+    UniqueDstIPs uint64    `json:"unique_dst_ips"`
+    TopSrcIPs    []IPCount `json:"top_src_ips"`
+    TopDstIPs    []IPCount `json:"top_dst_ips"`
 
     LastHTTP     string    `json:"last_http"`
     LastDNS      string    `json:"last_dns"`
@@ -48,12 +67,14 @@ type Stats struct {
 
 // Engine is a lightweight live IDS/DPI processor focused on protocol extraction.
 type Engine struct {
+    cfgMu  sync.RWMutex
     cfg    Config
     logger *logger.TrafficLogger
 
     capturer capture.Capturer
     decoder  decode.Decoder
     inspect  *inspect.Engine
+    reasm    reassembly.Reassembler
 
     inputCh chan gopacket.Packet
     stop    context.CancelFunc
@@ -68,12 +89,21 @@ type Engine struct {
     httpDetected atomic.Uint64
     dnsDetected  atomic.Uint64
     tlsDetected  atomic.Uint64
+    icmpDetected atomic.Uint64
+
+    ipv4Packets atomic.Uint64
+    ipv6Packets atomic.Uint64
+    tcpPackets  atomic.Uint64
+    udpPackets  atomic.Uint64
+    icmpPackets atomic.Uint64
 
     metaMu     sync.RWMutex
     lastHTTP   string
     lastDNS    string
     lastTLS    string
     lastSeenAt time.Time
+    srcHits    map[string]uint64
+    dstHits    map[string]uint64
 }
 
 // New creates a lightweight IDS/DPI engine.
@@ -97,7 +127,15 @@ func New(cfg Config, tl *logger.TrafficLogger) *Engine {
         capturer: c,
         decoder: decode.New(),
         inspect: inspect.New(),
+        reasm: reassembly.New(reassembly.Config{
+            MaxBytesPerFlow: 1 << 20,
+            MaxWindowBytes:  8192,
+            FlowTimeout:     2 * time.Minute,
+            CleanupInterval: 30 * time.Second,
+        }),
         inputCh: make(chan gopacket.Packet, 4096),
+        srcHits: make(map[string]uint64, 4096),
+        dstHits: make(map[string]uint64, 4096),
     }
 }
 
@@ -127,6 +165,7 @@ func (e *Engine) Start(parent context.Context) error {
     e.startedAt = time.Now()
     e.running.Store(true)
     e.enabled.Store(true)
+    e.reasm.Start()
 
     e.wg.Add(1)
     go e.forwardPackets(ctx)
@@ -134,13 +173,33 @@ func (e *Engine) Start(parent context.Context) error {
     e.wg.Add(1)
     go e.captureErrors(ctx)
 
-    for i := 0; i < e.cfg.Workers; i++ {
+    workers := e.workerCount()
+    for i := 0; i < workers; i++ {
         e.wg.Add(1)
         go e.worker(ctx)
     }
 
-    log.Printf("DPI lite started iface=%s workers=%d", e.cfg.Interface, e.cfg.Workers)
+    log.Printf("DPI lite started iface=%s workers=%d", e.interfaceName(), workers)
     return nil
+}
+
+// SetWorkers updates worker concurrency; if engine is running it restarts capture.
+func (e *Engine) SetWorkers(workers int) error {
+    if workers < 1 || workers > 128 {
+        return fmt.Errorf("workers must be between 1 and 128")
+    }
+    wasRunning := e.running.Load()
+
+    e.cfgMu.Lock()
+    e.cfg.Workers = workers
+    e.cfgMu.Unlock()
+
+    if !wasRunning {
+        return nil
+    }
+
+    e.Stop()
+    return e.Start(context.Background())
 }
 
 // Stop halts capture/workers.
@@ -149,6 +208,7 @@ func (e *Engine) Stop() {
         e.stop()
     }
     _ = e.capturer.Close()
+    e.reasm.Stop()
     e.wg.Wait()
     e.running.Store(false)
     e.enabled.Store(false)
@@ -164,8 +224,8 @@ func (e *Engine) Status() pipeline.Status {
     return pipeline.Status{
         Enabled:      e.enabled.Load(),
         Running:      e.running.Load(),
-        Interface:    e.cfg.Interface,
-        Workers:      e.cfg.Workers,
+        Interface:    e.interfaceName(),
+        Workers:      e.workerCount(),
         RulesLoaded:  0,
         UptimeSec:    uptime,
         PacketsSeen:  e.packetsSeen.Load(),
@@ -185,6 +245,10 @@ func (e *Engine) DetailedStats() Stats {
     lastDNS := e.lastDNS
     lastTLS := e.lastTLS
     lastSeen := e.lastSeenAt
+    uniqueSrc := uint64(len(e.srcHits))
+    uniqueDst := uint64(len(e.dstHits))
+    topSrc := topN(e.srcHits, 8)
+    topDst := topN(e.dstHits, 8)
     e.metaMu.RUnlock()
 
     uptime := 0.0
@@ -195,19 +259,41 @@ func (e *Engine) DetailedStats() Stats {
     return Stats{
         Enabled:      e.enabled.Load(),
         Running:      e.running.Load(),
-        Interface:    e.cfg.Interface,
-        Workers:      e.cfg.Workers,
+        Interface:    e.interfaceName(),
+        Workers:      e.workerCount(),
         UptimeSec:    uptime,
         PacketsSeen:  e.packetsSeen.Load(),
         DecodeErrors: e.decodeErrors.Load(),
         HTTPDetected: e.httpDetected.Load(),
         DNSDetected:  e.dnsDetected.Load(),
         TLSDetected:  e.tlsDetected.Load(),
+        ICMPDetected: e.icmpDetected.Load(),
+        IPv4Packets:  e.ipv4Packets.Load(),
+        IPv6Packets:  e.ipv6Packets.Load(),
+        TCPPackets:   e.tcpPackets.Load(),
+        UDPPackets:   e.udpPackets.Load(),
+        ICMPPackets:  e.icmpPackets.Load(),
+        UniqueSrcIPs: uniqueSrc,
+        UniqueDstIPs: uniqueDst,
+        TopSrcIPs:    topSrc,
+        TopDstIPs:    topDst,
         LastHTTP:     lastHTTP,
         LastDNS:      lastDNS,
         LastTLS:      lastTLS,
         LastSeenAt:   lastSeen,
     }
+}
+
+func (e *Engine) workerCount() int {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.Workers
+}
+
+func (e *Engine) interfaceName() string {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.Interface
 }
 
 func (e *Engine) forwardPackets(ctx context.Context) {
@@ -258,19 +344,54 @@ func (e *Engine) worker(ctx context.Context) {
             e.packetsSeen.Add(1)
             decoded, err := e.decoder.Decode(pkt)
             if err != nil {
-                e.decodeErrors.Add(1)
+                if err != types.ErrUnsupportedPacket {
+                    e.decodeErrors.Add(1)
+                }
                 continue
             }
 
-            result := e.inspect.Inspect(types.AppPayload{
-                Timestamp: decoded.Timestamp,
-                Tuple:     decoded.Tuple,
-                Payload:   decoded.Payload,
-                DNSQuery:  decoded.DNSQuery,
-            })
-            e.record(result)
+            e.recordL3(decoded)
+
+            payloads, err := e.reasm.Process(decoded)
+            if err != nil {
+                e.decodeErrors.Add(1)
+                continue
+            }
+            for _, payload := range payloads {
+                result := e.inspect.Inspect(payload)
+                e.record(result)
+            }
         }
     }
+}
+
+func (e *Engine) recordL3(decoded *types.DecodedPacket) {
+    if decoded == nil {
+        return
+    }
+    if decoded.IPVersion == 4 {
+        e.ipv4Packets.Add(1)
+    } else if decoded.IPVersion == 6 {
+        e.ipv6Packets.Add(1)
+    }
+    switch decoded.Tuple.Protocol {
+    case "tcp":
+        e.tcpPackets.Add(1)
+    case "udp":
+        e.udpPackets.Add(1)
+    case "icmp", "icmpv6":
+        e.icmpPackets.Add(1)
+        e.icmpDetected.Add(1)
+    }
+
+    e.metaMu.Lock()
+    if decoded.Tuple.SrcIP != "" {
+        e.srcHits[decoded.Tuple.SrcIP]++
+    }
+    if decoded.Tuple.DstIP != "" {
+        e.dstHits[decoded.Tuple.DstIP]++
+    }
+    e.metaMu.Unlock()
 }
 
 func (e *Engine) record(result types.InspectResult) {
@@ -328,4 +449,24 @@ func max(a, b int) int {
         return a
     }
     return b
+}
+
+func topN(m map[string]uint64, n int) []IPCount {
+    if len(m) == 0 || n <= 0 {
+        return nil
+    }
+    items := make([]IPCount, 0, len(m))
+    for ip, count := range m {
+        items = append(items, IPCount{IP: ip, Count: count})
+    }
+    sort.Slice(items, func(i, j int) bool {
+        if items[i].Count == items[j].Count {
+            return items[i].IP < items[j].IP
+        }
+        return items[i].Count > items[j].Count
+    })
+    if len(items) > n {
+        items = items[:n]
+    }
+    return items
 }
