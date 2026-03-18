@@ -824,9 +824,16 @@
     }
 
     async function loadTrafficVisibility() {
-        const res = await apiFetch("/traffic/visibility?limit=1200");
-        if (!res.success) return;
-        const v = res.data || {};
+        const pair = await Promise.all([
+            apiFetch("/traffic/visibility?limit=1200"),
+            apiFetch("/dpi/stats"),
+        ]);
+        const res = pair[0];
+        const dpiRes = pair[1];
+        if (!res.success && !dpiRes.success) return;
+
+        const v = (res.success && res.data) ? res.data : {};
+        const dpiStats = (dpiRes.success && dpiRes.data) ? dpiRes.data : {};
         document.getElementById("visConnections").textContent = v.active_connections || 0;
         document.getElementById("visRemoteIPs").textContent = v.unique_remote_ips || 0;
         document.getElementById("visBlocked").textContent = v.recent_blocked || 0;
@@ -835,29 +842,41 @@
         const tbody = document.querySelector("#visTopProtocols tbody");
         if (!tbody) return;
         tbody.innerHTML = "";
-        const protocols = v.top_protocols || [];
+        const protocols = buildVisibilityProtocols(v.top_protocols || [], dpiStats);
+        var totalProtocolCount = protocols.reduce(function (acc, p) { return acc + (p.count || 0); }, 0);
         if (protocols.length === 0) {
             tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#9ca3af">No traffic sample yet</td></tr>';
         } else {
             protocols.forEach(function (p) {
+                var pct = totalProtocolCount > 0 ? ((p.count || 0) * 100 / totalProtocolCount).toFixed(1) : "0.0";
                 const tr = document.createElement("tr");
-                tr.innerHTML = "<td>" + escapeHtml(p.name) + "</td><td>" + (p.count || 0) + "</td>";
+                tr.innerHTML = "<td>" + escapeHtml(String(p.name || "-").toUpperCase()) + "</td><td>" + (p.count || 0) + " <span style=\"color:var(--text-muted);font-size:0.8rem\">(" + pct + "%)</span></td>";
                 tbody.appendChild(tr);
             });
         }
 
         renderVisProtocolDistChart(protocols);
+        renderVisProtocolLegend(protocols, totalProtocolCount);
+        setText("visProtocolSnapshot", totalProtocolCount > 0 ? (totalProtocolCount + " samples") : "live mix");
 
         const talkersBody = document.querySelector("#visTopTalkersTable tbody");
         if (talkersBody) {
             talkersBody.innerHTML = "";
-            const talkers = (v.top_remote_ips || []).slice(0, 10);
+            const built = buildVisibilityTopTalkers(v.top_remote_ips || [], dpiStats);
+            const talkers = built.items;
+            setText("visTopTalkersSource", "source: " + built.source);
+            var talkerTotal = talkers.reduce(function (acc, t) { return acc + (t.count || 0); }, 0);
             if (talkers.length === 0) {
-                talkersBody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#9ca3af">No talker data yet</td></tr>';
+                talkersBody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#9ca3af">No talker data yet</td></tr>';
             } else {
-                talkers.forEach(function (t) {
+                talkers.forEach(function (t, idx) {
+                    var pctTalker = talkerTotal > 0 ? ((t.count || 0) * 100 / talkerTotal).toFixed(1) : "0.0";
                     const tr = document.createElement("tr");
-                    tr.innerHTML = "<td>" + escapeHtml(t.name) + "</td><td>" + (t.count || 0) + "</td>";
+                    tr.innerHTML =
+                        "<td>" + (idx + 1) + "</td>" +
+                        "<td>" + escapeHtml(t.name) + "</td>" +
+                        "<td>" + (t.count || 0) + "</td>" +
+                        "<td>" + pctTalker + "%</td>";
                     talkersBody.appendChild(tr);
                 });
             }
@@ -869,7 +888,7 @@
         const peers = v.resolved_peers || [];
         peerHostMap = {};
         if (peers.length === 0) {
-            peersTbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#9ca3af">No active remote host data</td></tr>';
+            peersTbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#9ca3af">No active remote host data</td></tr>';
             return;
         }
         peers.forEach(function (peer) {
@@ -1123,29 +1142,37 @@
         const labels = (protocols || []).slice(0, 8).map(function (p) { return p.name || "-"; });
         const values = (protocols || []).slice(0, 8).map(function (p) { return p.count || 0; });
         const chartTheme = getChartThemeColors();
+        const colors = ["#1f6feb", "#0ea5a5", "#f59e0b", "#ef4444", "#8b5cf6", "#10b981", "#f97316", "#6b7280"];
 
         if (!visProtocolDistChart) {
             visProtocolDistChart = new Chart(canvas, {
-                type: "bar",
+                type: "doughnut",
                 data: {
                     labels: labels,
                     datasets: [{
-                        label: "Traffic count",
                         data: values,
-                        backgroundColor: "rgba(31, 111, 235, 0.78)",
-                        borderColor: "rgba(31, 111, 235, 1)",
-                        borderWidth: 1,
-                        borderRadius: 6,
+                        backgroundColor: colors,
+                        borderColor: "#ffffff",
+                        borderWidth: 2,
                     }],
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
-                    scales: {
-                        x: { ticks: { color: chartTheme.textColor }, grid: { color: chartTheme.gridColor } },
-                        y: { ticks: { color: chartTheme.textColor }, grid: { color: chartTheme.gridColor }, beginAtZero: true },
+                    plugins: {
+                        legend: { position: "bottom", labels: { color: chartTheme.textColor, usePointStyle: true, boxWidth: 10 } },
+                        tooltip: {
+                            callbacks: {
+                                label: function (ctx) {
+                                    var total = ctx.dataset.data.reduce(function (acc, item) { return acc + item; }, 0) || 0;
+                                    var val = ctx.parsed || 0;
+                                    var pct = total > 0 ? ((val * 100) / total).toFixed(1) : "0.0";
+                                    return ctx.label + ": " + val + " (" + pct + "%)";
+                                },
+                            },
+                        },
                     },
+                    cutout: "58%",
                 },
             });
             return;
@@ -1154,6 +1181,71 @@
         visProtocolDistChart.data.labels = labels;
         visProtocolDistChart.data.datasets[0].data = values;
         visProtocolDistChart.update("none");
+    }
+
+    function renderVisProtocolLegend(protocols, total) {
+        var root = document.getElementById("visProtocolLegend");
+        if (!root) return;
+        var colors = ["#1f6feb", "#0ea5a5", "#f59e0b", "#ef4444", "#8b5cf6", "#10b981", "#f97316", "#6b7280"];
+        var items = (protocols || []).slice(0, 6);
+        root.innerHTML = "";
+        if (items.length === 0) {
+            root.innerHTML = '<div class="visibility-legend-empty">No protocol distribution yet</div>';
+            return;
+        }
+        items.forEach(function (item, idx) {
+            var row = document.createElement("div");
+            var pct = total > 0 ? ((item.count || 0) * 100 / total).toFixed(1) : "0.0";
+            row.className = "visibility-legend-item";
+            row.innerHTML =
+                '<span class="visibility-dot" style="background:' + colors[idx % colors.length] + '"></span>' +
+                '<span class="name">' + escapeHtml(String(item.name || "-").toUpperCase()) + '</span>' +
+                '<span class="count">' + (item.count || 0) + ' (' + pct + '%)</span>';
+            root.appendChild(row);
+        });
+    }
+
+    function buildVisibilityProtocols(topProtocols, dpiStats) {
+        var out = (topProtocols || []).filter(function (p) { return p && p.name; }).map(function (p) {
+            return { name: String(p.name).toLowerCase(), count: Number(p.count || 0) };
+        });
+        if (out.length > 0) {
+            return out.sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
+        }
+        var candidates = [
+            { name: "http", count: Number(dpiStats.http_detected || 0) },
+            { name: "dns", count: Number(dpiStats.dns_detected || 0) },
+            { name: "tls", count: Number(dpiStats.tls_detected || 0) },
+            { name: "tcp", count: Number(dpiStats.tcp_packets || 0) },
+            { name: "udp", count: Number(dpiStats.udp_packets || 0) },
+            { name: "icmp", count: Number(dpiStats.icmp_packets || 0) },
+        ];
+        return candidates.filter(function (x) { return x.count > 0; }).sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
+    }
+
+    function buildVisibilityTopTalkers(topRemoteIPs, dpiStats) {
+        var primary = (topRemoteIPs || []).filter(function (x) { return x && x.name; }).map(function (x) {
+            return { name: String(x.name), count: Number(x.count || 0) };
+        }).sort(function (a, b) { return b.count - a.count; }).slice(0, 10);
+        if (primary.length > 0) {
+            return { source: "traffic visibility", items: primary };
+        }
+
+        var merged = {};
+        (dpiStats.top_src_ips || []).forEach(function (x) {
+            if (!x || !x.ip) return;
+            merged[x.ip] = (merged[x.ip] || 0) + Number(x.count || 0);
+        });
+        (dpiStats.top_dst_ips || []).forEach(function (x) {
+            if (!x || !x.ip) return;
+            merged[x.ip] = (merged[x.ip] || 0) + Number(x.count || 0);
+        });
+
+        var fallback = Object.keys(merged).map(function (ip) {
+            return { name: ip, count: merged[ip] };
+        }).sort(function (a, b) { return b.count - a.count; }).slice(0, 10);
+
+        return { source: fallback.length > 0 ? "dpi stats fallback" : "traffic visibility", items: fallback };
     }
 
     async function loadDPIDecodeErrorRows() {

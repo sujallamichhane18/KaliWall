@@ -351,18 +351,27 @@
                 </div>
             </div>
 
-            <div class="dashboard-grid" style="margin-bottom:20px">
-                <div class="card">
-                    <div class="card-header"><i class="fa-solid fa-chart-pie"></i><h3>Visibility Protocol Distribution</h3></div>
-                    <div class="card-body chart-body chart-body-sm">
+            <div class="dashboard-grid visibility-brand-grid" style="margin-bottom:20px">
+                <div class="card visibility-brand-card">
+                    <div class="card-header">
+                        <i class="fa-solid fa-chart-pie"></i>
+                        <h3>Visibility Protocol Distribution</h3>
+                        <span class="badge badge-enabled" id="visProtocolSnapshot">live mix</span>
+                    </div>
+                    <div class="card-body chart-body chart-body-sm visibility-protocol-card-body">
                         <canvas id="chartVisProtocolDist"></canvas>
+                        <div class="visibility-legend" id="visProtocolLegend"></div>
                     </div>
                 </div>
-                <div class="card">
-                    <div class="card-header"><i class="fa-solid fa-ranking-star"></i><h3>Top Talkers (Visibility)</h3></div>
+                <div class="card visibility-brand-card">
+                    <div class="card-header">
+                        <i class="fa-solid fa-ranking-star"></i>
+                        <h3>Top Talkers (Visibility)</h3>
+                        <span class="badge badge-disabled" id="visTopTalkersSource">source: traffic visibility</span>
+                    </div>
                     <div class="card-body table-responsive dashboard-table-wrap">
                         <table class="table" id="visTopTalkersTable">
-                            <thead><tr><th>IP</th><th>Events</th></tr></thead>
+                            <thead><tr><th>#</th><th>IP</th><th>Events</th><th>Share</th></tr></thead>
                             <tbody></tbody>
                         </table>
                     </div>
