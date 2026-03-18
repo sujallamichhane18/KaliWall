@@ -661,11 +661,10 @@ body {
     order: 30;
 }
 
-#dashboardNav { order: 1; }
-#systemBanner { order: 2; }
-#resourcesSection { order: 3; }
-#interfacesSection { order: 4; }
-#statsSection { order: 5; }
+#systemBanner { order: 1; }
+#resourcesSection { order: 2; }
+#interfacesSection { order: 3; }
+#statsSection { order: 4; }
 #dpiMonitorSection { order: 12; }
 #visibilitySection { order: 13; }
 #visibilityBrandSection { order: 14; }

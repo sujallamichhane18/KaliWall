@@ -93,28 +93,6 @@
         <!-- ===== DASHBOARD PAGE ===== -->
         <section class="page active" id="page-dashboard">
 
-            <div class="dashboard-nav" id="dashboardNav">
-                <div class="dashboard-nav-links">
-                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-system"><i class="fa-solid fa-server"></i> System</button>
-                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-dpi"><i class="fa-solid fa-magnifying-glass-chart"></i> DPI</button>
-                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-visibility"><i class="fa-solid fa-radar"></i> Visibility</button>
-                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-gauges"><i class="fa-solid fa-microchip"></i> Resources</button>
-                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-charts"><i class="fa-solid fa-chart-line"></i> Charts</button>
-                    <button class="btn btn-secondary btn-sm" data-scroll-target="dashboard-events"><i class="fa-solid fa-shield-halved"></i> Events</button>
-                </div>
-                <div class="dashboard-nav-controls">
-                    <label for="dashboardDensity">Density</label>
-                    <select id="dashboardDensity">
-                        <option value="compact">Compact</option>
-                        <option value="normal" selected>Normal</option>
-                        <option value="comfortable">Comfortable</option>
-                    </select>
-                    <label for="dashboardAutoRefreshSec">Auto refresh</label>
-                    <input type="range" id="dashboardAutoRefreshSec" min="0" max="60" step="5" value="10">
-                    <span class="badge badge-disabled" id="dashboardAutoRefreshLabel">10 sec</span>
-                </div>
-            </div>
-
             <section class="soc-dashboard" id="socDashboard">
                 <div class="soc-header">
                     <h2>SOC Firewall Command</h2>
@@ -239,11 +217,11 @@
 
             <!-- System Info Banner -->
             <div class="system-banner" id="systemBanner" data-dashboard-section="dashboard-system">
-                <div class="sys-item"><i class="fa-solid fa-server"></i> <span id="sysHostname">--</span></div>
-                <div class="sys-item"><i class="fa-brands fa-linux"></i> <span id="sysKernel">--</span></div>
                 <div class="sys-item"><i class="fa-solid fa-clock"></i> Uptime: <span id="sysUptime">--</span></div>
                 <div class="sys-item"><i class="fa-solid fa-weight-hanging"></i> Load: <span id="sysLoad">--</span></div>
                 <div class="sys-item"><i class="fa-solid fa-fire"></i> Engine: <span id="sysEngine">memory</span></div>
+                <div class="sys-item"><i class="fa-solid fa-server"></i> <span id="sysHostname">--</span></div>
+                <div class="sys-item"><i class="fa-brands fa-linux"></i> <span id="sysKernel">--</span></div>
             </div>
 
             <div class="card" id="dpiMonitorSection" style="margin-bottom:20px" data-dashboard-section="dashboard-dpi">
@@ -337,33 +315,6 @@
                     <div class="card-body table-responsive">
                         <table class="table" id="visPeersTable">
                             <thead><tr><th>Remote IP</th><th>Host</th><th>Connections</th><th>Duration</th><th>Volume</th></tr></thead>
-                            <tbody></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <div class="dashboard-grid visibility-brand-grid" id="visibilityBrandSection" style="margin-bottom:20px" data-dashboard-section="dashboard-visibility">
-                <div class="card visibility-brand-card">
-                    <div class="card-header">
-                        <i class="fa-solid fa-chart-pie"></i>
-                        <h3>Visibility Protocol Distribution</h3>
-                        <span class="badge badge-enabled" id="visProtocolSnapshot">live mix</span>
-                    </div>
-                    <div class="card-body chart-body chart-body-sm visibility-protocol-card-body">
-                        <canvas id="chartVisProtocolDist"></canvas>
-                        <div class="visibility-legend" id="visProtocolLegend"></div>
-                    </div>
-                </div>
-                <div class="card visibility-brand-card">
-                    <div class="card-header">
-                        <i class="fa-solid fa-ranking-star"></i>
-                        <h3>Top Talkers (Visibility)</h3>
-                        <span class="badge badge-disabled" id="visTopTalkersSource">source: traffic visibility</span>
-                    </div>
-                    <div class="card-body table-responsive dashboard-table-wrap">
-                        <table class="table" id="visTopTalkersTable">
-                            <thead><tr><th>#</th><th>IP</th><th>Events</th><th>Share</th></tr></thead>
                             <tbody></tbody>
                         </table>
                     </div>
