@@ -20,6 +20,7 @@
     var peerHostMap = {};
     var dpiRunning = false;
     const SIDEBAR_WIDTH_KEY = "kaliwall_sidebar_width";
+    const SIDEBAR_COLLAPSED_KEY = "kaliwall_sidebar_collapsed";
     const LOG_TABLE_SETTINGS_KEY = "kaliwall_log_table_settings";
     const DASHBOARD_PREFS_KEY = "kaliwall_dashboard_prefs";
     var logTableSettings = {
@@ -112,6 +113,7 @@
     const pageTitle = document.getElementById("pageTitle");
     const sidebar = document.getElementById("sidebar");
     const menuToggle = document.getElementById("menuToggle");
+    var sidebarBackdrop = null;
 
     const pageTitles = {
         dashboard: "Dashboard",
@@ -130,9 +132,104 @@
         pages.forEach((p) => p.classList.remove("active"));
         document.getElementById("page-" + target).classList.add("active");
         pageTitle.textContent = pageTitles[target] || "KaliWall";
-        sidebar.classList.remove("open");
+        if (isMobileViewport()) setSidebarState(false);
         if (target !== "logs") stopLogStream();
         loadPageData(target);
+    }
+
+    function isMobileViewport() {
+        return window.matchMedia("(max-width: 900px)").matches;
+    }
+
+    function ensureSidebarBackdrop() {
+        if (sidebarBackdrop) return;
+        sidebarBackdrop = document.createElement("div");
+        sidebarBackdrop.className = "sidebar-backdrop";
+        sidebarBackdrop.addEventListener("click", function () {
+            setSidebarState(false);
+        });
+        document.body.appendChild(sidebarBackdrop);
+    }
+
+    function syncMenuToggleVisual() {
+        if (!menuToggle || !sidebar) return;
+        const mobile = isMobileViewport();
+        const open = mobile ? sidebar.classList.contains("open") : !sidebar.classList.contains("collapsed");
+        const icon = menuToggle.querySelector("i");
+
+        menuToggle.classList.toggle("is-active", open);
+        menuToggle.setAttribute("aria-expanded", open ? "true" : "false");
+
+        if (icon) {
+            icon.className = mobile && open ? "fa-solid fa-xmark" : "fa-solid fa-bars";
+        }
+    }
+
+    function setSidebarState(nextState) {
+        if (!sidebar || !menuToggle) return;
+        const mobile = isMobileViewport();
+
+        if (mobile) {
+            const open = !!nextState;
+            sidebar.classList.toggle("open", open);
+            sidebar.classList.remove("collapsed");
+            ensureSidebarBackdrop();
+            if (sidebarBackdrop) sidebarBackdrop.classList.toggle("open", open);
+            document.body.classList.toggle("sidebar-open-mobile", open);
+            syncMenuToggleVisual();
+            return;
+        }
+
+        const collapsed = !!nextState;
+        sidebar.classList.remove("open");
+        sidebar.classList.toggle("collapsed", collapsed);
+        if (sidebarBackdrop) sidebarBackdrop.classList.remove("open");
+        document.body.classList.remove("sidebar-open-mobile");
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+        syncMenuToggleVisual();
+    }
+
+    function initSidebarToggle() {
+        if (!sidebar || !menuToggle) return;
+
+        menuToggle.setAttribute("aria-label", "Toggle sidebar");
+        menuToggle.setAttribute("aria-controls", "sidebar");
+
+        ensureSidebarBackdrop();
+
+        if (!isMobileViewport()) {
+            const savedCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+            setSidebarState(savedCollapsed);
+        } else {
+            setSidebarState(false);
+        }
+
+        menuToggle.addEventListener("click", function () {
+            if (isMobileViewport()) {
+                setSidebarState(!sidebar.classList.contains("open"));
+                return;
+            }
+            setSidebarState(!sidebar.classList.contains("collapsed"));
+        });
+
+        window.addEventListener("resize", function () {
+            if (isMobileViewport()) {
+                setSidebarState(false);
+                return;
+            }
+            const savedCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+            sidebar.classList.remove("open");
+            sidebar.classList.toggle("collapsed", savedCollapsed);
+            if (sidebarBackdrop) sidebarBackdrop.classList.remove("open");
+            document.body.classList.remove("sidebar-open-mobile");
+            syncMenuToggleVisual();
+        });
+
+        document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape" && isMobileViewport() && sidebar.classList.contains("open")) {
+                setSidebarState(false);
+            }
+        });
     }
 
     navItems.forEach((item) => {
@@ -150,7 +247,7 @@
         });
     });
 
-    menuToggle.addEventListener("click", () => sidebar.classList.toggle("open"));
+    initSidebarToggle();
 
     // ---------- Data Loading ----------
 
@@ -2093,15 +2190,17 @@
         }
         data.forEach(function (entry) {
             const tr = document.createElement("tr");
+            const ipText = escapeHtml(entry.ip);
+            const ownerText = escapeHtml(entry.owner || "-");
             tr.innerHTML =
-                "<td><strong>" + escapeHtml(entry.ip) + "</strong></td>" +
+                '<td><strong class="threat-ip" title="' + ipText + '">' + ipText + "</strong></td>" +
                 "<td>" + threatBadge(entry) + "</td>" +
                 "<td>" + (entry.malicious || 0) + "</td>" +
                 "<td>" + (entry.suspicious || 0) + "</td>" +
                 "<td>" + (entry.harmless || 0) + "</td>" +
                 "<td>" + (entry.reputation || 0) + "</td>" +
                 "<td>" + escapeHtml(entry.country || "-") + "</td>" +
-                "<td>" + escapeHtml(entry.owner || "-") + "</td>" +
+                '<td><span class="threat-owner" title="' + ownerText + '">' + ownerText + "</span></td>" +
                 "<td>" + (entry.has_connection ? '<span class="badge badge-enabled"><i class="fa-solid fa-link"></i> Yes</span>' : '<span class="badge badge-disabled">No</span>') + "</td>" +
                 "<td>" + (entry.is_blocked ? '<span class="badge badge-drop"><i class="fa-solid fa-ban"></i> Blocked</span>' : '<span class="badge badge-enabled">Open</span>') + "</td>" +
                 "<td>" + formatTime(entry.checked_at) + "</td>" +
