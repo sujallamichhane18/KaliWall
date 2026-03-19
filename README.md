@@ -327,7 +327,7 @@ chmod +x start.sh && ./start.sh
 
 ---
 
-<h3>Made with ❤️ by <a href="https://github.com/sujallamichhane18">Sujal Lamichhane</a></h3>
+<h3>Made with ❤️</a></h3>
 
 <br/>
 
