@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"kaliwall/internal/analytics"
 	"kaliwall/internal/dpi/pipeline"
@@ -175,6 +177,7 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/dpi/control", h.handleDPIControl)
 	mux.HandleFunc("/api/v1/dpi/workers", h.handleDPIWorkers)
 	mux.HandleFunc("/api/v1/geo/attacks", h.handleGeoAttacks)
+	mux.HandleFunc("/api/v1/geo/me", h.handleGeoMe)
 	mux.HandleFunc("/api/v1/geo/stream", h.handleGeoStream)
 	mux.HandleFunc("/api/v1/proxy/malicious-domains", h.handleProxyMaliciousDomains)
 	mux.HandleFunc("/api/v1/proxy/malicious-domains/reload", h.handleProxyMaliciousDomainsReload)
@@ -448,6 +451,10 @@ type handlers struct {
 	geo       *geoip.Service
 	proxy     maliciousDomainProxy
 	aiService *ai.OpenRouterService
+
+	myGeoMu      sync.RWMutex
+	myGeoCache   models.GeoLocation
+	myGeoExpiry  time.Time
 }
 
 func (h *handlers) handleProxyMaliciousDomains(w http.ResponseWriter, r *http.Request) {
@@ -527,6 +534,23 @@ func (h *handlers) handleGeoAttacks(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: points})
 }
 
+func (h *handlers) handleGeoMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if h.geo == nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "GeoIP unavailable"})
+		return
+	}
+	loc, ok := h.resolveMyGeoLocation()
+	if !ok {
+		respond(w, http.StatusNotFound, models.APIResponse{Success: false, Message: "Unable to determine public location"})
+		return
+	}
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: loc})
+}
+
 func (h *handlers) handleGeoStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -573,13 +597,22 @@ func (h *handlers) toGeoAttackPoint(ev models.FirewallEvent) (models.GeoAttackPo
 		return models.GeoAttackPoint{}, false
 	}
 	src, srcOK := h.geo.Lookup(ev.SrcIP)
-	dst, dstOK := h.geo.Lookup(ev.DstIP)
 	if !srcOK {
 		return models.GeoAttackPoint{}, false
 	}
-	if !dstOK {
-		dst = models.GeoLocation{}
+
+	target, targetOK := h.resolveMyGeoLocation()
+	if !targetOK {
+		dst, dstOK := h.geo.Lookup(ev.DstIP)
+		if dstOK {
+			target = dst
+			targetOK = true
+		}
 	}
+	if !targetOK {
+		target = models.GeoLocation{}
+	}
+
 	return models.GeoAttackPoint{
 		Timestamp: ev.Timestamp,
 		EventType: ev.EventType,
@@ -588,8 +621,100 @@ func (h *handlers) toGeoAttackPoint(ev models.FirewallEvent) (models.GeoAttackPo
 		RuleID:    ev.RuleID,
 		Detail:    ev.Detail,
 		Source:    src,
-		Target:    dst,
+		Target:    target,
 	}, true
+}
+
+func (h *handlers) resolveMyGeoLocation() (models.GeoLocation, bool) {
+	if h == nil || h.geo == nil {
+		return models.GeoLocation{}, false
+	}
+
+	now := time.Now()
+	h.myGeoMu.RLock()
+	if now.Before(h.myGeoExpiry) && h.myGeoCache.IP != "" {
+		loc := h.myGeoCache
+		h.myGeoMu.RUnlock()
+		return loc, true
+	}
+	h.myGeoMu.RUnlock()
+
+	if ip, ok := h.detectLikelyPublicIPFromEvents(); ok {
+		if loc, found := h.geo.Lookup(ip); found {
+			h.myGeoMu.Lock()
+			h.myGeoCache = loc
+			h.myGeoExpiry = now.Add(10 * time.Minute)
+			h.myGeoMu.Unlock()
+			return loc, true
+		}
+	}
+
+	if ip, ok := fetchPublicIP(); ok {
+		if loc, found := h.geo.Lookup(ip); found {
+			h.myGeoMu.Lock()
+			h.myGeoCache = loc
+			h.myGeoExpiry = now.Add(10 * time.Minute)
+			h.myGeoMu.Unlock()
+			return loc, true
+		}
+	}
+
+	return models.GeoLocation{}, false
+}
+
+func (h *handlers) detectLikelyPublicIPFromEvents() (string, bool) {
+	events := h.logger.RecentFirewallEvents(600)
+	if len(events) == 0 {
+		return "", false
+	}
+
+	counts := make(map[string]int)
+	for _, ev := range events {
+		if ev.DstIP == "" {
+			continue
+		}
+		if _, ok := h.geo.Lookup(ev.DstIP); ok {
+			counts[ev.DstIP]++
+		}
+	}
+
+	bestIP := ""
+	bestCount := 0
+	for ip, c := range counts {
+		if c > bestCount {
+			bestIP = ip
+			bestCount = c
+		}
+	}
+	if bestIP == "" {
+		return "", false
+	}
+	return bestIP, true
+}
+
+func fetchPublicIP() (string, bool) {
+	urls := []string{"https://api.ipify.org", "https://ifconfig.me/ip"}
+	client := &http.Client{Timeout: 3 * time.Second}
+	for _, u := range urls {
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
+		ip := strings.TrimSpace(string(body))
+		if ip != "" {
+			return ip, true
+		}
+	}
+	return "", false
 }
 
 // ---------- Rules ----------

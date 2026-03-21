@@ -15,6 +15,7 @@
     var geoLayer = null;
     var geoMarkers = [];
     var geoCountryAgg = {};
+    var geoMyLocation = null;
     var maxEventRows = 120;
     var maxGeoMarkers = 450;
     var peerHostMap = {};
@@ -595,6 +596,7 @@
     async function loadSOCGeoAttacks() {
         initGeoMap();
         geoCountryAgg = {};
+        await loadGeoMyLocation();
         const res = await apiFetch("/geo/attacks?limit=300");
         clearGeoMarkers();
         if (!res.success) {
@@ -623,6 +625,37 @@
         if (geoAttackEventSource) {
             geoAttackEventSource.close();
             geoAttackEventSource = null;
+        }
+    }
+
+    async function loadGeoMyLocation() {
+        const badge = document.getElementById("geoMyLocationBadge");
+        if (badge) {
+            badge.className = "badge badge-disabled";
+            badge.textContent = "My Location: detecting...";
+        }
+
+        const res = await apiFetch("/geo/me");
+        if (!res.success || !res.data) {
+            geoMyLocation = null;
+            if (badge) {
+                badge.className = "badge badge-reject";
+                badge.textContent = "My Location: unavailable";
+                badge.title = res.message || "Unable to detect your public geo location";
+            }
+            return;
+        }
+
+        geoMyLocation = res.data;
+        if (badge) {
+            badge.className = "badge badge-enabled";
+            badge.textContent = "My Location: " + (geoMyLocation.country || "Unknown") + " (" + (geoMyLocation.ip || "-") + ")";
+            badge.title = (geoMyLocation.city || "") ? (geoMyLocation.city + ", " + (geoMyLocation.country || "")) : (geoMyLocation.country || "");
+        }
+
+        if (geoMap && geoMyLocation.latitude && geoMyLocation.longitude) {
+            // Center around defender location so inbound lines are meaningful.
+            geoMap.setView([Number(geoMyLocation.latitude), Number(geoMyLocation.longitude)], 3);
         }
     }
 
@@ -680,8 +713,13 @@
         var tLat = Number(target.latitude);
         var tLon = Number(target.longitude);
         if (!tLat || !tLon || (tLat === 0 && tLon === 0)) {
-            tLat = 38.9072; // Default server latitude
-            tLon = -77.0369; // Default server longitude
+            if (geoMyLocation && geoMyLocation.latitude && geoMyLocation.longitude) {
+                tLat = Number(geoMyLocation.latitude);
+                tLon = Number(geoMyLocation.longitude);
+            } else {
+                tLat = 38.9072; // Fallback only when my location is unavailable
+                tLon = -77.0369;
+            }
         }
 
         var line = L.polyline([[lat, lon], [tLat, tLon]], {
@@ -696,7 +734,7 @@
             "IP: " + escapeHtml(src.ip || "-") + "<br>" +
             "Action: " + escapeHtml((point.action || "-").toUpperCase()) + "<br>" +
             "Severity: " + escapeHtml(sev) + "<br>" +
-            "Target: " + escapeHtml(target.ip || "-")
+            "Target: " + escapeHtml((target.country || "My Host") + (target.ip ? (" (" + target.ip + ")") : ""))
         );
         marker.addTo(geoLayer);
         geoMarkers.push({ marker: marker, line: line, time: Date.now() });
