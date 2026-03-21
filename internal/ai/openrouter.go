@@ -136,15 +136,6 @@ func (s *OpenRouterService) SuggestRuleDecision(packetMeta map[string]interface{
 		return RuleDecision{}, fmt.Errorf("openrouter API key not configured")
 	}
 
-	if !isBlockedOrSuspiciousTraffic(packetMeta) {
-		return RuleDecision{
-			ShouldCreateRule: false,
-			Confidence:       0,
-			Reason:           "Traffic is not blocked or suspicious; no automatic rule suggestion.",
-			Rule:             defaultSuggestedRule(),
-		}, nil
-	}
-
 	packetBytes, err := json.MarshalIndent(packetMeta, "", "  ")
 	if err != nil {
 		return RuleDecision{}, fmt.Errorf("failed to marshal packet: %w", err)
@@ -154,8 +145,7 @@ func (s *OpenRouterService) SuggestRuleDecision(packetMeta map[string]interface{
 
 	content, err := s.callOpenRouterWithFallback(key, prompt, 220)
 	if err != nil {
-		// If model access is unavailable, return a guarded heuristic recommendation.
-		return heuristicRuleDecision(packetMeta), nil
+		return RuleDecision{}, fmt.Errorf("AI decision unavailable: %w", err)
 	}
 
 	content = strings.TrimSpace(content)
@@ -166,7 +156,7 @@ func (s *OpenRouterService) SuggestRuleDecision(packetMeta map[string]interface{
 
 	var decision RuleDecision
 	if err := json.Unmarshal([]byte(content), &decision); err != nil {
-		return heuristicRuleDecision(packetMeta), nil
+		return RuleDecision{}, fmt.Errorf("AI returned non-JSON decision: %w", err)
 	}
 
 	if decision.Confidence < 0 {
@@ -179,12 +169,6 @@ func (s *OpenRouterService) SuggestRuleDecision(packetMeta map[string]interface{
 	decision.Rule = sanitizeSuggestedRule(decision.Rule)
 	if decision.Reason == "" {
 		decision.Reason = "AI rule decision generated."
-	}
-
-	// Safety gate: only allow auto-rule proposal at medium+ confidence.
-	if decision.ShouldCreateRule && decision.Confidence < 60 {
-		decision.ShouldCreateRule = false
-		decision.Reason = "Confidence below safety threshold (60%); admin review required before creating a rule."
 	}
 
 	return decision, nil
