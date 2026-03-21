@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -49,6 +50,10 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 		return "", fmt.Errorf("openrouter API key not configured")
 	}
 
+	if !isBlockedOrSuspiciousTraffic(packetMeta) {
+		return "AI explanation is only available for blocked or suspicious traffic.", nil
+	}
+
 	packetBytes, err := json.MarshalIndent(packetMeta, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal packet: %w", err)
@@ -57,7 +62,7 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 	prompt := fmt.Sprintf("You are an AI security assistant. Return exactly one short sentence in plain language explaining why this packet was blocked. Use only key facts. No rule names. No extra text. Keep it very brief.\n\nBlocked packet:\n%s", string(packetBytes))
 
 	reqBody := map[string]interface{}{
-		"model": "qwen/qwen-2.5-7b-instruct:free",
+		"model": "openai/gpt-oss-20b:free",
 		"messages": []map[string]string{
 			{
 				"role":    "user",
@@ -115,4 +120,31 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 	}
 
 	return orResp.Choices[0].Message.Content, nil
+}
+
+func isBlockedOrSuspiciousTraffic(packetMeta map[string]interface{}) bool {
+	if len(packetMeta) == 0 {
+		return false
+	}
+
+	flat := strings.ToLower(fmt.Sprintf("%v", packetMeta))
+
+	riskyKeywords := []string{
+		"blocked", "block", "drop", "reject", "deny", "denied",
+		"suspicious", "malicious", "threat", "exploit", "attack", "anomaly",
+	}
+	for _, k := range riskyKeywords {
+		if strings.Contains(flat, k) {
+			return true
+		}
+	}
+
+	normalKeywords := []string{"allow", "allowed", "accept", "accepted", "benign", "normal"}
+	for _, k := range normalKeywords {
+		if strings.Contains(flat, k) {
+			return false
+		}
+	}
+
+	return false
 }
