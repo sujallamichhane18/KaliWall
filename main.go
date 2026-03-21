@@ -26,7 +26,6 @@ import (
 	"kaliwall/internal/proxy"
 	"kaliwall/internal/threatintel"
 	"kaliwall/internal/ai"
-	"kaliwall/internal/ai"
 
 	"github.com/google/gopacket/pcap"
 )
