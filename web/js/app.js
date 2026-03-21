@@ -2415,10 +2415,11 @@
             const shouldCreate = !!decision.should_create_rule;
             const reason = decision.reason || "No reason provided";
             const confidence = Number(decision.confidence || 0);
+            const source = decision.decision_source || "unknown";
 
             if (!shouldCreate) {
                 toast("AI decision: no rule suggested", "success");
-                alert("AI Decision\n\nCreate rule: NO\nConfidence: " + confidence + "%\nReason: " + reason);
+                alert("AI Decision\n\nCreate rule: NO\nConfidence: " + confidence + "%\nSource: " + source + "\nReason: " + reason);
                 return;
             }
 
@@ -2434,6 +2435,7 @@
                 "Action: " + (rule.action || "DROP") + "\n" +
                 "Comment: " + (rule.comment || "AI suggested security rule") + "\n\n" +
                 "Confidence: " + confidence + "%\n" +
+                "Source: " + source + "\n" +
                 "Reason: " + reason + "\n\n" +
                 "Approve and create this firewall rule?";
 

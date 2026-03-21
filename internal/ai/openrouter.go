@@ -18,6 +18,7 @@ type RuleDecision struct {
 	ShouldCreateRule bool               `json:"should_create_rule"`
 	Confidence       int                `json:"confidence"`
 	Reason           string             `json:"reason"`
+	DecisionSource   string             `json:"decision_source"`
 	Rule             models.RuleRequest `json:"rule"`
 }
 
@@ -167,6 +168,7 @@ func (s *OpenRouterService) SuggestRuleDecision(packetMeta map[string]interface{
 	}
 
 	decision.Rule = sanitizeSuggestedRule(decision.Rule)
+	decision.DecisionSource = "openrouter-ai"
 	if decision.Reason == "" {
 		decision.Reason = "AI rule decision generated."
 	}
@@ -349,76 +351,6 @@ func heuristicExplanation(packetMeta map[string]interface{}) string {
 		return "Suspicious traffic was blocked due to detected threat indicators."
 	}
 	return "Traffic was blocked because it matched suspicious or malicious behavior indicators."
-}
-
-func heuristicRuleDecision(packetMeta map[string]interface{}) RuleDecision {
-	risk := trafficRiskScore(packetMeta)
-	rule := defaultSuggestedRule()
-
-	flat := strings.ToLower(fmt.Sprintf("%v", packetMeta))
-	if src := extractValue(flat, `source:\s*([^\s,}]+)`); src != "" {
-		rule.SrcIP = src
-	}
-	if dst := extractValue(flat, `destination:\s*([^\s,}]+)`); dst != "" {
-		rule.DstIP = dst
-	}
-	if proto := extractValue(flat, `protocol:\s*([^\s,}]+)`); proto != "" {
-		rule.Protocol = proto
-	}
-	rule = sanitizeSuggestedRule(rule)
-
-	if risk < 60 {
-		return RuleDecision{
-			ShouldCreateRule: false,
-			Confidence:       risk,
-			Reason:           "Heuristic analysis: risk below threshold for automatic rule suggestion.",
-			Rule:             rule,
-		}
-	}
-
-	return RuleDecision{
-		ShouldCreateRule: true,
-		Confidence:       risk,
-		Reason:           "Heuristic fallback: repeated blocked/suspicious pattern suggests containment rule.",
-		Rule:             rule,
-	}
-}
-
-func trafficRiskScore(packetMeta map[string]interface{}) int {
-	flat := strings.ToLower(fmt.Sprintf("%v", packetMeta))
-	score := 0
-	isBlocked := strings.Contains(flat, "block") || strings.Contains(flat, "drop") || strings.Contains(flat, "reject")
-	hasMalware := strings.Contains(flat, "malware") || strings.Contains(flat, "botnet") || strings.Contains(flat, "c2") || strings.Contains(flat, "command and control") || strings.Contains(flat, "communcation with")
-	hasSuspicious := strings.Contains(flat, "suspicious") || strings.Contains(flat, "malicious") || strings.Contains(flat, "threat")
-
-	if isBlocked {
-		score += 35
-	}
-	if hasSuspicious {
-		score += 30
-	}
-	if hasMalware {
-		score += 35
-	}
-	if strings.Contains(flat, "exploit") || strings.Contains(flat, "attack") || strings.Contains(flat, "sqli") || strings.Contains(flat, "xss") || strings.Contains(flat, "c2") {
-		score += 25
-	}
-	if strings.Contains(flat, "deny") || strings.Contains(flat, "denied") || strings.Contains(flat, "anomaly") {
-		score += 10
-	}
-
-	// Boost confidence for explicit malware communication blocks.
-	if isBlocked && hasMalware {
-		score += 20
-	}
-
-	if score > 100 {
-		score = 100
-	}
-	if score < 0 {
-		score = 0
-	}
-	return score
 }
 
 func extractValue(input, pattern string) string {
