@@ -25,6 +25,8 @@ import (
 	"kaliwall/internal/netmon"
 	"kaliwall/internal/proxy"
 	"kaliwall/internal/threatintel"
+	"kaliwall/internal/ai"
+	"kaliwall/internal/ai"
 
 	"github.com/google/gopacket/pcap"
 )
@@ -195,7 +197,10 @@ func main() {
 		httpProxy.StartAutoReload(proxyCtx, *proxyReloadInterval)
 	}
 
-	handler := api.NewRouter(fw, trafficLogger, ti, analyticsService, dpiProvider, geoSvc, httpProxy)
+	// Initialize OpenRouter AI service
+	aiService := ai.NewOpenRouterService()
+
+	handler := api.NewRouter(fw, trafficLogger, ti, analyticsService, dpiProvider, geoSvc, httpProxy, aiService)
 
 	// Graceful shutdown on SIGINT/SIGTERM
 	stop := make(chan os.Signal, 1)

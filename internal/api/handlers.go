@@ -21,6 +21,7 @@ import (
 	"kaliwall/internal/proxy"
 	"kaliwall/internal/sysinfo"
 	"kaliwall/internal/threatintel"
+	"kaliwall/internal/ai"
 )
 
 type dpiStatusProvider interface {
@@ -137,10 +138,10 @@ func (p *DPIProvider) SetWorkers(workers int) error {
 }
 
 // NewRouter creates the HTTP mux with all API routes and static file serving.
-func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Service, an *analytics.Service, dpi *DPIProvider, geo *geoip.Service, proxy maliciousDomainProxy) http.Handler {
+func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Service, an *analytics.Service, dpi *DPIProvider, geo *geoip.Service, proxy maliciousDomainProxy, aiService *ai.OpenRouterService) http.Handler {
 	mux := http.NewServeMux()
 
-	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo, proxy: proxy}
+	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo, proxy: proxy, aiService: aiService}
 
 	// REST API v1 endpoints
 	mux.HandleFunc("/api/v1/rules", h.handleRules)
@@ -178,6 +179,8 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/proxy/malicious-domains", h.handleProxyMaliciousDomains)
 	mux.HandleFunc("/api/v1/proxy/malicious-domains/reload", h.handleProxyMaliciousDomainsReload)
 	mux.HandleFunc("/api/v1/proxy/blocked-events", h.handleProxyBlockedEvents)
+	mux.HandleFunc("/api/v1/ai/apikey", h.handleAIApiKey)
+	mux.HandleFunc("/api/v1/ai/explain", h.handleAIExplain)
 
 	// Serve web UI from the "web" directory
 	fs := http.FileServer(http.Dir("web"))
@@ -442,6 +445,7 @@ type handlers struct {
 	dpi       *DPIProvider
 	geo       *geoip.Service
 	proxy     maliciousDomainProxy
+	aiService *ai.OpenRouterService
 }
 
 func (h *handlers) handleProxyMaliciousDomains(w http.ResponseWriter, r *http.Request) {
@@ -1034,6 +1038,58 @@ func (h *handlers) handleAnalyticsStream(w http.ResponseWriter, r *http.Request)
 			flusher.Flush()
 		}
 	}
+}
+
+// ---------- AI Explainability  ----------
+
+func (h *handlers) handleAIApiKey(w http.ResponseWriter, r *http.Request) {
+	if h.aiService == nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "AI service unavailable"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		respond(w, http.StatusOK, models.APIResponse{
+			Success: true,
+			Data: map[string]interface{}{
+				"configured": h.aiService.HasAPIKey(),
+			},
+		})
+	case http.MethodPost:
+		var body struct {
+			APIKey string `json:"api_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.APIKey == "" {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "api_key is required"})
+			return
+		}
+		h.aiService.SetAPIKey(body.APIKey)
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "OpenRouter API key saved"})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (h *handlers) handleAIExplain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if h.aiService == nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "AI service unavailable"})
+		return
+	}
+	var packetMeta map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&packetMeta); err != nil {
+		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "Invalid JSON packet metadata"})
+		return
+	}
+	explanation, err := h.aiService.ExplainBlock(packetMeta)
+	if err != nil {
+		respond(w, http.StatusInternalServerError, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: explanation})
 }
 
 // ---------- Helpers ----------

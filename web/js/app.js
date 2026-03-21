@@ -134,7 +134,7 @@
         if (target !== "logs") stopLogStream();
         loadPageData(target);
         if (target === "dashboard" && geoMap) {
-            setTimeout(function() { geoMap.invalidateSize(); }, 200);
+            setTimeout(function() { geoMap.invalidateSize(); }, 400);
         }
     }
 
@@ -205,32 +205,40 @@
     }
 
     async function apiFetch(endpoint) {
-        const res = await fetch(API + endpoint, {
-            headers: { "Accept": "application/json" },
-        });
-        const raw = await res.text();
-        let data = {};
-        if (raw) {
-            try {
-                data = JSON.parse(raw);
-            } catch (_err) {
-                data = {
-                    success: false,
-                    message: "Invalid JSON response from server",
-                    data: null,
-                };
+        try {
+            const res = await fetch(API + endpoint, {
+                headers: { "Accept": "application/json" },
+            });
+            const raw = await res.text();
+            let data = {};
+            if (raw) {
+                try {
+                    data = JSON.parse(raw);
+                } catch (_err) {
+                    data = {
+                        success: false,
+                        message: "Invalid JSON response from server",
+                        data: null,
+                    };
+                }
             }
+            if (typeof data !== "object" || data === null) {
+                data = { success: false, message: "Invalid response payload", data: null };
+            }
+            if (typeof data.success !== "boolean") {
+                data.success = res.ok;
+            }
+            if (!res.ok && !data.message) {
+                data.message = "HTTP " + res.status;
+            }
+            return data;
+        } catch (err) {
+            return {
+                success: false,
+                message: "Network error: " + err.message,
+                data: null
+            };
         }
-        if (typeof data !== "object" || data === null) {
-            data = { success: false, message: "Invalid response payload", data: null };
-        }
-        if (typeof data.success !== "boolean") {
-            data.success = res.ok;
-        }
-        if (!res.ok && !data.message) {
-            data.message = "HTTP " + res.status;
-        }
-        return data;
     }
 
     function initDashboardControls() {
@@ -614,7 +622,11 @@
     }
 
     function initGeoMap() {
-        if (geoMap || !window.L) return;
+        if (geoMap) {
+            if (window.L) { setTimeout(function() { geoMap.invalidateSize(); }, 200); }
+            return;
+        }
+        if (!window.L) return;
         var canvas = document.getElementById("geoWidgetMap") || document.getElementById("socGeoMap");
         if (!canvas) return;
         geoMap = L.map(canvas.id, { zoomControl: true, worldCopyJump: true }).setView([20, 0], 2);
@@ -623,6 +635,7 @@
             attribution: "&copy; OpenStreetMap contributors",
         }).addTo(geoMap);
         geoLayer = L.layerGroup().addTo(geoMap);
+        setTimeout(function() { geoMap.invalidateSize(); }, 400);
     }
 
     function clearGeoMarkers() {
@@ -1080,6 +1093,8 @@
         }
 
         filtered.forEach(function (row) {
+            const explainMeta = "DPI Alert on " + (row.src || "-") + ": " + (row.reason || "-");
+            const encodedMeta = encodeURIComponent(explainMeta);
             const tr = document.createElement("tr");
             tr.innerHTML =
                 "<td>" + formatTime(row.timestamp) + "</td>" +
@@ -1087,7 +1102,8 @@
                 "<td>" + actionBadge(row.action) + "</td>" +
                 "<td>" + escapeHtml(row.src) + "</td>" +
                 "<td>" + escapeHtml(row.protocol.toUpperCase()) + "</td>" +
-                "<td>" + escapeHtml(row.reason) + "</td>";
+                "<td><div style='display:flex; justify-content:space-between; align-items:center;'>" + escapeHtml(row.reason) + 
+                " <button class='btn-icon secondary' onclick=\"KaliWall.explainPacket(decodeURIComponent('" + encodedMeta + "'))\" title='Explain with AI'><i class='fa-solid fa-magic'></i></button></div></td>";
             tbody.appendChild(tr);
         });
     }
@@ -2078,12 +2094,15 @@
             return;
         }
         res.data.forEach(function (entry) {
+            const explainMeta = "Blocked IP: " + (entry.ip || "-") + " Reason: " + (entry.reason || "-");
+            const encodedMeta = encodeURIComponent(explainMeta);
             const tr = document.createElement("tr");
             tr.innerHTML =
                 "<td><strong>" + escapeHtml(entry.ip) + "</strong></td>" +
                 "<td>" + escapeHtml(entry.reason || "-") + "</td>" +
                 "<td>" + formatTime(entry.created_at) + "</td>" +
                 '<td class="action-cell">' +
+                    '<button class="btn btn-sm btn-secondary" style="margin-right:4px;" onclick="KaliWall.explainPacket(decodeURIComponent(\'' + encodedMeta + '\'))"><i class="fa-solid fa-magic"></i> Explain</button>' +
                     '<button class="btn btn-sm btn-danger" onclick="KaliWall.unblockIP(\'' + escapeHtml(entry.ip) + '\')"><i class="fa-solid fa-unlock"></i> Unblock</button>' +
                 "</td>";
             tbody.appendChild(tr);
@@ -2215,8 +2234,50 @@
         }
     }
 
+    async function explainPacket(packetData) {
+        const modal = document.getElementById("aiExplanationModal");
+        const text = document.getElementById("aiExplanationText");
+        if (!modal || !text) {
+            toast("AI explanation modal is not available", "error");
+            return;
+        }
+
+        text.textContent = "Generating explanation...";
+        modal.classList.add("open");
+
+        try {
+            const payload = {
+                packet_data: packetData || "No packet metadata provided",
+            };
+            const res = await fetch(API + "/ai/explain", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!data.success) {
+                text.textContent = data.message || "Unable to generate explanation.";
+                toast(data.message || "AI explanation failed", "error");
+                return;
+            }
+
+            const explanation = typeof data.data === "string"
+                ? data.data
+                : (data.data && data.data.explanation) || "No explanation returned.";
+            text.textContent = explanation;
+        } catch (err) {
+            text.textContent = "Request failed while contacting AI service.";
+            toast((err && err.message) || "AI explanation failed", "error");
+        }
+    }
+
+    function closeAIExplanationModal() {
+        const modal = document.getElementById("aiExplanationModal");
+        if (modal) modal.classList.remove("open");
+    }
+
     // Expose to inline onclick handlers safely
-    window.KaliWall = { toggleRule, deleteRule, editRule, unblockIP, unblockWebsite, blockIPFromThreat };
+    window.KaliWall = { toggleRule, deleteRule, editRule, unblockIP, unblockWebsite, blockIPFromThreat, explainPacket };
 
     // ---------- Refresh Buttons ----------
 
@@ -2235,6 +2296,13 @@
     document.getElementById("btnRefreshLogs").addEventListener("click", () => {
         refreshLogsFromBackend();
         toast("Logs refreshed", "success");
+    });
+    document.getElementById("aiModalClose").addEventListener("click", closeAIExplanationModal);
+    document.getElementById("btnAIModalClose").addEventListener("click", closeAIExplanationModal);
+    document.getElementById("aiExplanationModal").addEventListener("click", function (e) {
+        if (e.target && e.target.id === "aiExplanationModal") {
+            closeAIExplanationModal();
+        }
     });
     document.getElementById("btnRefreshDNSStats").addEventListener("click", () => loadDNSStats());
     document.getElementById("btnRefreshDPIStatus").addEventListener("click", () => loadDPIStatus());
@@ -2381,6 +2449,7 @@
         }
 
         loadFirewallEngineSettings();
+        loadAIApiKeySettings();
     }
 
     async function loadFirewallEngineSettings() {
@@ -2414,6 +2483,20 @@
         if (res.data.last_error) {
             status.className = "badge badge-reject";
             status.textContent = "Engine warning: " + res.data.last_error;
+        }
+    }
+
+    async function loadAIApiKeySettings() {
+        var res = await apiFetch("/ai/apikey");
+        if (!res.success) return;
+        var badge = document.getElementById("aiApiKeyBadge");
+        if (!badge) return;
+        if (res.data.configured) {
+            badge.className = "badge badge-enabled";
+            badge.innerHTML = '<i class="fa-solid fa-check"></i> API key configured';
+        } else {
+            badge.className = "badge badge-disabled";
+            badge.textContent = "Not configured";
         }
     }
 
@@ -2503,6 +2586,24 @@
             loadSettings();
         } else {
             toast(data.message || "Failed to save key", "error");
+        }
+    });
+
+    document.getElementById("btnSaveAIApiKey").addEventListener("click", async function () {
+        var key = document.getElementById("aiApiKey").value.trim();
+        if (!key) { toast("Enter an OpenRouter API key", "error"); return; }
+        var res = await fetch(API + "/ai/apikey", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: key }),
+        });
+        var data = await res.json();
+        if (data.success) {
+            toast("OpenRouter API key saved", "success");
+            document.getElementById("aiApiKey").value = "";
+            loadAIApiKeySettings();
+        } else {
+            toast(data.message || "Failed to save OpenRouter key", "error");
         }
     });
 

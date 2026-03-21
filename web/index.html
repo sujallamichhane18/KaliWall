@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KaliWall &mdash; Firewall Management</title>
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?v=2">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -835,10 +835,49 @@
                     </div>
                 </div>
             </div>
+
+            <!-- AI Explainer OpenRouter API Key -->
+            <div class="card settings-card">
+                <div class="card-header">
+                    <i class="fa-solid fa-robot"></i>
+                    <h3>AI Explainer (OpenRouter)</h3>
+                </div>
+                <div class="card-body" style="padding:20px">
+                    <p class="settings-desc">Enter your OpenRouter API key to enable AI-powered explanations of blocked packets. Get a free key at <a href="https://openrouter.ai" target="_blank" rel="noopener noreferrer">openrouter.ai</a>.</p>
+                    <div class="api-key-form">
+                        <div class="form-group">
+                            <label for="aiApiKey">API Key</label>
+                            <div class="input-with-btn">
+                                <input type="password" id="aiApiKey" placeholder="Paste your OpenRouter API key" autocomplete="off">
+                                <button class="btn btn-primary" id="btnSaveAIApiKey"><i class="fa-solid fa-save"></i> Save</button>
+                            </div>
+                        </div>
+                        <div class="api-key-status" id="aiApiKeyStatus">
+                            <span class="badge badge-disabled" id="aiApiKeyBadge">Not configured</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </section>
 
     </div>
 </main>
+
+<!-- AI Explanation Modal -->
+<div class="modal-overlay" id="aiExplanationModal">
+    <div class="modal" style="max-width: 600px;">
+        <div class="modal-header">
+            <h3><i class="fa-solid fa-robot"></i> AI Explanation</h3>
+            <button class="modal-close" id="aiModalClose"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="modal-body">
+            <p id="aiExplanationText" style="font-size: 1.1em; line-height: 1.5;"></p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" id="btnAIModalClose">Close</button>
+        </div>
+    </div>
+</div>
 
 <!-- Add/Edit Rule Modal -->
 <div class="modal-overlay" id="ruleModal">
@@ -972,6 +1011,6 @@
 <!-- Toast Notification -->
 <div class="toast" id="toast"></div>
 
-<script src="js/app.js"></script>
+<script src="js/app.js?v=2"></script>
 </body>
 </html>
