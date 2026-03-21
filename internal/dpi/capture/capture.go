@@ -52,6 +52,10 @@ func New(cfg Config) *PcapCapturer {
 }
 
 func (c *PcapCapturer) Start(ctx context.Context) error {
+	c.packets = make(chan gopacket.Packet, 2048)
+	c.errs = make(chan error, 64)
+	c.closed = make(chan struct{})
+
 	h, err := pcap.OpenLive(c.cfg.Interface, c.cfg.SnapLen, c.cfg.Promiscuous, c.cfg.Timeout)
 	if err != nil {
 		return fmt.Errorf("pcap open failed: %w", err)

@@ -165,6 +165,7 @@ func (e *Engine) Start(parent context.Context) error {
     e.startedAt = time.Now()
     e.running.Store(true)
     e.enabled.Store(true)
+    e.inputCh = make(chan gopacket.Packet, 4096)
     e.reasm.Start()
 
     e.wg.Add(1)

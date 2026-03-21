@@ -88,6 +88,16 @@ func New(cfg Config) *StreamReassembler {
 }
 
 func (r *StreamReassembler) Start() {
+	r.mu.Lock()
+	select {
+	case <-r.stopCh:
+		r.stopCh = make(chan struct{})
+	default:
+		if r.stopCh == nil {
+			r.stopCh = make(chan struct{})
+		}
+	}
+	r.mu.Unlock()
 	go r.cleanupLoop()
 }
 
