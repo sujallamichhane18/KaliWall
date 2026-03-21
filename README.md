@@ -321,7 +321,7 @@ chmod +x start.sh && ./start.sh
 
 <br/><br/>
 
-<sub>If KaliWall helped you, consider giving it a ⭐ — it means the world!</sub>
+<sub>If KaliWall helped you, consider giving it a ⭐ — It means the world!</sub>
 
 <br/><br/>
 
