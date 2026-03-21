@@ -164,6 +164,7 @@
             case "dashboard":
                 loadStats();
                 loadSysInfo();
+                loadAIApiLiveStatus();
                 loadDPIStatus();
                 loadTrafficVisibility();
                 loadDashboardLogs();
@@ -2612,6 +2613,41 @@
         }
     }
 
+    async function loadAIApiLiveStatus() {
+        var badge = document.getElementById("aiApiLiveBadge");
+        if (!badge) return;
+
+        badge.className = "badge badge-disabled";
+        badge.textContent = "AI API: checking...";
+
+        var res = await apiFetch("/ai/status");
+        if (!res.success) {
+            badge.className = "badge badge-reject";
+            badge.textContent = "AI API: error";
+            badge.title = res.message || "Unable to verify AI API status";
+            return;
+        }
+
+        var d = res.data || {};
+        if (!d.configured) {
+            badge.className = "badge badge-disabled";
+            badge.textContent = "AI API: key missing";
+            badge.title = d.message || "OpenRouter key is not configured";
+            return;
+        }
+
+        if (d.reachable) {
+            badge.className = "badge badge-enabled";
+            badge.textContent = "AI API: online" + (d.model ? " (" + d.model + ")" : "");
+            badge.title = d.message || "OpenRouter API reachable";
+            return;
+        }
+
+        badge.className = "badge badge-reject";
+        badge.textContent = "AI API: offline";
+        badge.title = d.message || "OpenRouter API unreachable";
+    }
+
     document.getElementById("btnGenerateAIExplanation").addEventListener("click", async function () {
         var input = document.getElementById("aiExplainInput");
         var result = document.getElementById("aiExplainResult");
@@ -2751,6 +2787,7 @@
             toast("OpenRouter API key saved", "success");
             document.getElementById("aiApiKey").value = "";
             loadAIApiKeySettings();
+            loadAIApiLiveStatus();
         } else {
             toast(data.message || "Failed to save OpenRouter key", "error");
         }

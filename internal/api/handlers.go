@@ -180,6 +180,7 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/proxy/malicious-domains/reload", h.handleProxyMaliciousDomainsReload)
 	mux.HandleFunc("/api/v1/proxy/blocked-events", h.handleProxyBlockedEvents)
 	mux.HandleFunc("/api/v1/ai/apikey", h.handleAIApiKey)
+	mux.HandleFunc("/api/v1/ai/status", h.handleAIStatus)
 	mux.HandleFunc("/api/v1/ai/explain", h.handleAIExplain)
 	mux.HandleFunc("/api/v1/ai/suggest-rule", h.handleAISuggestRule)
 
@@ -1091,6 +1092,20 @@ func (h *handlers) handleAIExplain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: explanation})
+}
+
+func (h *handlers) handleAIStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if h.aiService == nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "AI service unavailable"})
+		return
+	}
+
+	status := h.aiService.ConnectionStatus()
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: status})
 }
 
 func (h *handlers) handleAISuggestRule(w http.ResponseWriter, r *http.Request) {

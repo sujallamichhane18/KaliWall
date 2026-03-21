@@ -21,6 +21,13 @@ type RuleDecision struct {
 	Rule             models.RuleRequest `json:"rule"`
 }
 
+type ConnectivityStatus struct {
+	Configured bool   `json:"configured"`
+	Reachable  bool   `json:"reachable"`
+	Model      string `json:"model,omitempty"`
+	Message    string `json:"message"`
+}
+
 var openRouterModelFallback = []string{
 	"openai/gpt-oss-20b:free",
 	"google/gemma-3-4b-it:free",
@@ -54,6 +61,41 @@ func (s *OpenRouterService) GetAPIKey() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.apiKey
+}
+
+func (s *OpenRouterService) ConnectionStatus() ConnectivityStatus {
+	s.mu.RLock()
+	key := s.apiKey
+	s.mu.RUnlock()
+
+	if key == "" {
+		return ConnectivityStatus{
+			Configured: false,
+			Reachable:  false,
+			Message:    "OpenRouter API key not configured",
+		}
+	}
+
+	probePrompt := "Reply with exactly: OK"
+	var errs []string
+	for _, model := range openRouterModelFallback {
+		_, err := s.callOpenRouterModel(key, model, probePrompt, 3)
+		if err == nil {
+			return ConnectivityStatus{
+				Configured: true,
+				Reachable:  true,
+				Model:      model,
+				Message:    "OpenRouter API reachable",
+			}
+		}
+		errs = append(errs, model+": "+err.Error())
+	}
+
+	return ConnectivityStatus{
+		Configured: true,
+		Reachable:  false,
+		Message:    "OpenRouter API unreachable: " + strings.Join(errs, " | "),
+	}
 }
 
 func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (string, error) {
