@@ -2309,6 +2309,68 @@
         return data.data || {};
     }
 
+    function isSuspiciousTrafficEntry(entry) {
+        if (!entry) return false;
+        var action = String(entry.action || "").toLowerCase();
+        var detail = String(entry.detail || "").toLowerCase();
+        if (action === "block" || action === "drop" || action === "reject") return true;
+        return detail.indexOf("suspicious") >= 0 ||
+            detail.indexOf("malicious") >= 0 ||
+            detail.indexOf("malware") >= 0 ||
+            detail.indexOf("exploit") >= 0 ||
+            detail.indexOf("attack") >= 0 ||
+            detail.indexOf("c2") >= 0;
+    }
+
+    async function suggestRuleDecisionFromTraffic() {
+        var res = await apiFetch("/logs?limit=1200");
+        if (!res.success || !Array.isArray(res.data)) {
+            toast("Unable to read traffic logs for AI decision", "error");
+            return;
+        }
+
+        var suspicious = res.data.filter(isSuspiciousTrafficEntry);
+        if (suspicious.length === 0) {
+            toast("No blocked or suspicious traffic found for AI rule generation", "error");
+            return;
+        }
+
+        var srcCounts = {};
+        suspicious.forEach(function (entry) {
+            var src = String(entry.src_ip || "-");
+            srcCounts[src] = (srcCounts[src] || 0) + 1;
+        });
+
+        var topSource = "-";
+        var topSourceHits = 0;
+        Object.keys(srcCounts).forEach(function (src) {
+            if (srcCounts[src] > topSourceHits) {
+                topSource = src;
+                topSourceHits = srcCounts[src];
+            }
+        });
+
+        var context = {
+            mode: "recent_traffic_analysis",
+            total_events_scanned: res.data.length,
+            suspicious_events: suspicious.length,
+            top_source_ip: topSource,
+            top_source_hits: topSourceHits,
+            recent_suspicious_samples: suspicious.slice(0, 25).map(function (entry) {
+                return {
+                    timestamp: entry.timestamp,
+                    action: entry.action,
+                    src_ip: entry.src_ip,
+                    dst_ip: entry.dst_ip,
+                    protocol: entry.protocol,
+                    detail: entry.detail,
+                };
+            }),
+        };
+
+        await suggestRuleDecision(context);
+    }
+
     async function suggestRuleDecision(packetData) {
         try {
             const decision = await requestAIRuleDecision(packetData);
@@ -2676,6 +2738,14 @@
             return;
         }
         await suggestRuleDecision(packetData);
+    });
+
+    document.getElementById("btnGenerateAIRuleFromTraffic").addEventListener("click", async function () {
+        await suggestRuleDecisionFromTraffic();
+    });
+
+    document.getElementById("btnAutoRuleFromTraffic").addEventListener("click", async function () {
+        await suggestRuleDecisionFromTraffic();
     });
 
     document.getElementById("btnClearAIExplanation").addEventListener("click", function () {

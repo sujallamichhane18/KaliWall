@@ -355,6 +355,9 @@ func heuristicExplanation(packetMeta map[string]interface{}) string {
 	if strings.Contains(flat, "xss") {
 		return "Traffic was blocked due to cross-site scripting indicators."
 	}
+	if strings.Contains(flat, "malware") || strings.Contains(flat, "botnet") || strings.Contains(flat, "c2") || strings.Contains(flat, "command and control") {
+		return "Traffic was blocked due to suspected malware command-and-control communication."
+	}
 	if strings.Contains(flat, "suspicious") || strings.Contains(flat, "malicious") || strings.Contains(flat, "attack") {
 		if src != "" && proto != "" {
 			return "Suspicious " + strings.ToUpper(proto) + " traffic from " + src + " was blocked."
@@ -400,18 +403,29 @@ func heuristicRuleDecision(packetMeta map[string]interface{}) RuleDecision {
 func trafficRiskScore(packetMeta map[string]interface{}) int {
 	flat := strings.ToLower(fmt.Sprintf("%v", packetMeta))
 	score := 0
+	isBlocked := strings.Contains(flat, "block") || strings.Contains(flat, "drop") || strings.Contains(flat, "reject")
+	hasMalware := strings.Contains(flat, "malware") || strings.Contains(flat, "botnet") || strings.Contains(flat, "c2") || strings.Contains(flat, "command and control") || strings.Contains(flat, "communcation with")
+	hasSuspicious := strings.Contains(flat, "suspicious") || strings.Contains(flat, "malicious") || strings.Contains(flat, "threat")
 
-	if strings.Contains(flat, "block") || strings.Contains(flat, "drop") || strings.Contains(flat, "reject") {
+	if isBlocked {
 		score += 35
 	}
-	if strings.Contains(flat, "suspicious") || strings.Contains(flat, "malicious") || strings.Contains(flat, "threat") {
+	if hasSuspicious {
 		score += 30
+	}
+	if hasMalware {
+		score += 35
 	}
 	if strings.Contains(flat, "exploit") || strings.Contains(flat, "attack") || strings.Contains(flat, "sqli") || strings.Contains(flat, "xss") || strings.Contains(flat, "c2") {
 		score += 25
 	}
 	if strings.Contains(flat, "deny") || strings.Contains(flat, "denied") || strings.Contains(flat, "anomaly") {
 		score += 10
+	}
+
+	// Boost confidence for explicit malware communication blocks.
+	if isBlocked && hasMalware {
+		score += 20
 	}
 
 	if score > 100 {
@@ -441,7 +455,7 @@ func isBlockedOrSuspiciousTraffic(packetMeta map[string]interface{}) bool {
 
 	riskyKeywords := []string{
 		"blocked", "block", "drop", "reject", "deny", "denied",
-		"suspicious", "malicious", "threat", "exploit", "attack", "anomaly",
+		"suspicious", "supicious", "malicious", "malware", "botnet", "threat", "exploit", "attack", "anomaly", "c2", "command and control", "communcation with",
 	}
 	for _, k := range riskyKeywords {
 		if strings.Contains(flat, k) {
