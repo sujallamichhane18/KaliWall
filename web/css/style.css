@@ -1578,6 +1578,34 @@ body {
     margin-top: 16px;
 }
 
+.ai-explain-textarea {
+    width: 100%;
+    min-height: 180px;
+    resize: vertical;
+    padding: 12px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    background: var(--bg-body);
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    line-height: 1.45;
+}
+
+.ai-explain-textarea:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    background: var(--bg-white);
+}
+
+.ai-explain-result {
+    margin: 0;
+    font-size: 1rem;
+    line-height: 1.55;
+    color: var(--text-primary);
+    min-height: 48px;
+}
+
 /* ---------- Action Cell ---------- */
 .action-cell {
     display: flex;

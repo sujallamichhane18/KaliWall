@@ -198,6 +198,10 @@ func main() {
 
 	// Initialize OpenRouter AI service
 	aiService := ai.NewOpenRouterService()
+	if key, ok := db.GetSetting("openrouter_api_key"); ok && key != "" {
+		aiService.SetAPIKey(key)
+		fmt.Println("[+] OpenRouter API key restored from database")
+	}
 
 	handler := api.NewRouter(fw, trafficLogger, ti, analyticsService, dpiProvider, geoSvc, httpProxy, aiService)
 
@@ -240,6 +244,9 @@ func main() {
 	// Persist VT key
 	if key := ti.GetAPIKey(); key != "" {
 		db.SetSetting("vt_api_key", key)
+	}
+	if key := aiService.GetAPIKey(); key != "" {
+		db.SetSetting("openrouter_api_key", key)
 	}
 	trafficLogger.Log("SYSTEM", "-", "-", "-", "Daemon stopped")
 }

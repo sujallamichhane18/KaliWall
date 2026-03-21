@@ -34,6 +34,12 @@ func (s *OpenRouterService) HasAPIKey() bool {
 	return s.apiKey != ""
 }
 
+func (s *OpenRouterService) GetAPIKey() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.apiKey
+}
+
 func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (string, error) {
 	s.mu.RLock()
 	key := s.apiKey
@@ -48,7 +54,7 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 		return "", fmt.Errorf("failed to marshal packet: %w", err)
 	}
 
-	prompt := fmt.Sprintf("You are an AI security assistant focused on succinct explanations. Given the blocked packet metadata below, generate a **single concise sentence** that explains **why the packet was blocked** in plain language, using only the key facts. Do not include firewall rule names or unnecessary text — make it minimal to save API tokens.\n\nBlocked packet:\n%s", string(packetBytes))
+	prompt := fmt.Sprintf("You are an AI security assistant. Return exactly one short sentence in plain language explaining why this packet was blocked. Use only key facts. No rule names. No extra text. Keep it very brief.\n\nBlocked packet:\n%s", string(packetBytes))
 
 	reqBody := map[string]interface{}{
 		"model": "qwen/qwen-2.5-7b-instruct:free",
@@ -59,7 +65,7 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 			},
 		},
 		"temperature": 0.3,
-		"max_tokens":  60,
+		"max_tokens":  50,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)

@@ -121,6 +121,7 @@
         threats: "Threat Intelligence",
         websites: "Website Blocking",
         logs: "Traffic Logs",
+        "ai-explain": "AI Explain",
         settings: "Settings",
     };
 
@@ -184,6 +185,9 @@
                 break;
             case "logs":
                 loadLogs();
+                break;
+            case "ai-explain":
+                loadAIApiKeySettings();
                 break;
             case "settings":
                 loadSettings();
@@ -2234,6 +2238,25 @@
         }
     }
 
+    async function requestAIExplanation(packetData) {
+        const payload = {
+            packet_data: packetData || "No packet metadata provided",
+        };
+        const res = await fetch(API + "/ai/explain", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!data.success) {
+            throw new Error(data.message || "Unable to generate explanation.");
+        }
+        const explanation = typeof data.data === "string"
+            ? data.data
+            : (data.data && data.data.explanation) || "No explanation returned.";
+        return explanation;
+    }
+
     async function explainPacket(packetData) {
         const modal = document.getElementById("aiExplanationModal");
         const text = document.getElementById("aiExplanationText");
@@ -2246,24 +2269,7 @@
         modal.classList.add("open");
 
         try {
-            const payload = {
-                packet_data: packetData || "No packet metadata provided",
-            };
-            const res = await fetch(API + "/ai/explain", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            const data = await res.json();
-            if (!data.success) {
-                text.textContent = data.message || "Unable to generate explanation.";
-                toast(data.message || "AI explanation failed", "error");
-                return;
-            }
-
-            const explanation = typeof data.data === "string"
-                ? data.data
-                : (data.data && data.data.explanation) || "No explanation returned.";
+            const explanation = await requestAIExplanation(packetData);
             text.textContent = explanation;
         } catch (err) {
             text.textContent = "Request failed while contacting AI service.";
@@ -2490,15 +2496,54 @@
         var res = await apiFetch("/ai/apikey");
         if (!res.success) return;
         var badge = document.getElementById("aiApiKeyBadge");
-        if (!badge) return;
-        if (res.data.configured) {
-            badge.className = "badge badge-enabled";
-            badge.innerHTML = '<i class="fa-solid fa-check"></i> API key configured';
-        } else {
-            badge.className = "badge badge-disabled";
-            badge.textContent = "Not configured";
+        var pageBadge = document.getElementById("aiExplainConfiguredBadge");
+
+        var configured = !!(res.data && res.data.configured);
+        if (badge) {
+            if (configured) {
+                badge.className = "badge badge-enabled";
+                badge.innerHTML = '<i class="fa-solid fa-check"></i> API key configured';
+            } else {
+                badge.className = "badge badge-disabled";
+                badge.textContent = "Not configured";
+            }
+        }
+        if (pageBadge) {
+            if (configured) {
+                pageBadge.className = "badge badge-enabled";
+                pageBadge.innerHTML = '<i class="fa-solid fa-check"></i> OpenRouter key is configured';
+            } else {
+                pageBadge.className = "badge badge-reject";
+                pageBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> OpenRouter key not configured (set it in Settings)';
+            }
         }
     }
+
+    document.getElementById("btnGenerateAIExplanation").addEventListener("click", async function () {
+        var input = document.getElementById("aiExplainInput");
+        var result = document.getElementById("aiExplainResult");
+        if (!input || !result) return;
+        var packetData = input.value.trim();
+        if (!packetData) {
+            toast("Enter packet metadata first", "error");
+            return;
+        }
+        result.textContent = "Generating explanation...";
+        try {
+            var explanation = await requestAIExplanation(packetData);
+            result.textContent = explanation;
+        } catch (err) {
+            result.textContent = "Failed to generate explanation.";
+            toast((err && err.message) || "AI explanation failed", "error");
+        }
+    });
+
+    document.getElementById("btnClearAIExplanation").addEventListener("click", function () {
+        var input = document.getElementById("aiExplainInput");
+        var result = document.getElementById("aiExplainResult");
+        if (input) input.value = "";
+        if (result) result.textContent = "No explanation generated yet.";
+    });
 
     async function stopFirewallFromTopbar() {
         if (!confirm("Switch firewall to memory mode (stop live backend)?")) return;
