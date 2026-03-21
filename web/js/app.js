@@ -117,7 +117,7 @@
         dashboard: "Dashboard",
         rules: "Firewall Rules",
         connections: "Active Connections",
-        blocked: "Blocked IPs",
+        blocked: "Blocked Traffic",
         threats: "Threat Intelligence",
         websites: "Website Blocking",
         logs: "Traffic Logs",
@@ -2086,28 +2086,42 @@
         modalWrap.style.display = "block";
     }
 
-    // ---------- Blocked IPs ----------
+    // ---------- Blocked Traffic ----------
 
     async function loadBlocked() {
-        const res = await apiFetch("/blocked");
+        const res = await apiFetch("/logs?limit=1200");
         if (!res.success) return;
         const tbody = document.querySelector("#blockedTable tbody");
         tbody.innerHTML = "";
-        if (!res.data || res.data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#9ca3af;padding:20px">No blocked IPs</td></tr>';
+
+        const blockedRows = (res.data || []).filter(function (entry) {
+            const action = String((entry && entry.action) || "").toLowerCase();
+            return action === "block" || action === "drop" || action === "reject";
+        });
+
+        if (blockedRows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#9ca3af;padding:20px">No blocked traffic events found</td></tr>';
             return;
         }
-        res.data.forEach(function (entry) {
-            const explainMeta = "Blocked IP: " + (entry.ip || "-") + " Reason: " + (entry.reason || "-");
+
+        blockedRows.forEach(function (entry) {
+            const explainMeta =
+                "Action: " + (entry.action || "-") +
+                " Source: " + (entry.src_ip || "-") +
+                " Destination: " + (entry.dst_ip || "-") +
+                " Protocol: " + (entry.protocol || "-") +
+                " Detail: " + (entry.detail || "-");
             const encodedMeta = encodeURIComponent(explainMeta);
             const tr = document.createElement("tr");
             tr.innerHTML =
-                "<td><strong>" + escapeHtml(entry.ip) + "</strong></td>" +
-                "<td>" + escapeHtml(entry.reason || "-") + "</td>" +
-                "<td>" + formatTime(entry.created_at) + "</td>" +
+                "<td>" + formatTime(entry.timestamp) + "</td>" +
+                "<td>" + actionBadge(entry.action || "-") + "</td>" +
+                "<td>" + escapeHtml(entry.src_ip || "-") + "</td>" +
+                "<td>" + escapeHtml(entry.dst_ip || "-") + "</td>" +
+                "<td>" + escapeHtml((entry.protocol || "-").toUpperCase()) + "</td>" +
+                "<td>" + escapeHtml(entry.detail || "-") + "</td>" +
                 '<td class="action-cell">' +
-                    '<button class="btn btn-sm btn-secondary" style="margin-right:4px;" onclick="KaliWall.explainPacket(decodeURIComponent(\'' + encodedMeta + '\'))"><i class="fa-solid fa-magic"></i> Explain</button>' +
-                    '<button class="btn btn-sm btn-danger" onclick="KaliWall.unblockIP(\'' + escapeHtml(entry.ip) + '\')"><i class="fa-solid fa-unlock"></i> Unblock</button>' +
+                    '<button class="btn btn-sm btn-secondary" onclick="KaliWall.explainPacket(decodeURIComponent(\'' + encodedMeta + '\'))"><i class="fa-solid fa-magic"></i> Explain</button>' +
                 "</td>";
             tbody.appendChild(tr);
         });
@@ -2380,8 +2394,8 @@
     // ---------- Block IP Modal ----------
 
     document.getElementById("btnBlockIP").addEventListener("click", function () {
-        document.getElementById("blockIPForm").reset();
-        document.getElementById("blockIPModal").classList.add("open");
+        loadBlocked();
+        toast("Blocked traffic refreshed", "success");
     });
 
     document.getElementById("blockIPForm").addEventListener("submit", async function (e) {

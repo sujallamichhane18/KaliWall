@@ -36,7 +36,7 @@
             <i class="fa-solid fa-network-wired"></i><span>Connections</span>
         </a>
         <a href="#" class="nav-item" data-page="blocked">
-            <i class="fa-solid fa-ban"></i><span>Blocked IPs</span>
+            <i class="fa-solid fa-ban"></i><span>Blocked Traffic</span>
         </a>
         <a href="#" class="nav-item" data-page="threats">
             <i class="fa-solid fa-shield-virus"></i><span>Threat Intel</span>
@@ -603,16 +603,16 @@
         <!-- ===== BLOCKED IPs PAGE ===== -->
         <section class="page" id="page-blocked">
             <div class="page-toolbar">
-                <h2>Blocked IP Addresses</h2>
-                <button class="btn btn-danger" id="btnBlockIP">
-                    <i class="fa-solid fa-ban"></i> Block IP
+                <h2>Blocked Traffic Events</h2>
+                <button class="btn btn-secondary" id="btnBlockIP">
+                    <i class="fa-solid fa-arrows-rotate"></i> Refresh
                 </button>
             </div>
             <div class="card">
                 <div class="card-body table-responsive">
                     <table class="table" id="blockedTable">
                         <thead>
-                            <tr><th>IP Address</th><th>Reason</th><th>Blocked At</th><th>Actions</th></tr>
+                            <tr><th>Time</th><th>Action</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Detail</th><th>AI</th></tr>
                         </thead>
                         <tbody></tbody>
                     </table>
