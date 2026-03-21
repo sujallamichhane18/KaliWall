@@ -133,6 +133,9 @@
         sidebar.classList.remove("open");
         if (target !== "logs") stopLogStream();
         loadPageData(target);
+        if (target === "dashboard" && geoMap) {
+            setTimeout(function() { geoMap.invalidateSize(); }, 200);
+        }
     }
 
     navItems.forEach((item) => {
@@ -169,6 +172,8 @@
                 startFirewallEventStream();
                 loadAnalytics();
                 startBandwidthStream();
+                loadSOCGeoAttacks();
+                startGeoAttackStream();
                 startDashboardAutoRefresh();
                 break;
             case "rules":
@@ -621,8 +626,14 @@
     }
 
     function clearGeoMarkers() {
+        if (geoLayer) {
+            geoMarkers.forEach(function(obj) {
+                if (obj.marker) geoLayer.removeLayer(obj.marker);
+                if (obj.line) geoLayer.removeLayer(obj.line);
+            });
+            geoLayer.clearLayers();
+        }
         geoMarkers = [];
-        if (geoLayer) geoLayer.clearLayers();
     }
 
     function ingestGeoPoint(point, keepView) {
@@ -648,6 +659,20 @@
             weight: 1,
         });
         var target = point.target || {};
+        var tLat = Number(target.latitude);
+        var tLon = Number(target.longitude);
+        if (!tLat || !tLon || (tLat === 0 && tLon === 0)) {
+            tLat = 38.9072; // Default server latitude
+            tLon = -77.0369; // Default server longitude
+        }
+
+        var line = L.polyline([[lat, lon], [tLat, tLon]], {
+            color: geoSeverityColor(sev),
+            weight: 2,
+            opacity: 0.8,
+            className: 'threat-line'
+        }).addTo(geoLayer);
+
         marker.bindPopup(
             "<strong>" + escapeHtml(country) + "</strong><br>" +
             "IP: " + escapeHtml(src.ip || "-") + "<br>" +
@@ -656,12 +681,21 @@
             "Target: " + escapeHtml(target.ip || "-")
         );
         marker.addTo(geoLayer);
-        geoMarkers.push(marker);
+        geoMarkers.push({ marker: marker, line: line, time: Date.now() });
 
+        // Cleanup old markers/lines
         while (geoMarkers.length > maxGeoMarkers) {
             var old = geoMarkers.shift();
-            geoLayer.removeLayer(old);
+            if (old.marker) geoLayer.removeLayer(old.marker);
+            if (old.line) geoLayer.removeLayer(old.line);
         }
+
+        // Auto-remove line after 3 seconds for active radar effect
+        setTimeout(function() {
+            if (geoLayer.hasLayer(line)) {
+                geoLayer.removeLayer(line);
+            }
+        }, 3000);
 
         if (!keepView && geoMarkers.length === 1) {
             geoMap.setView([lat, lon], 3);

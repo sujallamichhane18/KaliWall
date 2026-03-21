@@ -1791,3 +1791,13 @@ body {
         height: 240px;
     }
 }
+
+.threat-line {
+    animation: fadePulse 3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes fadePulse {
+    0% { opacity: 0.8; stroke-width: 2; stroke-dasharray: 5, 10; stroke-dashoffset: 50; }
+    50% { opacity: 0.5; stroke-width: 1.5; }
+    100% { opacity: 0; stroke-width: 0.5; stroke-dashoffset: 0; }
+}
