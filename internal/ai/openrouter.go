@@ -30,7 +30,6 @@ type ConnectivityStatus struct {
 }
 
 var openRouterModelFallback = []string{
-	"openai/gpt-oss-20b:free",
 	"google/gemma-3-4b-it:free",
 }
 
