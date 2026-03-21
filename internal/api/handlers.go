@@ -181,6 +181,7 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/proxy/blocked-events", h.handleProxyBlockedEvents)
 	mux.HandleFunc("/api/v1/ai/apikey", h.handleAIApiKey)
 	mux.HandleFunc("/api/v1/ai/explain", h.handleAIExplain)
+	mux.HandleFunc("/api/v1/ai/suggest-rule", h.handleAISuggestRule)
 
 	// Serve web UI from the "web" directory
 	fs := http.FileServer(http.Dir("web"))
@@ -1090,6 +1091,31 @@ func (h *handlers) handleAIExplain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: explanation})
+}
+
+func (h *handlers) handleAISuggestRule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if h.aiService == nil {
+		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "AI service unavailable"})
+		return
+	}
+
+	var packetMeta map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&packetMeta); err != nil {
+		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "Invalid JSON packet metadata"})
+		return
+	}
+
+	decision, err := h.aiService.SuggestRuleDecision(packetMeta)
+	if err != nil {
+		respond(w, http.StatusInternalServerError, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: decision})
 }
 
 // ---------- Helpers ----------

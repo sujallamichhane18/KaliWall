@@ -2122,6 +2122,7 @@
                 "<td>" + escapeHtml(entry.detail || "-") + "</td>" +
                 '<td class="action-cell">' +
                     '<button class="btn btn-sm btn-secondary" onclick="KaliWall.explainPacket(decodeURIComponent(\'' + encodedMeta + '\'))"><i class="fa-solid fa-magic"></i> Explain</button>' +
+                    '<button class="btn btn-sm btn-primary" onclick="KaliWall.suggestRuleDecision(decodeURIComponent(\'' + encodedMeta + '\'))"><i class="fa-solid fa-gavel"></i> Auto Rule</button>' +
                 "</td>";
             tbody.appendChild(tr);
         });
@@ -2291,13 +2292,91 @@
         }
     }
 
+    async function requestAIRuleDecision(packetData) {
+        const payload = {
+            packet_data: packetData || "No packet metadata provided",
+        };
+        const res = await fetch(API + "/ai/suggest-rule", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!data.success) {
+            throw new Error(data.message || "Unable to get AI rule decision.");
+        }
+        return data.data || {};
+    }
+
+    async function suggestRuleDecision(packetData) {
+        try {
+            const decision = await requestAIRuleDecision(packetData);
+            const shouldCreate = !!decision.should_create_rule;
+            const reason = decision.reason || "No reason provided";
+            const confidence = Number(decision.confidence || 0);
+
+            if (!shouldCreate) {
+                toast("AI decision: no rule suggested", "success");
+                alert("AI Decision\n\nCreate rule: NO\nConfidence: " + confidence + "%\nReason: " + reason);
+                return;
+            }
+
+            const rule = decision.rule || {};
+            const summary =
+                "AI suggests creating this rule:\n\n" +
+                "Chain: " + (rule.chain || "INPUT") + "\n" +
+                "Protocol: " + (rule.protocol || "all") + "\n" +
+                "Source: " + (rule.src_ip || "any") + "\n" +
+                "Destination: " + (rule.dst_ip || "any") + "\n" +
+                "Source Port: " + (rule.src_port || "any") + "\n" +
+                "Destination Port: " + (rule.dst_port || "any") + "\n" +
+                "Action: " + (rule.action || "DROP") + "\n" +
+                "Comment: " + (rule.comment || "AI suggested security rule") + "\n\n" +
+                "Confidence: " + confidence + "%\n" +
+                "Reason: " + reason + "\n\n" +
+                "Approve and create this firewall rule?";
+
+            if (!confirm(summary)) {
+                toast("AI rule suggestion not approved", "error");
+                return;
+            }
+
+            const rulePayload = {
+                chain: rule.chain || "INPUT",
+                protocol: rule.protocol || "all",
+                src_ip: rule.src_ip || "any",
+                dst_ip: rule.dst_ip || "any",
+                src_port: rule.src_port || "any",
+                dst_port: rule.dst_port || "any",
+                action: rule.action || "DROP",
+                comment: rule.comment || "AI suggested security rule",
+                enabled: true,
+            };
+
+            const createRes = await fetch(API + "/rules", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(rulePayload),
+            });
+            const createData = await createRes.json();
+            if (!createData.success) {
+                throw new Error(createData.message || "Failed to create AI suggested rule");
+            }
+
+            toast("AI suggested rule approved and created", "success");
+            loadRules();
+        } catch (err) {
+            toast((err && err.message) || "AI rule decision failed", "error");
+        }
+    }
+
     function closeAIExplanationModal() {
         const modal = document.getElementById("aiExplanationModal");
         if (modal) modal.classList.remove("open");
     }
 
     // Expose to inline onclick handlers safely
-    window.KaliWall = { toggleRule, deleteRule, editRule, unblockIP, unblockWebsite, blockIPFromThreat, explainPacket };
+    window.KaliWall = { toggleRule, deleteRule, editRule, unblockIP, unblockWebsite, blockIPFromThreat, explainPacket, suggestRuleDecision };
 
     // ---------- Refresh Buttons ----------
 
@@ -2550,6 +2629,17 @@
             result.textContent = "Failed to generate explanation.";
             toast((err && err.message) || "AI explanation failed", "error");
         }
+    });
+
+    document.getElementById("btnGenerateAIRuleDecision").addEventListener("click", async function () {
+        var input = document.getElementById("aiExplainInput");
+        if (!input) return;
+        var packetData = input.value.trim();
+        if (!packetData) {
+            toast("Enter packet metadata first", "error");
+            return;
+        }
+        await suggestRuleDecision(packetData);
     });
 
     document.getElementById("btnClearAIExplanation").addEventListener("click", function () {

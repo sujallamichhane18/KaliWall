@@ -6,10 +6,25 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"kaliwall/internal/models"
 )
+
+type RuleDecision struct {
+	ShouldCreateRule bool               `json:"should_create_rule"`
+	Confidence       int                `json:"confidence"`
+	Reason           string             `json:"reason"`
+	Rule             models.RuleRequest `json:"rule"`
+}
+
+var openRouterModelFallback = []string{
+	"openai/gpt-oss-20b:free",
+	"google/gemma-3-4b-it:free",
+}
 
 type OpenRouterService struct {
 	mu     sync.RWMutex
@@ -61,8 +76,94 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 
 	prompt := fmt.Sprintf("You are an AI security assistant. Return exactly one short sentence in plain language explaining why this packet was blocked. Use only key facts. No rule names. No extra text. Keep it very brief.\n\nBlocked packet:\n%s", string(packetBytes))
 
+	content, err := s.callOpenRouterWithFallback(key, prompt, 50)
+	if err != nil {
+		// Fail-open to a deterministic explanation so protection remains usable.
+		return heuristicExplanation(packetMeta), nil
+	}
+
+	return content, nil
+}
+
+func (s *OpenRouterService) SuggestRuleDecision(packetMeta map[string]interface{}) (RuleDecision, error) {
+	s.mu.RLock()
+	key := s.apiKey
+	s.mu.RUnlock()
+
+	if key == "" {
+		return RuleDecision{}, fmt.Errorf("openrouter API key not configured")
+	}
+
+	if !isBlockedOrSuspiciousTraffic(packetMeta) {
+		return RuleDecision{
+			ShouldCreateRule: false,
+			Confidence:       0,
+			Reason:           "Traffic is not blocked or suspicious; no automatic rule suggestion.",
+			Rule:             defaultSuggestedRule(),
+		}, nil
+	}
+
+	packetBytes, err := json.MarshalIndent(packetMeta, "", "  ")
+	if err != nil {
+		return RuleDecision{}, fmt.Errorf("failed to marshal packet: %w", err)
+	}
+
+	prompt := fmt.Sprintf("You are a firewall AI assistant. Based on this blocked or suspicious traffic metadata, decide if a new firewall rule should be suggested. Return ONLY strict JSON with this schema: {\"should_create_rule\":boolean,\"confidence\":number,\"reason\":string,\"rule\":{\"chain\":\"INPUT|OUTPUT|FORWARD\",\"protocol\":\"tcp|udp|icmp|all\",\"src_ip\":\"any or IP/CIDR\",\"dst_ip\":\"any or IP/CIDR\",\"src_port\":\"any or port\",\"dst_port\":\"any or port\",\"action\":\"DROP or REJECT\",\"comment\":string,\"enabled\":true}}. Keep reason concise.\n\nTraffic metadata:\n%s", string(packetBytes))
+
+	content, err := s.callOpenRouterWithFallback(key, prompt, 220)
+	if err != nil {
+		// If model access is unavailable, return a guarded heuristic recommendation.
+		return heuristicRuleDecision(packetMeta), nil
+	}
+
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var decision RuleDecision
+	if err := json.Unmarshal([]byte(content), &decision); err != nil {
+		return heuristicRuleDecision(packetMeta), nil
+	}
+
+	if decision.Confidence < 0 {
+		decision.Confidence = 0
+	}
+	if decision.Confidence > 100 {
+		decision.Confidence = 100
+	}
+
+	decision.Rule = sanitizeSuggestedRule(decision.Rule)
+	if decision.Reason == "" {
+		decision.Reason = "AI rule decision generated."
+	}
+
+	// Safety gate: only allow auto-rule proposal at medium+ confidence.
+	if decision.ShouldCreateRule && decision.Confidence < 60 {
+		decision.ShouldCreateRule = false
+		decision.Reason = "Confidence below safety threshold (60%); admin review required before creating a rule."
+	}
+
+	return decision, nil
+}
+
+func (s *OpenRouterService) callOpenRouterWithFallback(key, prompt string, maxTokens int) (string, error) {
+	var errs []string
+	for _, model := range openRouterModelFallback {
+		content, err := s.callOpenRouterModel(key, model, prompt, maxTokens)
+		if err == nil {
+			return content, nil
+		}
+		errs = append(errs, model+": "+err.Error())
+	}
+	return "", fmt.Errorf("openrouter unavailable across fallback models (%s)", strings.Join(errs, " | "))
+}
+
+func (s *OpenRouterService) callOpenRouterModel(key, model, prompt string, maxTokens int) (string, error) {
+
 	reqBody := map[string]interface{}{
-		"model": "openai/gpt-oss-20b:free",
+		"model": model,
 		"messages": []map[string]string{
 			{
 				"role":    "user",
@@ -70,7 +171,7 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 			},
 		},
 		"temperature": 0.3,
-		"max_tokens":  50,
+		"max_tokens":  maxTokens,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -100,7 +201,7 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API error (%d): %s", resp.StatusCode, string(respBody))
+		return "", openRouterStatusError(resp.StatusCode, string(respBody))
 	}
 
 	var orResp struct {
@@ -120,6 +221,173 @@ func (s *OpenRouterService) ExplainBlock(packetMeta map[string]interface{}) (str
 	}
 
 	return orResp.Choices[0].Message.Content, nil
+}
+
+func openRouterStatusError(status int, body string) error {
+	lower := strings.ToLower(body)
+	if status == http.StatusNotFound && strings.Contains(lower, "no endpoints available matching your guardrail restrictions") {
+		return fmt.Errorf("model blocked by OpenRouter privacy/guardrail policy; update policy at https://openrouter.ai/settings/privacy or use another compatible free model")
+	}
+	if status == http.StatusUnauthorized {
+		return fmt.Errorf("invalid OpenRouter API key")
+	}
+	if status == http.StatusTooManyRequests {
+		return fmt.Errorf("OpenRouter rate limit reached")
+	}
+	if len(body) > 240 {
+		body = body[:240] + "..."
+	}
+	return fmt.Errorf("OpenRouter API error (%d): %s", status, body)
+}
+
+func defaultSuggestedRule() models.RuleRequest {
+	return models.RuleRequest{
+		Chain:    "INPUT",
+		Protocol: "all",
+		SrcIP:    "any",
+		DstIP:    "any",
+		SrcPort:  "any",
+		DstPort:  "any",
+		Action:   "DROP",
+		Comment:  "AI suggested security rule",
+		Enabled:  true,
+	}
+}
+
+func sanitizeSuggestedRule(rule models.RuleRequest) models.RuleRequest {
+	out := defaultSuggestedRule()
+
+	chain := strings.ToUpper(strings.TrimSpace(rule.Chain))
+	if chain == "INPUT" || chain == "OUTPUT" || chain == "FORWARD" {
+		out.Chain = chain
+	}
+
+	protocol := strings.ToLower(strings.TrimSpace(rule.Protocol))
+	if protocol == "tcp" || protocol == "udp" || protocol == "icmp" || protocol == "all" {
+		out.Protocol = protocol
+	}
+
+	srcIP := strings.TrimSpace(rule.SrcIP)
+	if srcIP != "" {
+		out.SrcIP = srcIP
+	}
+	dstIP := strings.TrimSpace(rule.DstIP)
+	if dstIP != "" {
+		out.DstIP = dstIP
+	}
+
+	srcPort := strings.TrimSpace(rule.SrcPort)
+	if srcPort != "" {
+		out.SrcPort = srcPort
+	}
+	dstPort := strings.TrimSpace(rule.DstPort)
+	if dstPort != "" {
+		out.DstPort = dstPort
+	}
+
+	action := strings.ToUpper(strings.TrimSpace(rule.Action))
+	if action == "DROP" || action == "REJECT" {
+		out.Action = action
+	}
+
+	comment := strings.TrimSpace(rule.Comment)
+	if comment != "" {
+		out.Comment = comment
+	}
+
+	out.Enabled = true
+	return out
+}
+
+func heuristicExplanation(packetMeta map[string]interface{}) string {
+	flat := strings.ToLower(fmt.Sprintf("%v", packetMeta))
+	src := extractValue(flat, `source:\s*([^\s,}]+)`)
+	proto := extractValue(flat, `protocol:\s*([^\s,}]+)`)
+
+	if strings.Contains(flat, "sqli") || strings.Contains(flat, "sql injection") {
+		if src != "" {
+			return "Traffic from " + src + " was blocked due to SQL injection indicators."
+		}
+		return "Traffic was blocked due to SQL injection indicators."
+	}
+	if strings.Contains(flat, "xss") {
+		return "Traffic was blocked due to cross-site scripting indicators."
+	}
+	if strings.Contains(flat, "suspicious") || strings.Contains(flat, "malicious") || strings.Contains(flat, "attack") {
+		if src != "" && proto != "" {
+			return "Suspicious " + strings.ToUpper(proto) + " traffic from " + src + " was blocked."
+		}
+		return "Suspicious traffic was blocked due to detected threat indicators."
+	}
+	return "Traffic was blocked because it matched suspicious or malicious behavior indicators."
+}
+
+func heuristicRuleDecision(packetMeta map[string]interface{}) RuleDecision {
+	risk := trafficRiskScore(packetMeta)
+	rule := defaultSuggestedRule()
+
+	flat := strings.ToLower(fmt.Sprintf("%v", packetMeta))
+	if src := extractValue(flat, `source:\s*([^\s,}]+)`); src != "" {
+		rule.SrcIP = src
+	}
+	if dst := extractValue(flat, `destination:\s*([^\s,}]+)`); dst != "" {
+		rule.DstIP = dst
+	}
+	if proto := extractValue(flat, `protocol:\s*([^\s,}]+)`); proto != "" {
+		rule.Protocol = proto
+	}
+	rule = sanitizeSuggestedRule(rule)
+
+	if risk < 60 {
+		return RuleDecision{
+			ShouldCreateRule: false,
+			Confidence:       risk,
+			Reason:           "Heuristic analysis: risk below threshold for automatic rule suggestion.",
+			Rule:             rule,
+		}
+	}
+
+	return RuleDecision{
+		ShouldCreateRule: true,
+		Confidence:       risk,
+		Reason:           "Heuristic fallback: repeated blocked/suspicious pattern suggests containment rule.",
+		Rule:             rule,
+	}
+}
+
+func trafficRiskScore(packetMeta map[string]interface{}) int {
+	flat := strings.ToLower(fmt.Sprintf("%v", packetMeta))
+	score := 0
+
+	if strings.Contains(flat, "block") || strings.Contains(flat, "drop") || strings.Contains(flat, "reject") {
+		score += 35
+	}
+	if strings.Contains(flat, "suspicious") || strings.Contains(flat, "malicious") || strings.Contains(flat, "threat") {
+		score += 30
+	}
+	if strings.Contains(flat, "exploit") || strings.Contains(flat, "attack") || strings.Contains(flat, "sqli") || strings.Contains(flat, "xss") || strings.Contains(flat, "c2") {
+		score += 25
+	}
+	if strings.Contains(flat, "deny") || strings.Contains(flat, "denied") || strings.Contains(flat, "anomaly") {
+		score += 10
+	}
+
+	if score > 100 {
+		score = 100
+	}
+	if score < 0 {
+		score = 0
+	}
+	return score
+}
+
+func extractValue(input, pattern string) string {
+	re := regexp.MustCompile(pattern)
+	m := re.FindStringSubmatch(input)
+	if len(m) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
 }
 
 func isBlockedOrSuspiciousTraffic(packetMeta map[string]interface{}) bool {
