@@ -47,6 +47,12 @@
     var visProtocolDistChart = null;
     var dpiAlertRows = [];
     var dpiLastPacketsSample = { count: 0, ts: 0 };
+    var aiProviderState = {
+        provider: "openrouter",
+        providers: ["openrouter", "openai", "anthropic", "grok"],
+        configuredProviders: [],
+        configuredMap: {},
+    };
 
     // ---------- Theme Management ----------
     const themeToggle = document.getElementById("themeToggle");
@@ -2694,25 +2700,101 @@
         var badge = document.getElementById("aiApiKeyBadge");
         var pageBadge = document.getElementById("aiExplainConfiguredBadge");
 
-        var configured = !!(res.data && res.data.configured);
+        var data = res.data || {};
+        aiProviderState.provider = String(data.provider || aiProviderState.provider || "openrouter").toLowerCase();
+        aiProviderState.providers = Array.isArray(data.providers) && data.providers.length
+            ? data.providers.map(function (p) { return String(p).toLowerCase(); })
+            : aiProviderState.providers;
+        aiProviderState.configuredProviders = Array.isArray(data.configured_providers)
+            ? data.configured_providers.map(function (p) { return String(p).toLowerCase(); })
+            : [];
+        aiProviderState.configuredMap = (data.configured_map && typeof data.configured_map === "object")
+            ? data.configured_map
+            : {};
+
+        syncAIProviderSelects(aiProviderState.provider);
+        renderAIProviderMatrix();
+
+        var configured = !!data.configured;
+        var providerLabel = prettyAIProviderName(aiProviderState.provider);
         if (badge) {
             if (configured) {
                 badge.className = "badge badge-enabled";
-                badge.innerHTML = '<i class="fa-solid fa-check"></i> API key configured';
+                badge.innerHTML = '<i class="fa-solid fa-check"></i> ' + providerLabel + ' key configured';
             } else {
                 badge.className = "badge badge-disabled";
-                badge.textContent = "Not configured";
+                badge.textContent = providerLabel + " key not configured";
             }
         }
         if (pageBadge) {
             if (configured) {
                 pageBadge.className = "badge badge-enabled";
-                pageBadge.innerHTML = '<i class="fa-solid fa-check"></i> OpenRouter key is configured';
+                pageBadge.innerHTML = '<i class="fa-solid fa-check"></i> ' + providerLabel + ' key is configured';
             } else {
                 pageBadge.className = "badge badge-reject";
-                pageBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> OpenRouter key not configured (set it in Settings)';
+                pageBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> ' + providerLabel + ' key not configured (set it in Settings)';
             }
         }
+    }
+
+    function syncAIProviderSelects(activeProvider) {
+        var provider = String(activeProvider || "openrouter").toLowerCase();
+        var options = aiProviderState.providers || [];
+        var selects = [
+            document.getElementById("aiProviderSelect"),
+            document.getElementById("aiProviderSelectExplain"),
+        ];
+
+        selects.forEach(function (select) {
+            if (!select) return;
+            select.innerHTML = "";
+            options.forEach(function (name) {
+                var opt = document.createElement("option");
+                opt.value = name;
+                opt.textContent = prettyAIProviderName(name);
+                if (name === provider) opt.selected = true;
+                select.appendChild(opt);
+            });
+        });
+    }
+
+    function prettyAIProviderName(provider) {
+        var p = String(provider || "").toLowerCase();
+        if (p === "openrouter") return "OpenRouter";
+        if (p === "openai") return "OpenAI";
+        if (p === "anthropic") return "Anthropic";
+        if (p === "grok") return "Grok";
+        return "AI";
+    }
+
+    function renderAIProviderMatrix() {
+        var targets = [
+            document.getElementById("aiProviderMatrix"),
+            document.getElementById("aiProviderMatrixExplain"),
+        ];
+        targets.forEach(function (target) {
+            if (!target) return;
+            target.innerHTML = "";
+            (aiProviderState.providers || []).forEach(function (provider) {
+                var isActive = provider === aiProviderState.provider;
+                var isConfigured = !!aiProviderState.configuredMap[provider];
+
+                var chip = document.createElement("div");
+                chip.className = "ai-provider-chip" + (isActive ? " active" : "") + (isConfigured ? " configured" : "");
+
+                var name = document.createElement("span");
+                name.className = "ai-provider-chip-name";
+                name.textContent = prettyAIProviderName(provider);
+
+                var status = document.createElement("span");
+                status.className = "ai-provider-chip-state";
+                status.textContent = isConfigured ? "Key set" : "No key";
+
+                chip.appendChild(name);
+                chip.appendChild(status);
+                target.appendChild(chip);
+            });
+        });
     }
 
     async function loadAIApiLiveStatus() {
@@ -2734,20 +2816,64 @@
         if (!d.configured) {
             badge.className = "badge badge-disabled";
             badge.textContent = "AI API: key missing";
-            badge.title = d.message || "OpenRouter key is not configured";
+            badge.title = d.message || (prettyAIProviderName(d.provider || aiProviderState.provider) + " key is not configured");
             return;
         }
 
         if (d.reachable) {
             badge.className = "badge badge-enabled";
             badge.textContent = "AI API: online" + (d.model ? " (" + d.model + ")" : "");
-            badge.title = d.message || "OpenRouter API reachable";
+            badge.title = d.message || (prettyAIProviderName(d.provider || aiProviderState.provider) + " API reachable");
             return;
         }
 
         badge.className = "badge badge-reject";
         badge.textContent = "AI API: offline";
-        badge.title = d.message || "OpenRouter API unreachable";
+        badge.title = d.message || (prettyAIProviderName(d.provider || aiProviderState.provider) + " API unreachable");
+    }
+
+    var aiProviderSelect = document.getElementById("aiProviderSelect");
+    if (aiProviderSelect) {
+        aiProviderSelect.addEventListener("change", async function () {
+            var provider = String(aiProviderSelect.value || "").toLowerCase();
+            if (!provider) return;
+            var res = await fetch(API + "/ai/apikey", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ provider: provider }),
+            });
+            var data = await res.json();
+            if (!data.success) {
+                toast(data.message || "Failed to update AI provider", "error");
+                loadAIApiKeySettings();
+                return;
+            }
+            toast("AI provider switched to " + prettyAIProviderName(provider), "success");
+            loadAIApiKeySettings();
+            loadAIApiLiveStatus();
+        });
+    }
+
+    var aiProviderSelectExplain = document.getElementById("aiProviderSelectExplain");
+    if (aiProviderSelectExplain) {
+        aiProviderSelectExplain.addEventListener("change", async function () {
+            var provider = String(aiProviderSelectExplain.value || "").toLowerCase();
+            if (!provider) return;
+            var res = await fetch(API + "/ai/apikey", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ provider: provider }),
+            });
+            var data = await res.json();
+            if (!data.success) {
+                toast(data.message || "Failed to update AI provider", "error");
+                loadAIApiKeySettings();
+                return;
+            }
+            toast("AI provider switched to " + prettyAIProviderName(provider), "success");
+            loadAIApiKeySettings();
+            loadAIApiLiveStatus();
+        });
     }
 
     document.getElementById("btnGenerateAIExplanation").addEventListener("click", async function () {
@@ -2886,22 +3012,57 @@
 
     document.getElementById("btnSaveAIApiKey").addEventListener("click", async function () {
         var key = document.getElementById("aiApiKey").value.trim();
-        if (!key) { toast("Enter an OpenRouter API key", "error"); return; }
+        var providerSelect = document.getElementById("aiProviderSelect");
+        var provider = providerSelect ? String(providerSelect.value || "").toLowerCase() : aiProviderState.provider;
+        if (!provider) {
+            toast("Choose an AI provider", "error");
+            return;
+        }
+        if (!key) {
+            toast("Enter an API key for " + prettyAIProviderName(provider), "error");
+            return;
+        }
         var res = await fetch(API + "/ai/apikey", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ api_key: key }),
+            body: JSON.stringify({ provider: provider, api_key: key }),
         });
         var data = await res.json();
         if (data.success) {
-            toast("OpenRouter API key saved", "success");
+            toast(prettyAIProviderName(provider) + " API key saved", "success");
             document.getElementById("aiApiKey").value = "";
             loadAIApiKeySettings();
             loadAIApiLiveStatus();
         } else {
-            toast(data.message || "Failed to save OpenRouter key", "error");
+            toast(data.message || "Failed to save AI API key", "error");
         }
     });
+
+    var btnRemoveAIApiKey = document.getElementById("btnRemoveAIApiKey");
+    if (btnRemoveAIApiKey) {
+        btnRemoveAIApiKey.addEventListener("click", async function () {
+            var providerSelect = document.getElementById("aiProviderSelect");
+            var provider = providerSelect ? String(providerSelect.value || "").toLowerCase() : aiProviderState.provider;
+            if (!provider) {
+                toast("Choose an AI provider", "error");
+                return;
+            }
+            if (!confirm("Remove saved key for " + prettyAIProviderName(provider) + "?")) return;
+
+            var res = await fetch(API + "/ai/apikey?provider=" + encodeURIComponent(provider), {
+                method: "DELETE",
+                headers: { "Accept": "application/json" },
+            });
+            var data = await res.json();
+            if (!data.success) {
+                toast(data.message || "Failed to remove AI API key", "error");
+                return;
+            }
+            toast(prettyAIProviderName(provider) + " API key removed", "success");
+            loadAIApiKeySettings();
+            loadAIApiLiveStatus();
+        });
+    }
 
     document.getElementById("btnRemoveApiKey").addEventListener("click", async function () {
         if (!confirm("Remove the VirusTotal API key?")) return;

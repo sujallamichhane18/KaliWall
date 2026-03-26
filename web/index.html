@@ -782,15 +782,20 @@
             <div class="page-toolbar">
                 <h2>AI Packet Explainer</h2>
             </div>
-            <div class="card settings-card">
+            <div class="card settings-card ai-control-shell">
                 <div class="card-header">
                     <i class="fa-solid fa-wand-magic-sparkles"></i>
                     <h3>Generate Concise Explanation</h3>
                 </div>
                 <div class="card-body" style="padding:20px">
-                    <p class="settings-desc">Paste blocked packet metadata and generate a short one-line explanation using OpenRouter. Responses are capped for low token usage.</p>
+                    <p class="settings-desc">Paste blocked packet metadata and generate a short one-line explanation using your selected AI provider (OpenRouter, OpenAI, Anthropic, or Grok).</p>
                     <div class="api-key-status" style="margin-bottom:12px">
                         <span class="badge badge-disabled" id="aiExplainConfiguredBadge">Checking API key...</span>
+                    </div>
+                    <div class="ai-provider-matrix" id="aiProviderMatrixExplain"></div>
+                    <div class="form-group">
+                        <label for="aiProviderSelectExplain">AI Provider</label>
+                        <select id="aiProviderSelectExplain"></select>
                     </div>
                     <div class="form-group">
                         <label for="aiExplainInput">Packet Metadata</label>
@@ -881,26 +886,39 @@
                 </div>
             </div>
 
-            <!-- AI Explainer OpenRouter API Key -->
+            <!-- AI Explainer API Key -->
             <div class="card settings-card">
                 <div class="card-header">
                     <i class="fa-solid fa-robot"></i>
-                    <h3>AI Explainer (OpenRouter)</h3>
+                    <h3>AI Explainer Providers</h3>
                 </div>
                 <div class="card-body" style="padding:20px">
-                    <p class="settings-desc">Enter your OpenRouter API key to enable AI-powered explanations of blocked packets. Get a free key at <a href="https://openrouter.ai" target="_blank" rel="noopener noreferrer">openrouter.ai</a>.</p>
+                    <p class="settings-desc">Select a provider and save its API key. Supported providers: OpenRouter, OpenAI, Anthropic, and Grok.</p>
+                    <div class="ai-provider-matrix" id="aiProviderMatrix"></div>
                     <div class="api-key-form">
+                        <div class="form-group">
+                            <label for="aiProviderSelect">Provider</label>
+                            <select id="aiProviderSelect"></select>
+                        </div>
                         <div class="form-group">
                             <label for="aiApiKey">API Key</label>
                             <div class="input-with-btn">
-                                <input type="password" id="aiApiKey" placeholder="Paste your OpenRouter API key" autocomplete="off">
-                                <button class="btn btn-primary" id="btnSaveAIApiKey"><i class="fa-solid fa-save"></i> Save</button>
+                                <input type="password" id="aiApiKey" placeholder="Paste API key for selected provider" autocomplete="off">
+                                <button class="btn btn-primary" id="btnSaveAIApiKey"><i class="fa-solid fa-save"></i> Save Provider/Key</button>
                             </div>
                         </div>
                         <div class="api-key-status" id="aiApiKeyStatus">
                             <span class="badge badge-disabled" id="aiApiKeyBadge">Not configured</span>
+                            <button class="btn btn-sm btn-danger" id="btnRemoveAIApiKey"><i class="fa-solid fa-trash"></i> Remove Selected Key</button>
                         </div>
                     </div>
+                    <p class="settings-desc ai-provider-links">
+                        Provider portals:
+                        <a href="https://openrouter.ai" target="_blank" rel="noopener noreferrer">OpenRouter</a> ·
+                        <a href="https://platform.openai.com" target="_blank" rel="noopener noreferrer">OpenAI</a> ·
+                        <a href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer">Anthropic</a> ·
+                        <a href="https://console.x.ai" target="_blank" rel="noopener noreferrer">Grok</a>
+                    </p>
                 </div>
             </div>
         </section>

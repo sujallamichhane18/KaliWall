@@ -1176,22 +1176,64 @@ func (h *handlers) handleAIApiKey(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		provider := h.aiService.Provider()
+		configuredMap := map[string]bool{}
+		for _, p := range h.aiService.SupportedProviders() {
+			configuredMap[p] = h.aiService.HasAPIKeyForProvider(p)
+		}
 		respond(w, http.StatusOK, models.APIResponse{
 			Success: true,
 			Data: map[string]interface{}{
-				"configured": h.aiService.HasAPIKey(),
+				"provider":             provider,
+				"providers":            h.aiService.SupportedProviders(),
+				"configured":           h.aiService.HasAPIKeyForProvider(provider),
+				"configured_providers": h.aiService.ConfiguredProviders(),
+				"configured_map":       configuredMap,
 			},
 		})
 	case http.MethodPost:
 		var body struct {
-			APIKey string `json:"api_key"`
+			APIKey   string `json:"api_key"`
+			Provider string `json:"provider"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.APIKey == "" {
-			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "api_key is required"})
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "invalid JSON payload"})
 			return
 		}
-		h.aiService.SetAPIKey(body.APIKey)
-		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "OpenRouter API key saved"})
+		if strings.TrimSpace(body.Provider) == "" && strings.TrimSpace(body.APIKey) == "" {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "provider or api_key is required"})
+			return
+		}
+
+		provider := h.aiService.Provider()
+		if strings.TrimSpace(body.Provider) != "" {
+			if err := h.aiService.SetProvider(body.Provider); err != nil {
+				respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: err.Error()})
+				return
+			}
+			provider = h.aiService.Provider()
+		}
+
+		if strings.TrimSpace(body.APIKey) != "" {
+			if err := h.aiService.SetAPIKeyForProvider(provider, body.APIKey); err != nil {
+				respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: err.Error()})
+				return
+			}
+			respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "AI provider updated and API key saved", Data: map[string]interface{}{"provider": provider}})
+			return
+		}
+
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "AI provider updated", Data: map[string]interface{}{"provider": provider}})
+	case http.MethodDelete:
+		provider := strings.TrimSpace(r.URL.Query().Get("provider"))
+		if provider == "" {
+			provider = h.aiService.Provider()
+		}
+		if err := h.aiService.RemoveAPIKeyForProvider(provider); err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "AI API key removed", Data: map[string]interface{}{"provider": strings.ToLower(strings.TrimSpace(provider))}})
 	default:
 		methodNotAllowed(w)
 	}

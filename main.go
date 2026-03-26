@@ -196,11 +196,36 @@ func main() {
 		httpProxy.StartAutoReload(proxyCtx, *proxyReloadInterval)
 	}
 
-	// Initialize OpenRouter AI service
+	// Initialize multi-provider AI service
 	aiService := ai.NewOpenRouterService()
-	if key, ok := db.GetSetting("openrouter_api_key"); ok && key != "" {
-		aiService.SetAPIKey(key)
-		fmt.Println("[+] OpenRouter API key restored from database")
+	if provider, ok := db.GetSetting("ai_provider"); ok && strings.TrimSpace(provider) != "" {
+		if err := aiService.SetProvider(provider); err != nil {
+			log.Printf("Invalid saved AI provider %q: %v", provider, err)
+		}
+	}
+	aiSettingKeys := map[string]string{
+		ai.ProviderOpenRouter: "ai_api_key_openrouter",
+		ai.ProviderOpenAI:     "ai_api_key_openai",
+		ai.ProviderAnthropic:  "ai_api_key_anthropic",
+		ai.ProviderGrok:       "ai_api_key_grok",
+	}
+	for provider, settingKey := range aiSettingKeys {
+		if key, ok := db.GetSetting(settingKey); ok && strings.TrimSpace(key) != "" {
+			if err := aiService.SetAPIKeyForProvider(provider, key); err != nil {
+				log.Printf("Failed to restore %s key: %v", provider, err)
+			}
+		}
+	}
+	// Backward compatibility with the legacy OpenRouter-only setting key.
+	if key, ok := db.GetSetting("openrouter_api_key"); ok && strings.TrimSpace(key) != "" {
+		if !aiService.HasAPIKeyForProvider(ai.ProviderOpenRouter) {
+			if err := aiService.SetAPIKeyForProvider(ai.ProviderOpenRouter, key); err == nil {
+				fmt.Println("[+] Legacy OpenRouter API key restored from database")
+			}
+		}
+	}
+	if configured := aiService.ConfiguredProviders(); len(configured) > 0 {
+		fmt.Printf("[+] AI providers configured: %s (active: %s)\n", strings.Join(configured, ", "), aiService.Provider())
 	}
 
 	handler := api.NewRouter(fw, trafficLogger, ti, analyticsService, dpiProvider, geoSvc, httpProxy, aiService)
@@ -245,8 +270,20 @@ func main() {
 	if key := ti.GetAPIKey(); key != "" {
 		db.SetSetting("vt_api_key", key)
 	}
-	if key := aiService.GetAPIKey(); key != "" {
+	db.SetSetting("ai_provider", aiService.Provider())
+	for provider, key := range aiService.ProviderAPIKeys() {
+		settingKey := "ai_api_key_" + provider
+		if strings.TrimSpace(key) == "" {
+			db.DeleteSetting(settingKey)
+			continue
+		}
+		db.SetSetting(settingKey, key)
+	}
+	// Keep legacy key in sync for backward compatibility.
+	if key := aiService.GetAPIKeyForProvider(ai.ProviderOpenRouter); strings.TrimSpace(key) != "" {
 		db.SetSetting("openrouter_api_key", key)
+	} else {
+		db.DeleteSetting("openrouter_api_key")
 	}
 	trafficLogger.Log("SYSTEM", "-", "-", "-", "Daemon stopped")
 }

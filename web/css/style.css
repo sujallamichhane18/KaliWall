@@ -1534,6 +1534,11 @@ body {
     max-width: 800px;
 }
 
+.ai-control-shell {
+    border: 1px solid var(--border-color);
+    background: linear-gradient(160deg, rgba(37, 99, 235, 0.06), rgba(16, 185, 129, 0.02) 35%, transparent 60%), var(--bg-card);
+}
+
 .settings-desc {
     font-size: 0.9rem;
     color: var(--text-secondary);
@@ -1576,6 +1581,56 @@ body {
     align-items: center;
     gap: 12px;
     margin-top: 16px;
+    flex-wrap: wrap;
+}
+
+.ai-provider-matrix {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.ai-provider-chip {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: var(--bg-body);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+}
+
+.ai-provider-chip:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+
+.ai-provider-chip.active {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.ai-provider-chip.configured {
+    background: linear-gradient(180deg, rgba(16, 185, 129, 0.08), transparent 70%), var(--bg-body);
+}
+
+.ai-provider-chip-name {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.ai-provider-chip-state {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+.ai-provider-links {
+    margin-top: 16px;
+    margin-bottom: 0;
+    font-size: 0.84rem;
 }
 
 .ai-explain-textarea {
