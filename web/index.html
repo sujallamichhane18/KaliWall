@@ -606,6 +606,7 @@
                                         <th>Status</th>
                                         <th>Chain</th>
                                         <th>Protocol</th>
+                                        <th>Conn State</th>
                                         <th>Source</th>
                                         <th>Destination</th>
                                         <th>Dst Port</th>
@@ -1068,6 +1069,16 @@
                             <option value="udp">UDP</option>
                             <option value="icmp">ICMP</option>
                             <option value="all">ALL</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="ruleConnectionState">Connection State</label>
+                        <select id="ruleConnectionState">
+                            <option value="any">Any</option>
+                            <option value="NEW">NEW</option>
+                            <option value="ESTABLISHED">ESTABLISHED</option>
+                            <option value="RELATED">RELATED</option>
+                            <option value="INVALID">INVALID</option>
                         </select>
                     </div>
                     <div class="form-group">

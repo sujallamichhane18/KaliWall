@@ -8,6 +8,7 @@ type Rule struct {
 	ID        string    `json:"id"`
 	Chain     string    `json:"chain"`     // INPUT, OUTPUT, FORWARD
 	Protocol  string    `json:"protocol"`  // tcp, udp, icmp, all
+	ConnectionState string `json:"connection_state,omitempty"` // any, NEW, ESTABLISHED, RELATED, INVALID
 	SrcIP     string    `json:"src_ip"`    // Source IP/CIDR ("any" for all)
 	DstIP     string    `json:"dst_ip"`    // Destination IP/CIDR ("any" for all)
 	SrcPort   string    `json:"src_port"`  // Source port ("any" for all)
@@ -22,6 +23,7 @@ type Rule struct {
 type RuleRequest struct {
 	Chain    string `json:"chain"`
 	Protocol string `json:"protocol"`
+	ConnectionState string `json:"connection_state,omitempty"`
 	SrcIP    string `json:"src_ip"`
 	DstIP    string `json:"dst_ip"`
 	SrcPort  string `json:"src_port"`

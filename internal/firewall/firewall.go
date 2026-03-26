@@ -309,6 +309,7 @@ func (e *Engine) AddRule(req models.RuleRequest) (models.Rule, error) {
 		ID:        uuid.New().String(),
 		Chain:     strings.ToUpper(req.Chain),
 		Protocol:  strings.ToLower(req.Protocol),
+		ConnectionState: normalizeConnectionState(req.ConnectionState),
 		SrcIP:     normalise(req.SrcIP),
 		DstIP:     normalise(req.DstIP),
 		SrcPort:   normalise(req.SrcPort),
@@ -443,6 +444,7 @@ func (e *Engine) UpdateRule(id string, req models.RuleRequest) (models.Rule, err
 			// Update fields
 			e.rules[i].Chain = strings.ToUpper(req.Chain)
 			e.rules[i].Protocol = strings.ToLower(req.Protocol)
+			e.rules[i].ConnectionState = normalizeConnectionState(req.ConnectionState)
 			e.rules[i].SrcIP = normalise(req.SrcIP)
 			e.rules[i].DstIP = normalise(req.DstIP)
 			e.rules[i].SrcPort = normalise(req.SrcPort)
@@ -527,6 +529,7 @@ func (e *Engine) ValidateCandidateRule(req models.RuleRequest) []models.RuleWarn
 		ID:       "candidate",
 		Chain:    strings.ToUpper(req.Chain),
 		Protocol: strings.ToLower(req.Protocol),
+		ConnectionState: normalizeConnectionState(req.ConnectionState),
 		SrcIP:    normalise(req.SrcIP),
 		DstIP:    normalise(req.DstIP),
 		SrcPort:  normalise(req.SrcPort),
@@ -543,6 +546,7 @@ func ruleSignature(r models.Rule) string {
 	return strings.Join([]string{
 		strings.ToUpper(r.Chain),
 		strings.ToLower(r.Protocol),
+		normalizeConnectionState(r.ConnectionState),
 		normalise(r.SrcIP),
 		normalise(r.DstIP),
 		normalise(r.SrcPort),
@@ -554,6 +558,9 @@ func ruleSignature(r models.Rule) string {
 
 func ruleCovers(broad, specific models.Rule) bool {
 	if !sameOrAny(broad.Protocol, specific.Protocol) {
+		return false
+	}
+	if !sameOrAny(normalizeConnectionState(broad.ConnectionState), normalizeConnectionState(specific.ConnectionState)) {
 		return false
 	}
 	if !sameOrAny(broad.SrcIP, specific.SrcIP) || !sameOrAny(broad.DstIP, specific.DstIP) {
@@ -1230,6 +1237,9 @@ func (e *Engine) setLastError(msg string) {
 
 func buildIPTablesArgs(op string, r models.Rule) []string {
 	args := []string{op, r.Chain}
+	if state := normalizeConnectionState(r.ConnectionState); state != "any" {
+		args = append(args, "-m", "conntrack", "--ctstate", state)
+	}
 	if r.Protocol != "" && r.Protocol != "all" {
 		args = append(args, "-p", r.Protocol)
 	}
@@ -1291,6 +1301,9 @@ func buildUFWRuleArgs(r models.Rule) []string {
 func buildNFTRuleArgs(r models.Rule) []string {
 	chain := strings.ToLower(r.Chain)
 	args := []string{"add", "rule", "inet", "kaliwall", chain}
+	if state := normalizeConnectionState(r.ConnectionState); state != "any" {
+		args = append(args, "ct", "state", strings.ToLower(state))
+	}
 	if r.SrcIP != "" && r.SrcIP != "any" {
 		args = append(args, "ip", "saddr", r.SrcIP)
 	}
@@ -1320,6 +1333,7 @@ func buildNFTRuleArgs(r models.Rule) []string {
 var validChains = map[string]bool{"INPUT": true, "OUTPUT": true, "FORWARD": true}
 var validActions = map[string]bool{"ACCEPT": true, "DROP": true, "REJECT": true}
 var validProtocols = map[string]bool{"tcp": true, "udp": true, "icmp": true, "all": true}
+var validConnectionStates = map[string]bool{"ANY": true, "NEW": true, "ESTABLISHED": true, "RELATED": true, "INVALID": true}
 var portRegex = regexp.MustCompile(`^(\d{1,5}|any)$`)
 
 func validateRuleRequest(req models.RuleRequest) error {
@@ -1334,6 +1348,10 @@ func validateRuleRequest(req models.RuleRequest) error {
 	proto := strings.ToLower(req.Protocol)
 	if !validProtocols[proto] {
 		return fmt.Errorf("invalid protocol: %s (must be tcp, udp, icmp, or all)", req.Protocol)
+	}
+	connState := strings.ToUpper(normalizeConnectionState(req.ConnectionState))
+	if !validConnectionStates[connState] {
+		return fmt.Errorf("invalid connection_state: %s (must be any, NEW, ESTABLISHED, RELATED, or INVALID)", req.ConnectionState)
 	}
 	// Validate IP addresses (basic)
 	if req.SrcIP != "any" && req.SrcIP != "" {
@@ -1373,6 +1391,17 @@ func isValidCIDROrIP(s string) bool {
 
 func normalise(v string) string {
 	if v == "" {
+		return "any"
+	}
+	return v
+}
+
+func normalizeConnectionState(v string) string {
+	v = strings.TrimSpace(strings.ToUpper(v))
+	if v == "" {
+		return "any"
+	}
+	if v == "ANY" {
 		return "any"
 	}
 	return v

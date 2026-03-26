@@ -1569,6 +1569,7 @@
                 "<td>" + enabledBadge(rule.enabled) + "</td>" +
                 "<td>" + chainBadge(rule.chain) + "</td>" +
                 "<td>" + escapeHtml(rule.protocol) + "</td>" +
+                "<td>" + escapeHtml((rule.connection_state || "any").toString().toUpperCase()) + "</td>" +
                 "<td>" + escapeHtml(rule.src_ip) + (rule.src_port !== "any" ? ":" + escapeHtml(rule.src_port) : "") + "</td>" +
                 "<td>" + escapeHtml(rule.dst_ip) + "</td>" +
                 "<td>" + escapeHtml(rule.dst_port) + "</td>" +
@@ -2118,6 +2119,7 @@
         const body = {
             chain: document.getElementById("ruleChain").value,
             protocol: document.getElementById("ruleProtocol").value,
+            connection_state: document.getElementById("ruleConnectionState").value || "any",
             src_ip: document.getElementById("ruleSrcIP").value || "any",
             dst_ip: document.getElementById("ruleDstIP").value || "any",
             src_port: document.getElementById("ruleSrcPort").value || "any",
@@ -2203,6 +2205,7 @@
         document.getElementById("ruleEditId").value = rule.id;
         document.getElementById("ruleChain").value = rule.chain;
         document.getElementById("ruleProtocol").value = rule.protocol;
+        document.getElementById("ruleConnectionState").value = rule.connection_state || "any";
         document.getElementById("ruleSrcIP").value = rule.src_ip || "any";
         document.getElementById("ruleDstIP").value = rule.dst_ip || "any";
         document.getElementById("ruleSrcPort").value = rule.src_port || "any";
