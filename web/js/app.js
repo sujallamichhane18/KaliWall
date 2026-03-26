@@ -60,7 +60,7 @@
     
     function initTheme() {
         const savedTheme = localStorage.getItem("theme");
-        const theme = savedTheme || "light";
+        const theme = savedTheme || "dark";
         setTheme(theme);
     }
 
