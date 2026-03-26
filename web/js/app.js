@@ -2671,8 +2671,8 @@
         var input = document.getElementById("dpiWorkersInput");
         if (!input) return;
         var workers = parseInt(input.value, 10) || 0;
-        if (workers < 1 || workers > 128) {
-            toast("Workers must be between 1 and 128", "error");
+        if (workers < 1 || workers > 256) {
+            toast("Workers must be between 1 and 256", "error");
             return;
         }
         try {

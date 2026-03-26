@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -52,6 +53,11 @@ func main() {
 	dpiPromisc := flag.Bool("dpi-promisc", true, "Enable promiscuous capture mode for DPI")
 	dpiBPF := flag.String("dpi-bpf", "", "Optional BPF filter for DPI capture")
 	dpiRateLimit := flag.Int("dpi-rate", 5000, "Deprecated in lite mode; kept for CLI compatibility")
+	dpiQueue := flag.Int("dpi-queue", envInt("KALIWALL_DPI_QUEUE", 16384), "DPI packet queue capacity")
+	dpiBatch := flag.Int("dpi-batch", envInt("KALIWALL_DPI_BATCH", 32), "DPI worker micro-batch size")
+	dpiMaxTrackedIPs := flag.Int("dpi-max-ips", envInt("KALIWALL_DPI_MAX_IPS", 50000), "DPI max unique src/dst IP cardinality tracking")
+	dpiLogEvery := flag.Int("dpi-log-every", envInt("KALIWALL_DPI_LOG_EVERY", 8), "Sample console detection logs every N events (1 = log all)")
+	dpiEmitLogs := flag.Bool("dpi-emit-logs", envBool("KALIWALL_DPI_EMIT_LOGS", true), "Emit DPI detections into traffic logs")
 	dpiLite := flag.Bool("dpi-lite", true, "Run lightweight IDS/DPI engine (HTTP/DNS/TLS + L3/L7 stats)")
 	geoDBPath := flag.String("geo-db", defaultGeoDBFile, "Path to GeoIP database (.mmdb or IP2Location CSV)")
 	httpProxyEnable := flag.Bool("http-proxy", true, "Enable HTTP forward proxy with malicious domain blocking")
@@ -150,6 +156,11 @@ func main() {
 		Promiscuous: *dpiPromisc,
 		BPF:         *dpiBPF,
 		Workers:     *dpiWorkers,
+		InputQueueSize:    *dpiQueue,
+		PacketBatchSize:   *dpiBatch,
+		MaxTrackedIPs:     *dpiMaxTrackedIPs,
+		DetectionLogEvery: *dpiLogEvery,
+		EmitEventLogs:     *dpiEmitLogs,
 	}, trafficLogger)
 	dpiProvider.Set(liteEngine)
 	fmt.Printf("[+] DPI mode: lightweight IDS/DPI (L3 + L7)\n")
@@ -286,6 +297,30 @@ func main() {
 		db.DeleteSetting("openrouter_api_key")
 	}
 	trafficLogger.Log("SYSTEM", "-", "-", "-", "Daemon stopped")
+}
+
+func envInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+func envBool(key string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return v
 }
 
 func ensureMaliciousDomainsFile(path string) error {

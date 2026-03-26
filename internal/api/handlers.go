@@ -276,8 +276,8 @@ func (h *handlers) handleDPIWorkers(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "workers is required"})
 		return
 	}
-	if body.Workers < 1 || body.Workers > 128 {
-		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "workers must be between 1 and 128"})
+	if body.Workers < 1 || body.Workers > 256 {
+		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "workers must be between 1 and 256"})
 		return
 	}
 	if err := h.dpi.SetWorkers(body.Workers); err != nil {

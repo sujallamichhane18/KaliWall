@@ -179,6 +179,32 @@ The response includes Layer 7 detections and Layer 3 telemetry such as:
 - `ipv4_packets`, `ipv6_packets`, `tcp_packets`, `udp_packets`, `icmp_packets`
 - `unique_src_ips`, `unique_dst_ips`, `top_src_ips`, `top_dst_ips`
 
+#### High-Capacity DPI Tuning
+
+For higher throughput deployments, KaliWall now supports queue, batching, and cardinality tuning:
+
+```bash
+./kaliwall --dpi --dpi-lite --dpi-interface eth0 \
+  --dpi-workers 24 \
+  --dpi-queue 32768 \
+  --dpi-batch 64 \
+  --dpi-max-ips 100000 \
+  --dpi-log-every 16
+```
+
+Equivalent environment variables:
+
+- `KALIWALL_DPI_QUEUE`
+- `KALIWALL_DPI_BATCH`
+- `KALIWALL_DPI_MAX_IPS`
+- `KALIWALL_DPI_LOG_EVERY`
+- `KALIWALL_DPI_EMIT_LOGS`
+
+Detailed `/api/v1/dpi/stats` now also reports queue pressure and drop counters:
+
+- `queue_depth`, `queue_capacity`, `queue_drops`
+- `detection_events`, `detection_log_every`, `max_tracked_ips`
+
 <br/>
 
 ### 🖥️ UX and Tooling

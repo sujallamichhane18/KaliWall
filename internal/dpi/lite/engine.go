@@ -32,6 +32,11 @@ type Config struct {
     Promiscuous bool
     BPF         string
     Workers     int
+    InputQueueSize    int
+    PacketBatchSize   int
+    MaxTrackedIPs     int
+    DetectionLogEvery int
+    EmitEventLogs     bool
 }
 
 // Stats is a lightweight REST-friendly view for protocol detections.
@@ -63,6 +68,12 @@ type Stats struct {
     LastDNS      string    `json:"last_dns"`
     LastTLS      string    `json:"last_tls"`
     LastSeenAt   time.Time `json:"last_seen_at"`
+    QueueDepth        int    `json:"queue_depth"`
+    QueueCapacity     int    `json:"queue_capacity"`
+    QueueDrops        uint64 `json:"queue_drops"`
+    DetectionEvents   uint64 `json:"detection_events"`
+    DetectionLogEvery int    `json:"detection_log_every"`
+    MaxTrackedIPs     int    `json:"max_tracked_ips"`
 }
 
 // Engine is a lightweight live IDS/DPI processor focused on protocol extraction.
@@ -96,6 +107,8 @@ type Engine struct {
     tcpPackets  atomic.Uint64
     udpPackets  atomic.Uint64
     icmpPackets atomic.Uint64
+    queueDrops      atomic.Uint64
+    detectionEvents atomic.Uint64
 
     metaMu     sync.RWMutex
     lastHTTP   string
@@ -109,10 +122,25 @@ type Engine struct {
 // New creates a lightweight IDS/DPI engine.
 func New(cfg Config, tl *logger.TrafficLogger) *Engine {
     if cfg.Workers <= 0 {
-        cfg.Workers = max(2, runtime.NumCPU()/2)
+        cfg.Workers = max(4, runtime.NumCPU())
     }
     if cfg.Workers < 1 {
         cfg.Workers = 1
+    }
+    if cfg.Workers > 256 {
+        cfg.Workers = 256
+    }
+    if cfg.InputQueueSize <= 0 {
+        cfg.InputQueueSize = 16384
+    }
+    if cfg.PacketBatchSize <= 0 {
+        cfg.PacketBatchSize = 32
+    }
+    if cfg.MaxTrackedIPs <= 0 {
+        cfg.MaxTrackedIPs = 50000
+    }
+    if cfg.DetectionLogEvery <= 0 {
+        cfg.DetectionLogEvery = 8
     }
 
     c := capture.New(capture.Config{
@@ -133,7 +161,7 @@ func New(cfg Config, tl *logger.TrafficLogger) *Engine {
             FlowTimeout:     2 * time.Minute,
             CleanupInterval: 30 * time.Second,
         }),
-        inputCh: make(chan gopacket.Packet, 4096),
+        inputCh: make(chan gopacket.Packet, cfg.InputQueueSize),
         srcHits: make(map[string]uint64, 4096),
         dstHits: make(map[string]uint64, 4096),
     }
@@ -165,7 +193,7 @@ func (e *Engine) Start(parent context.Context) error {
     e.startedAt = time.Now()
     e.running.Store(true)
     e.enabled.Store(true)
-    e.inputCh = make(chan gopacket.Packet, 4096)
+    e.inputCh = make(chan gopacket.Packet, e.queueCapacity())
     e.reasm.Start()
 
     e.wg.Add(1)
@@ -186,8 +214,8 @@ func (e *Engine) Start(parent context.Context) error {
 
 // SetWorkers updates worker concurrency; if engine is running it restarts capture.
 func (e *Engine) SetWorkers(workers int) error {
-    if workers < 1 || workers > 128 {
-        return fmt.Errorf("workers must be between 1 and 128")
+    if workers < 1 || workers > 256 {
+        return fmt.Errorf("workers must be between 1 and 256")
     }
     wasRunning := e.running.Load()
 
@@ -282,6 +310,12 @@ func (e *Engine) DetailedStats() Stats {
         LastDNS:      lastDNS,
         LastTLS:      lastTLS,
         LastSeenAt:   lastSeen,
+        QueueDepth:        e.queueDepth(),
+        QueueCapacity:     e.queueCapacity(),
+        QueueDrops:        e.queueDrops.Load(),
+        DetectionEvents:   e.detectionEvents.Load(),
+        DetectionLogEvery: e.detectionLogEvery(),
+        MaxTrackedIPs:     e.maxTrackedIPs(),
     }
 }
 
@@ -310,6 +344,10 @@ func (e *Engine) forwardPackets(ctx context.Context) {
             }
             select {
             case e.inputCh <- pkt:
+            default:
+                if dropped := e.queueDrops.Add(1); dropped%2000 == 0 {
+                    log.Printf("DPI lite backpressure: dropped=%d queue=%d/%d", dropped, e.queueDepth(), e.queueCapacity())
+                }
             case <-ctx.Done():
                 return
             }
@@ -342,27 +380,43 @@ func (e *Engine) worker(ctx context.Context) {
             if !ok {
                 return
             }
-            e.packetsSeen.Add(1)
-            decoded, err := e.decoder.Decode(pkt)
-            if err != nil {
-                if err != types.ErrUnsupportedPacket {
-                    e.decodeErrors.Add(1)
+            e.processPacket(pkt)
+
+            for i := 1; i < e.packetBatchSize(); i++ {
+                select {
+                case pkt, ok := <-e.inputCh:
+                    if !ok {
+                        return
+                    }
+                    e.processPacket(pkt)
+                default:
+                    i = e.packetBatchSize()
                 }
-                continue
-            }
-
-            e.recordL3(decoded)
-
-            payloads, err := e.reasm.Process(decoded)
-            if err != nil {
-                e.decodeErrors.Add(1)
-                continue
-            }
-            for _, payload := range payloads {
-                result := e.inspect.Inspect(payload)
-                e.record(result)
             }
         }
+    }
+}
+
+func (e *Engine) processPacket(pkt gopacket.Packet) {
+    e.packetsSeen.Add(1)
+    decoded, err := e.decoder.Decode(pkt)
+    if err != nil {
+        if err != types.ErrUnsupportedPacket {
+            e.decodeErrors.Add(1)
+        }
+        return
+    }
+
+    e.recordL3(decoded)
+
+    payloads, err := e.reasm.Process(decoded)
+    if err != nil {
+        e.decodeErrors.Add(1)
+        return
+    }
+    for _, payload := range payloads {
+        result := e.inspect.Inspect(payload)
+        e.record(result)
     }
 }
 
@@ -387,10 +441,14 @@ func (e *Engine) recordL3(decoded *types.DecodedPacket) {
 
     e.metaMu.Lock()
     if decoded.Tuple.SrcIP != "" {
-        e.srcHits[decoded.Tuple.SrcIP]++
+        if _, ok := e.srcHits[decoded.Tuple.SrcIP]; ok || len(e.srcHits) < e.maxTrackedIPs() {
+            e.srcHits[decoded.Tuple.SrcIP]++
+        }
     }
     if decoded.Tuple.DstIP != "" {
-        e.dstHits[decoded.Tuple.DstIP]++
+        if _, ok := e.dstHits[decoded.Tuple.DstIP]; ok || len(e.dstHits) < e.maxTrackedIPs() {
+            e.dstHits[decoded.Tuple.DstIP]++
+        }
     }
     e.metaMu.Unlock()
 }
@@ -402,8 +460,10 @@ func (e *Engine) record(result types.InspectResult) {
         e.httpDetected.Add(1)
         seen = true
         msg := "[HTTP] " + result.HTTPMethod + " " + result.HTTPURL + " Host: " + result.HTTPHost
-        log.Println(msg)
-        if e.logger != nil {
+        if e.shouldEmitSampledDetectionLog() {
+            log.Println(msg)
+        }
+        if e.logger != nil && e.emitEventLogs() {
             e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "http", "dpi:lite:"+msg)
         }
         e.metaMu.Lock()
@@ -416,8 +476,10 @@ func (e *Engine) record(result types.InspectResult) {
         e.dnsDetected.Add(1)
         seen = true
         msg := "[DNS] Query: " + result.DNSDomain
-        log.Println(msg)
-        if e.logger != nil {
+        if e.shouldEmitSampledDetectionLog() {
+            log.Println(msg)
+        }
+        if e.logger != nil && e.emitEventLogs() {
             e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "dns", "dpi:lite:"+msg)
         }
         e.metaMu.Lock()
@@ -430,8 +492,10 @@ func (e *Engine) record(result types.InspectResult) {
         e.tlsDetected.Add(1)
         seen = true
         msg := "[TLS] SNI: " + result.TLSSNI
-        log.Println(msg)
-        if e.logger != nil {
+        if e.shouldEmitSampledDetectionLog() {
+            log.Println(msg)
+        }
+        if e.logger != nil && e.emitEventLogs() {
             e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "tls", "dpi:lite:"+msg)
         }
         e.metaMu.Lock()
@@ -450,6 +514,52 @@ func max(a, b int) int {
         return a
     }
     return b
+}
+
+func (e *Engine) queueDepth() int {
+    if e.inputCh == nil {
+        return 0
+    }
+    return len(e.inputCh)
+}
+
+func (e *Engine) queueCapacity() int {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.InputQueueSize
+}
+
+func (e *Engine) packetBatchSize() int {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.PacketBatchSize
+}
+
+func (e *Engine) maxTrackedIPs() int {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.MaxTrackedIPs
+}
+
+func (e *Engine) detectionLogEvery() int {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.DetectionLogEvery
+}
+
+func (e *Engine) emitEventLogs() bool {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.EmitEventLogs
+}
+
+func (e *Engine) shouldEmitSampledDetectionLog() bool {
+    every := e.detectionLogEvery()
+    n := e.detectionEvents.Add(1)
+    if every <= 1 {
+        return true
+    }
+    return n%uint64(every) == 0
 }
 
 func topN(m map[string]uint64, n int) []IPCount {
