@@ -547,12 +547,41 @@
 
         <!-- ===== RULES PAGE ===== -->
         <section class="page" id="page-rules">
-            <div class="page-toolbar">
-                <h2>Firewall Rules</h2>
-                <button class="btn btn-primary" id="btnAddRule">
-                    <i class="fa-solid fa-plus"></i> Add Rule
-                </button>
+            <div class="page-toolbar ops-toolbar">
+                <h2>Firewall Rules &amp; Policies</h2>
+                <div class="toolbar-actions">
+                    <button class="btn btn-secondary">
+                        <i class="fa-solid fa-filter"></i> Advanced Filters
+                    </button>
+                    <button class="btn btn-primary" id="btnAddRule">
+                        <i class="fa-solid fa-plus"></i> Create New Rule
+                    </button>
+                </div>
             </div>
+
+            <div class="ops-kpi-grid" style="margin-bottom:20px">
+                <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Total Rules</span>
+                    <span class="ops-kpi-value" id="statTotalRulesRulesPage">0</span>
+                    <span class="ops-kpi-sub">Global policy objects</span>
+                </div>
+                <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Active Rules</span>
+                    <span class="ops-kpi-value" id="statActiveRulesRulesPage">0</span>
+                    <span class="ops-kpi-sub">Live enforcement</span>
+                </div>
+                <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Dropped Requests</span>
+                    <span class="ops-kpi-value" id="statDroppedRulesPage">0</span>
+                    <span class="ops-kpi-sub">Past 24h</span>
+                </div>
+                <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Latency Overhead</span>
+                    <span class="ops-kpi-value">0.82ms</span>
+                    <span class="ops-kpi-sub">Within SLA</span>
+                </div>
+            </div>
+
             <div class="card" id="ruleWarningsCard" style="display:none">
                 <div class="card-header">
                     <i class="fa-solid fa-triangle-exclamation"></i>
@@ -562,44 +591,113 @@
                     <ul id="ruleWarningsList" class="warning-list"></ul>
                 </div>
             </div>
-            <div class="card">
-                <div class="card-body table-responsive">
-                    <table class="table" id="rulesTable">
-                        <thead>
-                            <tr>
-                                <th>Status</th>
-                                <th>Chain</th>
-                                <th>Protocol</th>
-                                <th>Source</th>
-                                <th>Destination</th>
-                                <th>Dst Port</th>
-                                <th>Action</th>
-                                <th>Comment</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+
+            <div class="ops-layout-grid">
+                <div class="ops-main">
+                    <div class="card">
+                        <div class="card-header">
+                            <i class="fa-solid fa-list-check"></i>
+                            <h3>Security Policy Queue</h3>
+                        </div>
+                        <div class="card-body table-responsive">
+                            <table class="table" id="rulesTable">
+                                <thead>
+                                    <tr>
+                                        <th>Status</th>
+                                        <th>Chain</th>
+                                        <th>Protocol</th>
+                                        <th>Source</th>
+                                        <th>Destination</th>
+                                        <th>Dst Port</th>
+                                        <th>Action</th>
+                                        <th>Comment</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
+                <aside class="ops-rail">
+                    <div class="card">
+                        <div class="card-header"><i class="fa-solid fa-clock-rotate-left"></i><h3>Recent Policy Modifications</h3></div>
+                        <div class="card-body">
+                            <ul class="warning-list">
+                                <li class="warning-item">Modified rule priority for internal segmentation policy.</li>
+                                <li class="warning-item">Applied regional mitigation profile for East Asia edge nodes.</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header"><i class="fa-solid fa-wand-magic-sparkles"></i><h3>Policy Optimization AI</h3></div>
+                        <div class="card-body">
+                            <p class="settings-desc">Potential redundant rules detected. Run optimizer to reduce policy traversal depth.</p>
+                            <button class="btn btn-primary" style="width:100%">Run Optimizer</button>
+                        </div>
+                    </div>
+                </aside>
             </div>
         </section>
 
         <!-- ===== CONNECTIONS PAGE ===== -->
         <section class="page" id="page-connections">
-            <div class="page-toolbar">
-                <h2>Active Connections</h2>
-                <button class="btn btn-secondary" id="btnRefreshConn">
-                    <i class="fa-solid fa-arrows-rotate"></i> Refresh
-                </button>
+            <div class="page-toolbar ops-toolbar">
+                <h2>Network Traffic Analysis</h2>
+                <div class="toolbar-actions">
+                    <button class="btn btn-secondary">
+                        <i class="fa-solid fa-clock"></i> Last 15 Minutes
+                    </button>
+                    <button class="btn btn-secondary">
+                        <i class="fa-solid fa-filter"></i> All Protocols
+                    </button>
+                    <button class="btn btn-secondary" id="btnRefreshConn">
+                        <i class="fa-solid fa-file-arrow-down"></i> Export CSV
+                    </button>
+                </div>
             </div>
-            <div class="card">
-                <div class="card-body table-responsive">
-                    <table class="table" id="connectionsTable">
-                        <thead>
-                            <tr><th>Protocol</th><th>Local IP</th><th>Local Port</th><th>Remote IP</th><th>Host</th><th>Remote Port</th><th>State</th><th>Threat</th></tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+
+            <div class="ops-layout-grid">
+                <div class="ops-main">
+                    <div class="card" style="margin-bottom:20px">
+                        <div class="card-header"><i class="fa-solid fa-wave-square"></i><h3>Traffic Flow Distribution</h3></div>
+                        <div class="card-body">
+                            <div class="traffic-chart-shell">
+                                <canvas id="chartTrafficFlowDist"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header"><i class="fa-solid fa-network-wired"></i><h3>Recent Connection Logs</h3></div>
+                        <div class="card-body table-responsive">
+                            <table class="table" id="connectionsTable">
+                                <thead>
+                                    <tr><th>Protocol</th><th>Local IP</th><th>Local Port</th><th>Remote IP</th><th>Host</th><th>Remote Port</th><th>State</th><th>Threat</th></tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <aside class="ops-rail">
+                    <div class="card">
+                        <div class="card-header"><i class="fa-solid fa-chart-simple"></i><h3>Top Applications</h3></div>
+                        <div class="card-body">
+                            <div class="app-metric"><span>HTTPS / SSL</span><b>42.8%</b></div>
+                            <div class="app-metric"><span>Database (PostgreSQL)</span><b>18.4%</b></div>
+                            <div class="app-metric"><span>SSH / SFTP</span><b>12.1%</b></div>
+                            <div class="app-metric"><span>DNS Traffic</span><b>8.5%</b></div>
+                            <div class="app-metric"><span>Other (VoIP, ICMP)</span><b>18.2%</b></div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header"><i class="fa-solid fa-earth-americas"></i><h3>Global Traffic Heatmap</h3></div>
+                        <div class="card-body">
+                            <div class="ops-heatmap-placeholder">Regional density overlay available in Dashboard Geo panel.</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -629,67 +727,69 @@
 
         <!-- ===== THREAT INTEL PAGE ===== -->
         <section class="page" id="page-threats">
-            <div class="page-toolbar">
-                <h2>Threat Intelligence Dashboard</h2>
-                <button class="btn btn-secondary" id="btnRefreshThreats">
-                    <i class="fa-solid fa-arrows-rotate"></i> Refresh
-                </button>
-            </div>
-
-            <!-- Threat Stats Cards -->
-            <div class="stats-grid" style="margin-bottom:20px">
-                <div class="stat-card">
-                    <div class="stat-icon bg-green"><i class="fa-solid fa-shield-check"></i></div>
-                    <div class="stat-info">
-                        <span class="stat-value" id="threatSafe">0</span>
-                        <span class="stat-label">Safe IPs</span>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon bg-orange"><i class="fa-solid fa-triangle-exclamation"></i></div>
-                    <div class="stat-info">
-                        <span class="stat-value" id="threatSuspicious">0</span>
-                        <span class="stat-label">Suspicious</span>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon bg-red"><i class="fa-solid fa-skull-crossbones"></i></div>
-                    <div class="stat-info">
-                        <span class="stat-value" id="threatMalicious">0</span>
-                        <span class="stat-label">Malicious</span>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon bg-blue"><i class="fa-solid fa-database"></i></div>
-                    <div class="stat-info">
-                        <span class="stat-value" id="threatTotal">0</span>
-                        <span class="stat-label">Cached Total</span>
-                    </div>
+            <div class="page-toolbar ops-toolbar">
+                <h2>Firewall Threat Logs</h2>
+                <div class="toolbar-actions">
+                    <button class="btn btn-secondary" id="btnRefreshThreats">
+                        <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                    </button>
+                    <button class="btn btn-secondary">
+                        <i class="fa-solid fa-filter"></i> Filters
+                    </button>
                 </div>
             </div>
 
-            <div class="card">
-                <div class="card-header"><i class="fa-solid fa-shield-virus"></i><h3>VirusTotal IP Cache</h3></div>
-                <div class="card-body table-responsive">
-                    <table class="table" id="threatCacheTable">
-                        <thead>
-                            <tr>
-                                <th>IP Address</th>
-                                <th>Threat Level</th>
-                                <th>Malicious</th>
-                                <th>Suspicious</th>
-                                <th>Harmless</th>
-                                <th>Reputation</th>
-                                <th>Country</th>
-                                <th>Owner / ASN</th>
-                                <th>Connected</th>
-                                <th>Blocked</th>
-                                <th>Checked At</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+            <div class="ops-kpi-grid" style="margin-bottom:20px">
+                <div class="ops-kpi-card"><span class="ops-kpi-label">Safe IPs</span><span class="ops-kpi-value" id="threatSafe">0</span><span class="ops-kpi-sub">verified</span></div>
+                <div class="ops-kpi-card"><span class="ops-kpi-label">Suspicious</span><span class="ops-kpi-value" id="threatSuspicious">0</span><span class="ops-kpi-sub">needs review</span></div>
+                <div class="ops-kpi-card"><span class="ops-kpi-label">Malicious</span><span class="ops-kpi-value" id="threatMalicious">0</span><span class="ops-kpi-sub">critical sources</span></div>
+                <div class="ops-kpi-card"><span class="ops-kpi-label">Cached Total</span><span class="ops-kpi-value" id="threatTotal">0</span><span class="ops-kpi-sub">intel records</span></div>
+            </div>
+
+            <div class="ops-layout-grid">
+                <div class="ops-main">
+                    <div class="card">
+                        <div class="card-header"><i class="fa-solid fa-shield-virus"></i><h3>Live Surveillance Events</h3></div>
+                        <div class="card-body table-responsive">
+                            <table class="table" id="threatCacheTable">
+                                <thead>
+                                    <tr>
+                                        <th>IP Address</th>
+                                        <th>Threat Level</th>
+                                        <th>Malicious</th>
+                                        <th>Suspicious</th>
+                                        <th>Harmless</th>
+                                        <th>Reputation</th>
+                                        <th>Country</th>
+                                        <th>Owner / ASN</th>
+                                        <th>Connected</th>
+                                        <th>Blocked</th>
+                                        <th>Checked At</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <aside class="ops-rail">
+                    <div class="card">
+                        <div class="card-header"><i class="fa-solid fa-map"></i><h3>Origin Heatmap</h3></div>
+                        <div class="card-body">
+                            <div class="ops-world-placeholder">Global origin map view is active in the dashboard Geo panel.</div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header"><i class="fa-solid fa-crosshairs"></i><h3>Recurring Attackers</h3></div>
+                        <div class="card-body">
+                            <ul class="warning-list">
+                                <li class="warning-item">Credential stuffing patterns detected from rotating residential proxies.</li>
+                                <li class="warning-item">Protocol anomaly spikes observed in East Asia ingress zones.</li>
+                                <li class="warning-item">Repeated scanner signatures against exposed service endpoints.</li>
+                            </ul>
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -988,11 +1088,25 @@
                     </div>
                     <div class="form-group">
                         <label for="ruleAction">Action</label>
-                        <select id="ruleAction" required>
+                        <select id="ruleAction" required style="display:none">
                             <option value="ACCEPT">ACCEPT</option>
                             <option value="DROP">DROP</option>
                             <option value="REJECT">REJECT</option>
                         </select>
+                        <div class="rule-action-segments" id="ruleActionSegments" role="radiogroup" aria-label="Rule action">
+                            <button type="button" class="rule-action-segment" data-action="ACCEPT">
+                                <i class="fa-solid fa-circle-check"></i>
+                                <span>Allow</span>
+                            </button>
+                            <button type="button" class="rule-action-segment" data-action="REJECT">
+                                <i class="fa-solid fa-ban"></i>
+                                <span>Deny</span>
+                            </button>
+                            <button type="button" class="rule-action-segment" data-action="DROP">
+                                <i class="fa-solid fa-circle-xmark"></i>
+                                <span>Drop</span>
+                            </button>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label for="ruleEnabled">Enabled</label>

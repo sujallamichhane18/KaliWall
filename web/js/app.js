@@ -45,6 +45,7 @@
     var socFlowHistory = [];
     var dpiQuickProtocolChart = null;
     var visProtocolDistChart = null;
+    var trafficFlowDistChart = null;
     var dpiAlertRows = [];
     var dpiLastPacketsSample = { count: 0, ts: 0 };
     var aiProviderState = {
@@ -91,6 +92,14 @@
             bandwidthChart.options.scales.x.ticks.color = textColor;
             bandwidthChart.options.scales.y.ticks.color = textColor;
             bandwidthChart.update('none');
+        }
+
+        if (trafficFlowDistChart) {
+            trafficFlowDistChart.options.scales.x.grid.color = gridColor;
+            trafficFlowDistChart.options.scales.x.ticks.color = textColor;
+            trafficFlowDistChart.options.scales.y.grid.color = "rgba(0,0,0,0)";
+            trafficFlowDistChart.options.scales.y.ticks.color = textColor;
+            trafficFlowDistChart.update("none");
         }
 
         // Update gauges
@@ -186,6 +195,7 @@
                 startDashboardAutoRefresh();
                 break;
             case "rules":
+                loadStats();
                 loadRules();
                 break;
             case "connections":
@@ -361,6 +371,11 @@
         if (!res.success) return;
         const d = res.data;
 
+        function setTextIfExists(id, value) {
+            var el = document.getElementById(id);
+            if (el) el.textContent = value;
+        }
+
         updateSOCFlowChart(d.allowed_today || 0, d.blocked_today || 0);
 
         // Firewall stat cards
@@ -370,6 +385,9 @@
         document.getElementById("statAllowed").textContent = d.allowed_today;
         document.getElementById("statConnections").textContent = d.active_connections;
         document.querySelector("#ruleCount span").textContent = d.active_rules;
+        setTextIfExists("statTotalRulesRulesPage", d.total_rules);
+        setTextIfExists("statActiveRulesRulesPage", d.active_rules);
+        setTextIfExists("statDroppedRulesPage", d.blocked_today);
 
         // System info banner
         document.getElementById("sysHostname").textContent = d.hostname || "--";
@@ -1588,8 +1606,98 @@
                 '<td class="threat-cell" data-ip="' + escapeHtml(remoteIP) + '"><span class="badge badge-disabled">-</span></td>';
             tbody.appendChild(tr);
         });
+        renderTrafficFlowDistribution(res.data || []);
         // Auto-check threat for non-private remote IPs
         checkThreatForConnections();
+    }
+
+    function renderTrafficFlowDistribution(connections) {
+        var canvas = document.getElementById("chartTrafficFlowDist");
+        if (!canvas || !window.Chart) return;
+
+        var sourceBuckets = { "Internal LAN": 0, "DMZ Cluster": 0, "VPN Tunnel": 0, "Other": 0 };
+        var destinationBuckets = { "WAN Gateway": 0, "Cloud Services": 0, "Partner Networks": 0, "Other": 0 };
+
+        (connections || []).forEach(function (c) {
+            var localIP = String(c.local_ip || "");
+            var remoteIP = String(c.remote_ip || "");
+            var localPort = parseInt(c.local_port, 10) || 0;
+            var remotePort = parseInt(c.remote_port, 10) || 0;
+
+            var srcKey = "Internal LAN";
+            if (localIP.indexOf("10.") === 0) srcKey = "VPN Tunnel";
+            else if (localIP.indexOf("172.") === 0) srcKey = "DMZ Cluster";
+            else if (!(localIP.indexOf("192.168.") === 0)) srcKey = "Other";
+            sourceBuckets[srcKey] = (sourceBuckets[srcKey] || 0) + 1;
+
+            var dstKey = "WAN Gateway";
+            if (remoteIP.indexOf("10.") === 0 || remoteIP.indexOf("172.") === 0 || remoteIP.indexOf("192.168.") === 0) {
+                dstKey = "Partner Networks";
+            } else if (remotePort === 443 || remotePort === 80 || remotePort === 53 || localPort === 443 || localPort === 80) {
+                dstKey = "Cloud Services";
+            }
+            destinationBuckets[dstKey] = (destinationBuckets[dstKey] || 0) + 1;
+        });
+
+        var labels = ["Internal LAN", "DMZ Cluster", "VPN Tunnel", "WAN Gateway", "Cloud Services", "Partner Networks"];
+        var srcValues = [
+            sourceBuckets["Internal LAN"] || 0,
+            sourceBuckets["DMZ Cluster"] || 0,
+            sourceBuckets["VPN Tunnel"] || 0,
+            0,
+            0,
+            0,
+        ];
+        var dstValues = [
+            0,
+            0,
+            0,
+            destinationBuckets["WAN Gateway"] || 0,
+            destinationBuckets["Cloud Services"] || 0,
+            destinationBuckets["Partner Networks"] || 0,
+        ];
+
+        var theme = getChartThemeColors();
+        if (!trafficFlowDistChart) {
+            trafficFlowDistChart = new Chart(canvas, {
+                type: "bar",
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: "Source",
+                            data: srcValues,
+                            borderRadius: 8,
+                            backgroundColor: "rgba(25, 211, 243, 0.7)",
+                        },
+                        {
+                            label: "Destination",
+                            data: dstValues,
+                            borderRadius: 8,
+                            backgroundColor: "rgba(69, 217, 168, 0.62)",
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: "y",
+                    plugins: {
+                        legend: { labels: { color: theme.textColor } },
+                        tooltip: { mode: "index", intersect: false },
+                    },
+                    scales: {
+                        x: { beginAtZero: true, ticks: { color: theme.textColor }, grid: { color: theme.gridColor } },
+                        y: { ticks: { color: theme.textColor }, grid: { color: "rgba(0,0,0,0)" } },
+                    },
+                },
+            });
+            return;
+        }
+
+        trafficFlowDistChart.data.datasets[0].data = srcValues;
+        trafficFlowDistChart.data.datasets[1].data = dstValues;
+        trafficFlowDistChart.update("none");
     }
 
     // ---------- Logs (Real-time SSE) ----------
@@ -1992,8 +2100,11 @@
         document.getElementById("ruleSubmitBtn").innerHTML = '<i class="fa-solid fa-check"></i> Create Rule';
         document.getElementById("ruleSrcIP").value = "any";
         document.getElementById("ruleSrcPort").value = "any";
+        setRuleActionSelection("ACCEPT");
         ruleModal.classList.add("open");
     });
+
+    initRuleActionSegments();
 
     document.getElementById("modalClose").addEventListener("click", () => ruleModal.classList.remove("open"));
     document.getElementById("btnCancelRule").addEventListener("click", () => ruleModal.classList.remove("open"));
@@ -2097,6 +2208,7 @@
         document.getElementById("ruleSrcPort").value = rule.src_port || "any";
         document.getElementById("ruleDstPort").value = rule.dst_port || "any";
         document.getElementById("ruleAction").value = rule.action;
+        setRuleActionSelection(rule.action || "ACCEPT");
         document.getElementById("ruleEnabled").value = rule.enabled ? "true" : "false";
         document.getElementById("ruleComment").value = rule.comment || "";
         document.getElementById("ruleModalTitle").textContent = "Edit Firewall Rule";
@@ -2129,6 +2241,39 @@
         });
         card.style.display = "block";
         modalWrap.style.display = "block";
+    }
+
+    function initRuleActionSegments() {
+        var wrap = document.getElementById("ruleActionSegments");
+        var actionSelect = document.getElementById("ruleAction");
+        if (!wrap || !actionSelect) return;
+
+        wrap.querySelectorAll(".rule-action-segment").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var action = btn.getAttribute("data-action");
+                setRuleActionSelection(action);
+            });
+        });
+
+        actionSelect.addEventListener("change", function () {
+            setRuleActionSelection(actionSelect.value);
+        });
+
+        setRuleActionSelection(actionSelect.value || "ACCEPT");
+    }
+
+    function setRuleActionSelection(action) {
+        var normalized = String(action || "ACCEPT").toUpperCase();
+        var actionSelect = document.getElementById("ruleAction");
+        var wrap = document.getElementById("ruleActionSegments");
+        if (actionSelect) actionSelect.value = normalized;
+        if (!wrap) return;
+
+        wrap.querySelectorAll(".rule-action-segment").forEach(function (btn) {
+            var active = btn.getAttribute("data-action") === normalized;
+            btn.classList.toggle("active", active);
+            btn.setAttribute("aria-pressed", active ? "true" : "false");
+        });
     }
 
     // ---------- Blocked Traffic ----------
