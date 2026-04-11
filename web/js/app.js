@@ -2910,7 +2910,6 @@
         }
 
         loadFirewallEngineSettings();
-        loadAIApiKeySettings();
     }
 
     async function loadFirewallEngineSettings() {
@@ -3278,33 +3277,36 @@
         }
     });
 
-    document.getElementById("btnSaveAIApiKey").addEventListener("click", async function () {
-        var key = document.getElementById("aiApiKey").value.trim();
-        var providerSelect = document.getElementById("aiProviderSelect");
-        var provider = providerSelect ? String(providerSelect.value || "").toLowerCase() : aiProviderState.provider;
-        if (!provider) {
-            toast("Choose an AI provider", "error");
-            return;
-        }
-        if (!key) {
-            toast("Enter an API key for " + prettyAIProviderName(provider), "error");
-            return;
-        }
-        var res = await fetch(API + "/ai/apikey", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider: provider, api_key: key }),
+    var btnSaveAIApiKey = document.getElementById("btnSaveAIApiKey");
+    if (btnSaveAIApiKey) {
+        btnSaveAIApiKey.addEventListener("click", async function () {
+            var key = document.getElementById("aiApiKey").value.trim();
+            var providerSelect = document.getElementById("aiProviderSelect");
+            var provider = providerSelect ? String(providerSelect.value || "").toLowerCase() : aiProviderState.provider;
+            if (!provider) {
+                toast("Choose an AI provider", "error");
+                return;
+            }
+            if (!key) {
+                toast("Enter an API key for " + prettyAIProviderName(provider), "error");
+                return;
+            }
+            var res = await fetch(API + "/ai/apikey", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ provider: provider, api_key: key }),
+            });
+            var data = await res.json();
+            if (data.success) {
+                toast(prettyAIProviderName(provider) + " API key saved", "success");
+                document.getElementById("aiApiKey").value = "";
+                loadAIApiKeySettings();
+                loadAIApiLiveStatus();
+            } else {
+                toast(data.message || "Failed to save AI API key", "error");
+            }
         });
-        var data = await res.json();
-        if (data.success) {
-            toast(prettyAIProviderName(provider) + " API key saved", "success");
-            document.getElementById("aiApiKey").value = "";
-            loadAIApiKeySettings();
-            loadAIApiLiveStatus();
-        } else {
-            toast(data.message || "Failed to save AI API key", "error");
-        }
-    });
+    }
 
     var btnRemoveAIApiKey = document.getElementById("btnRemoveAIApiKey");
     if (btnRemoveAIApiKey) {
