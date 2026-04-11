@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +40,7 @@ const (
 	proxyBlockLogFile = "logs/blocked_requests.jsonl"
 	dbFile     = "data/kaliwall.json"
 	defaultMaliciousDomainsFile = "malicious_domains.txt"
+	defaultMaliciousIPsFile = "ipsum.txt"
 	defaultGeoDBFile = "GeoLite2-City.mmdb"
 	defaultGeoCSVFile = "IP2LOCATION-LITE-DB1.CSV"
 )
@@ -63,6 +65,8 @@ func main() {
 	httpProxyEnable := flag.Bool("http-proxy", true, "Enable HTTP forward proxy with malicious domain blocking")
 	httpProxyAddr := flag.String("http-proxy-addr", proxyListenAddr, "Address for HTTP proxy listener (e.g. :8081)")
 	maliciousDomainsPath := flag.String("malicious-domains", defaultMaliciousDomainsFile, "Path to malicious domains list file")
+	maliciousIPsPath := flag.String("malicious-ips", defaultMaliciousIPsFile, "Path to malicious IP indicator feed file (IPsum-compatible)")
+	maliciousIPsReloadInterval := flag.Duration("malicious-ips-reload-interval", 20*time.Second, "Malicious IP feed auto-reload interval")
 	proxyBlockedLogPath := flag.String("http-proxy-blocklog", proxyBlockLogFile, "JSONL path for blocked HTTP requests")
 	proxyReloadInterval := flag.Duration("http-proxy-reload-interval", 10*time.Second, "Malicious domain list auto-reload interval")
 	proxyEscalationEnable := flag.Bool("http-proxy-escalation", true, "Enable automatic source-IP blocking when VT malicious score exceeds threshold")
@@ -105,6 +109,56 @@ func main() {
 
 	// Initialize firewall engine with database
 	fw := firewall.New(trafficLogger, db)
+
+	var maliciousIPFeed *threatintel.MaliciousIPFeed
+	var maliciousFeedCancel context.CancelFunc
+	var maliciousFeedSubID uint64
+	if path := strings.TrimSpace(*maliciousIPsPath); path != "" {
+		feed, err := threatintel.NewMaliciousIPFeed(path)
+		if err != nil {
+			log.Printf("Malicious IP feed disabled (%s): %v", path, err)
+		} else {
+			maliciousIPFeed = feed
+			trafficLogger.SetMaliciousIPChecker(maliciousIPFeed.IsMaliciousIP)
+			trafficLogger.Log("CONFIG", "-", "-", "THREAT", fmt.Sprintf("malicious IP feed loaded: %d indicators from %s", maliciousIPFeed.Count(), path))
+			fmt.Printf("[+] Malicious IP feed loaded: %s (%d indicators)\n", path, maliciousIPFeed.Count())
+
+			var feedCtx context.Context
+			feedCtx, maliciousFeedCancel = context.WithCancel(context.Background())
+			startMaliciousIPFeedAutoReload(feedCtx, maliciousIPFeed, *maliciousIPsReloadInterval, trafficLogger)
+
+			subID, sub := trafficLogger.Subscribe()
+			maliciousFeedSubID = subID
+			go func() {
+				for {
+					select {
+					case <-feedCtx.Done():
+						return
+					case entry, ok := <-sub:
+						if !ok {
+							return
+						}
+						if !strings.EqualFold(entry.Action, "BLOCK") {
+							continue
+						}
+						if !strings.Contains(strings.ToLower(entry.Detail), "malicious ip feed match") {
+							continue
+						}
+						srcIP := strings.TrimSpace(entry.SrcIP)
+						if net.ParseIP(srcIP) == nil {
+							continue
+						}
+						if fw.IsIPBlocked(srcIP) {
+							continue
+						}
+						if _, err := fw.BlockIP(srcIP, "Auto-blocked by malicious IP feed match"); err != nil {
+							trafficLogger.Log("ERROR", srcIP, "-", "THREAT", fmt.Sprintf("malicious feed auto-block failed: %v", err))
+						}
+					}
+				}
+			}()
+		}
+	}
 
 	// Initialize threat intelligence service (VirusTotal)
 	ti := threatintel.New()
@@ -254,6 +308,9 @@ func main() {
 			fmt.Printf("[+] Proxy block log: %s\n", *proxyBlockedLogPath)
 			fmt.Printf("[+] VT escalation:   enabled=%t threshold=%d private_ip=%t\n", *proxyEscalationEnable, *proxyEscalationThreshold, *proxyEscalationPrivate)
 		}
+		if maliciousIPFeed != nil {
+			fmt.Printf("[+] Malicious IPs:   %s (%d indicators)\n", *maliciousIPsPath, maliciousIPFeed.Count())
+		}
 		fmt.Println("[+] Press Ctrl+C to stop the daemon.\n")
 
 		if err := http.ListenAndServe(listenAddr, handler); err != nil {
@@ -271,6 +328,12 @@ func main() {
 
 	<-stop
 	fmt.Println("\n[*] Shutting down KaliWall daemon...")
+	if maliciousFeedSubID != 0 {
+		trafficLogger.Unsubscribe(maliciousFeedSubID)
+	}
+	if maliciousFeedCancel != nil {
+		maliciousFeedCancel()
+	}
 	if proxyCancel != nil {
 		proxyCancel()
 	}
@@ -343,6 +406,41 @@ func ensureMaliciousDomainsFile(path string) error {
 		"phishing.example",
 	}, "\n") + "\n"
 	return os.WriteFile(path, []byte(content), 0640)
+}
+
+func startMaliciousIPFeedAutoReload(ctx context.Context, feed *threatintel.MaliciousIPFeed, interval time.Duration, tl *logger.TrafficLogger) {
+	if feed == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 20 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		lastErr := ""
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				changed, count, err := feed.ReloadIfChanged()
+				if err != nil {
+					errMsg := err.Error()
+					if tl != nil && errMsg != lastErr {
+						tl.Log("ERROR", "-", "-", "THREAT", fmt.Sprintf("malicious IP feed reload failed: %v", err))
+					}
+					lastErr = errMsg
+					continue
+				}
+				lastErr = ""
+				if changed && tl != nil {
+					tl.Log("CONFIG", "-", "-", "THREAT", fmt.Sprintf("malicious IP feed reloaded: %d indicators", count))
+				}
+			}
+		}
+	}()
 }
 
 func defaultCaptureInterface() string {

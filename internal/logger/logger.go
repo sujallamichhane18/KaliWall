@@ -24,6 +24,7 @@ type TrafficLogger struct {
 	eventSubscribers map[uint64]chan models.FirewallEvent
 	nextEventSubID uint64
 	backendProvider func() string
+	maliciousIPChecker func(string) bool
 }
 
 // New opens (or creates) the log file and returns a TrafficLogger.
@@ -54,6 +55,14 @@ func (tl *TrafficLogger) Close() {
 func (tl *TrafficLogger) Log(action, srcIP, dstIP, protocol, detail string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
+
+	action = strings.ToUpper(strings.TrimSpace(action))
+	if matchedIP := tl.lookupMaliciousIP(action, srcIP, dstIP); matchedIP != "" {
+		action = "BLOCK"
+		if !strings.Contains(strings.ToLower(detail), "malicious ip feed") {
+			detail = fmt.Sprintf("Malicious IP feed match (%s): %s", matchedIP, detail)
+		}
+	}
 
 	entry := models.TrafficEntry{
 		Timestamp: time.Now(),
@@ -107,6 +116,38 @@ func (tl *TrafficLogger) SetBackendProvider(provider func() string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	tl.backendProvider = provider
+}
+
+// SetMaliciousIPChecker wires a callback used to detect malicious IP indicators.
+func (tl *TrafficLogger) SetMaliciousIPChecker(checker func(string) bool) {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	tl.maliciousIPChecker = checker
+}
+
+func (tl *TrafficLogger) lookupMaliciousIP(action, srcIP, dstIP string) string {
+	if tl.maliciousIPChecker == nil {
+		return ""
+	}
+	if !isTrafficAction(action) {
+		return ""
+	}
+	if tl.maliciousIPChecker(strings.TrimSpace(srcIP)) {
+		return strings.TrimSpace(srcIP)
+	}
+	if tl.maliciousIPChecker(strings.TrimSpace(dstIP)) {
+		return strings.TrimSpace(dstIP)
+	}
+	return ""
+}
+
+func isTrafficAction(action string) bool {
+	switch strings.ToUpper(strings.TrimSpace(action)) {
+	case "ALLOW", "ACCEPT", "LOG":
+		return true
+	default:
+		return false
+	}
 }
 
 func (tl *TrafficLogger) emitFirewallEventLocked(ev models.FirewallEvent) {

@@ -12,6 +12,7 @@
     var firewallEventSource = null;
     var geoAttackEventSource = null;
     var geoMap = null;
+    var geoMapCanvasId = "";
     var geoLayer = null;
     var geoMarkers = [];
     var geoCountryAgg = {};
@@ -672,13 +673,26 @@
     }
 
     function initGeoMap() {
-        if (geoMap) {
-            if (window.L) { setTimeout(function() { geoMap.invalidateSize(); }, 200); }
-            return;
-        }
         if (!window.L) return;
-        var canvas = document.getElementById("socGeoMap") || document.getElementById("geoWidgetMap");
+
+        var canvas = resolveGeoMapCanvas();
         if (!canvas) return;
+
+        if (geoMap) {
+            // Rebuild when the active dashboard layout points to a different map canvas.
+            if (geoMapCanvasId !== canvas.id) {
+                clearGeoMarkers();
+                geoMap.remove();
+                geoMap = null;
+                geoLayer = null;
+                geoMapCanvasId = "";
+            } else {
+                setTimeout(function () { geoMap.invalidateSize(); }, 200);
+                return;
+            }
+        }
+
+        geoMapCanvasId = canvas.id;
         geoMap = L.map(canvas.id, { zoomControl: true, worldCopyJump: true, preferCanvas: true }).setView([18, 8], 2);
         L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
             subdomains: "abcd",
@@ -688,6 +702,36 @@
         geoLayer = L.layerGroup().addTo(geoMap);
         renderGeoDefenderAnchor(false);
         setTimeout(function() { geoMap.invalidateSize(); }, 400);
+    }
+
+    function resolveGeoMapCanvas() {
+        var canvases = [
+            document.getElementById("geoWidgetMap"),
+            document.getElementById("socGeoMap"),
+        ].filter(Boolean);
+
+        if (canvases.length === 0) return null;
+
+        var visible = canvases.find(function (el) { return isGeoCanvasVisible(el); });
+        return visible || canvases[0];
+    }
+
+    function isGeoCanvasVisible(el) {
+        if (!el) return false;
+        var style = window.getComputedStyle(el);
+        if (!style || style.display === "none" || style.visibility === "hidden") return false;
+
+        var parent = el.parentElement;
+        while (parent) {
+            var pStyle = window.getComputedStyle(parent);
+            if (pStyle && (pStyle.display === "none" || pStyle.visibility === "hidden")) {
+                return false;
+            }
+            parent = parent.parentElement;
+        }
+
+        var rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
     }
 
     function clearGeoMarkers() {
