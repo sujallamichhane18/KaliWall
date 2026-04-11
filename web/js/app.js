@@ -16,6 +16,10 @@
     var geoMarkers = [];
     var geoCountryAgg = {};
     var geoMyLocation = null;
+    var geoDefenderMarker = null;
+    var geoDefenderRing = null;
+    var geoHotspots = {};
+    var geoPulseTimers = [];
     var maxEventRows = 120;
     var maxGeoMarkers = 450;
     var peerHostMap = {};
@@ -604,16 +608,17 @@
     async function loadSOCGeoAttacks() {
         initGeoMap();
         geoCountryAgg = {};
+        clearGeoMarkers();
         await loadGeoMyLocation();
         const res = await apiFetch("/geo/attacks?limit=300");
-        clearGeoMarkers();
         if (!res.success) {
             renderSOCGeoTable();
             return;
         }
         (res.data || []).forEach(function (point) {
-            ingestGeoPoint(point, false);
+            ingestGeoPoint(point, true);
         });
+        focusGeoMapOnThreats();
         renderSOCGeoTable();
     }
 
@@ -660,11 +665,7 @@
             badge.textContent = "My Location: " + (geoMyLocation.country || "Unknown") + " (" + (geoMyLocation.ip || "-") + ")";
             badge.title = (geoMyLocation.city || "") ? (geoMyLocation.city + ", " + (geoMyLocation.country || "")) : (geoMyLocation.country || "");
         }
-
-        if (geoMap && geoMyLocation.latitude && geoMyLocation.longitude) {
-            // Center around defender location so inbound lines are meaningful.
-            geoMap.setView([Number(geoMyLocation.latitude), Number(geoMyLocation.longitude)], 3);
-        }
+        renderGeoDefenderAnchor(true);
     }
 
     function initGeoMap() {
@@ -673,18 +674,28 @@
             return;
         }
         if (!window.L) return;
-        var canvas = document.getElementById("geoWidgetMap") || document.getElementById("socGeoMap");
+        var canvas = document.getElementById("socGeoMap") || document.getElementById("geoWidgetMap");
         if (!canvas) return;
-        geoMap = L.map(canvas.id, { zoomControl: true, worldCopyJump: true }).setView([20, 0], 2);
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        geoMap = L.map(canvas.id, { zoomControl: true, worldCopyJump: true, preferCanvas: true }).setView([18, 8], 2);
+        L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+            subdomains: "abcd",
             maxZoom: 18,
-            attribution: "&copy; OpenStreetMap contributors",
+            attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
         }).addTo(geoMap);
         geoLayer = L.layerGroup().addTo(geoMap);
+        renderGeoDefenderAnchor(false);
         setTimeout(function() { geoMap.invalidateSize(); }, 400);
     }
 
     function clearGeoMarkers() {
+        geoPulseTimers.forEach(function (item) {
+            clearInterval(item.timerId);
+            if (geoLayer && item.pulse && geoLayer.hasLayer(item.pulse)) {
+                geoLayer.removeLayer(item.pulse);
+            }
+        });
+        geoPulseTimers = [];
+
         if (geoLayer) {
             geoMarkers.forEach(function(obj) {
                 if (obj.marker) geoLayer.removeLayer(obj.marker);
@@ -692,7 +703,11 @@
             });
             geoLayer.clearLayers();
         }
+        geoHotspots = {};
         geoMarkers = [];
+        geoDefenderMarker = null;
+        geoDefenderRing = null;
+        renderGeoDefenderAnchor(false);
     }
 
     function ingestGeoPoint(point, keepView) {
@@ -710,39 +725,42 @@
         geoCountryAgg[country].threat[sev] = (geoCountryAgg[country].threat[sev] || 0) + 1;
 
         if (!geoLayer || !window.L) return;
+        updateGeoHotspot(lat, lon, sev, src);
+
         var marker = L.circleMarker([lat, lon], {
             radius: sev === "critical" ? 8 : sev === "high" ? 7 : 6,
             color: geoSeverityColor(sev),
             fillColor: geoSeverityColor(sev),
-            fillOpacity: 0.55,
-            weight: 1,
+            fillOpacity: 0.72,
+            weight: 1.4,
         });
-        var target = point.target || {};
-        var tLat = Number(target.latitude);
-        var tLon = Number(target.longitude);
-        if (!tLat || !tLon || (tLat === 0 && tLon === 0)) {
-            if (geoMyLocation && geoMyLocation.latitude && geoMyLocation.longitude) {
-                tLat = Number(geoMyLocation.latitude);
-                tLon = Number(geoMyLocation.longitude);
-            } else {
-                tLat = 38.9072; // Fallback only when my location is unavailable
-                tLon = -77.0369;
-            }
+        marker.bindTooltip("Inbound: " + escapeHtml(((src.city ? src.city + ", " : "") + country)), {
+            direction: "top",
+            offset: [0, -8],
+        });
+
+        var target = resolveGeoTarget(point.target || {});
+        var line = null;
+        var arcPath = null;
+        if (target) {
+            arcPath = buildThreatArc(lat, lon, target.lat, target.lon);
+            line = L.polyline(arcPath, {
+                color: geoSeverityColor(sev),
+                weight: sev === "critical" ? 2.4 : sev === "high" ? 2.1 : 1.8,
+                opacity: 0.9,
+                dashArray: "8 10",
+                className: "threat-line threat-line-" + sev,
+                lineCap: "round",
+            }).addTo(geoLayer);
+            animateThreatPulse(arcPath, sev);
         }
 
-        var line = L.polyline([[lat, lon], [tLat, tLon]], {
-            color: geoSeverityColor(sev),
-            weight: 2,
-            opacity: 0.8,
-            className: 'threat-line'
-        }).addTo(geoLayer);
-
         marker.bindPopup(
-            "<strong>" + escapeHtml(country) + "</strong><br>" +
-            "IP: " + escapeHtml(src.ip || "-") + "<br>" +
-            "Action: " + escapeHtml((point.action || "-").toUpperCase()) + "<br>" +
-            "Severity: " + escapeHtml(sev) + "<br>" +
-            "Target: " + escapeHtml((target.country || "My Host") + (target.ip ? (" (" + target.ip + ")") : ""))
+            "<strong>Source:</strong> " + escapeHtml(((src.city ? src.city + ", " : "") + country)) + "<br>" +
+            "<strong>IP:</strong> " + escapeHtml(src.ip || "-") + "<br>" +
+            "<strong>Action:</strong> " + escapeHtml((point.action || "-").toUpperCase()) + "<br>" +
+            "<strong>Severity:</strong> " + escapeHtml(sev.toUpperCase()) + "<br>" +
+            "<strong>Flow:</strong> " + (target ? (escapeHtml(country) + " -> " + escapeHtml(target.label)) : "source only")
         );
         marker.addTo(geoLayer);
         geoMarkers.push({ marker: marker, line: line, time: Date.now() });
@@ -754,15 +772,15 @@
             if (old.line) geoLayer.removeLayer(old.line);
         }
 
-        // Auto-remove line after 3 seconds for active radar effect
+        // Auto-remove trajectories after a short lifetime to keep the map readable.
         setTimeout(function() {
-            if (geoLayer.hasLayer(line)) {
+            if (line && geoLayer && geoLayer.hasLayer(line)) {
                 geoLayer.removeLayer(line);
             }
-        }, 3000);
+        }, 6500);
 
-        if (!keepView && geoMarkers.length === 1) {
-            geoMap.setView([lat, lon], 3);
+        if (!keepView) {
+            focusGeoMapOnThreats();
         }
     }
 
@@ -793,6 +811,199 @@
         if (sev === "high") return "#f97316";
         if (sev === "medium") return "#f59e0b";
         return "#22c55e";
+    }
+
+    function resolveGeoTarget(target) {
+        var lat = Number(target.latitude);
+        var lon = Number(target.longitude);
+        if (isFinite(lat) && isFinite(lon) && !(lat === 0 && lon === 0)) {
+            return {
+                lat: lat,
+                lon: lon,
+                label: (target.city ? target.city + ", " : "") + (target.country || "Protected Host"),
+                ip: target.ip || "-",
+            };
+        }
+
+        if (geoMyLocation && isFinite(Number(geoMyLocation.latitude)) && isFinite(Number(geoMyLocation.longitude))) {
+            return {
+                lat: Number(geoMyLocation.latitude),
+                lon: Number(geoMyLocation.longitude),
+                label: (geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Defender"),
+                ip: geoMyLocation.ip || "-",
+            };
+        }
+
+        return null;
+    }
+
+    function renderGeoDefenderAnchor(recenter) {
+        if (!geoLayer || !window.L || !geoMyLocation) return;
+
+        var lat = Number(geoMyLocation.latitude);
+        var lon = Number(geoMyLocation.longitude);
+        if (!isFinite(lat) || !isFinite(lon) || (lat === 0 && lon === 0)) return;
+
+        if (geoDefenderRing && geoLayer.hasLayer(geoDefenderRing)) {
+            geoLayer.removeLayer(geoDefenderRing);
+        }
+        if (geoDefenderMarker && geoLayer.hasLayer(geoDefenderMarker)) {
+            geoLayer.removeLayer(geoDefenderMarker);
+        }
+
+        geoDefenderRing = L.circle([lat, lon], {
+            radius: 210000,
+            color: "#22d3ee",
+            weight: 1.3,
+            opacity: 0.8,
+            fillColor: "#22d3ee",
+            fillOpacity: 0.08,
+            className: "defender-ring",
+        }).addTo(geoLayer);
+
+        geoDefenderMarker = L.circleMarker([lat, lon], {
+            radius: 8,
+            color: "#67e8f9",
+            weight: 2,
+            fillColor: "#06b6d4",
+            fillOpacity: 0.95,
+            className: "defender-node",
+        }).addTo(geoLayer);
+
+        geoDefenderMarker.bindTooltip("Defender Node: " + ((geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Unknown")), {
+            direction: "top",
+            offset: [0, -10],
+        });
+
+        if (recenter && geoMap) {
+            geoMap.setView([lat, lon], 3);
+        }
+    }
+
+    function buildThreatArc(srcLat, srcLon, dstLat, dstLon) {
+        var dx = dstLon - srcLon;
+        var dy = dstLat - srcLat;
+        var distance = Math.sqrt(dx * dx + dy * dy);
+        if (!isFinite(distance) || distance < 0.15) {
+            return [[srcLat, srcLon], [dstLat, dstLon]];
+        }
+
+        var curve = Math.min(26, Math.max(3.8, distance * 0.24));
+        var midLat = (srcLat + dstLat) / 2;
+        var midLon = (srcLon + dstLon) / 2;
+        var ctrlLat = midLat + (-(dx / distance)) * curve;
+        var ctrlLon = midLon + (dy / distance) * curve;
+
+        var points = [];
+        var segments = 28;
+        for (var i = 0; i <= segments; i++) {
+            var t = i / segments;
+            var inv = 1 - t;
+            var lat = inv * inv * srcLat + 2 * inv * t * ctrlLat + t * t * dstLat;
+            var lon = inv * inv * srcLon + 2 * inv * t * ctrlLon + t * t * dstLon;
+            points.push([lat, lon]);
+        }
+        return points;
+    }
+
+    function animateThreatPulse(path, sev) {
+        if (!geoLayer || !window.L || !Array.isArray(path) || path.length < 2) return;
+
+        var pulse = L.circleMarker(path[0], {
+            radius: sev === "critical" ? 4.2 : 3.8,
+            color: "#ffffff",
+            weight: 1,
+            fillColor: geoSeverityColor(sev),
+            fillOpacity: 0.95,
+            className: "threat-pulse",
+        }).addTo(geoLayer);
+
+        var idx = 0;
+        var timerId = setInterval(function () {
+            idx++;
+            if (idx >= path.length) {
+                clearInterval(timerId);
+                geoPulseTimers = geoPulseTimers.filter(function (item) { return item.timerId !== timerId; });
+                if (geoLayer && geoLayer.hasLayer(pulse)) {
+                    geoLayer.removeLayer(pulse);
+                }
+                return;
+            }
+            pulse.setLatLng(path[idx]);
+        }, 30);
+
+        geoPulseTimers.push({ timerId: timerId, pulse: pulse });
+    }
+
+    function updateGeoHotspot(lat, lon, sev, src) {
+        if (!geoLayer || !window.L) return;
+        var key = lat.toFixed(1) + "," + lon.toFixed(1);
+        var item = geoHotspots[key];
+        if (!item) {
+            item = {
+                count: 0,
+                sev: sev,
+                city: src.city || "",
+                country: src.country || "Unknown",
+                layer: L.circle([lat, lon], {
+                    radius: 76000,
+                    color: geoSeverityColor(sev),
+                    fillColor: geoSeverityColor(sev),
+                    weight: 1.1,
+                    opacity: 0.24,
+                    fillOpacity: 0.13,
+                    className: "threat-hotspot",
+                }).addTo(geoLayer),
+            };
+            geoHotspots[key] = item;
+        }
+
+        item.count++;
+        if (severityRank(sev) > severityRank(item.sev)) {
+            item.sev = sev;
+        }
+
+        var radius = Math.min(440000, 76000 + item.count * 14000);
+        var fillOpacity = Math.min(0.52, 0.12 + item.count * 0.018);
+        item.layer.setRadius(radius);
+        item.layer.setStyle({
+            color: geoSeverityColor(item.sev),
+            fillColor: geoSeverityColor(item.sev),
+            fillOpacity: fillOpacity,
+            opacity: Math.min(0.9, 0.2 + item.count * 0.03),
+        });
+        item.layer.bindTooltip(
+            "Hotspot: " + escapeHtml((item.city ? item.city + ", " : "") + item.country) +
+            "<br>Events: " + item.count +
+            "<br>Peak Severity: " + escapeHtml(item.sev.toUpperCase())
+        );
+    }
+
+    function severityRank(sev) {
+        if (sev === "critical") return 4;
+        if (sev === "high") return 3;
+        if (sev === "medium") return 2;
+        return 1;
+    }
+
+    function focusGeoMapOnThreats() {
+        if (!geoMap || !window.L) return;
+
+        var points = [];
+        if (geoDefenderMarker) {
+            points.push(geoDefenderMarker.getLatLng());
+        }
+        geoMarkers.forEach(function (item) {
+            if (item.marker) {
+                points.push(item.marker.getLatLng());
+            }
+        });
+
+        if (points.length < 2) return;
+        var bounds = L.latLngBounds(points);
+        if (bounds.isValid()) {
+            geoMap.fitBounds(bounds, { padding: [24, 24], maxZoom: 4 });
+        }
     }
 
     function renderSOCRecommendations(items) {

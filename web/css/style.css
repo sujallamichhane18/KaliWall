@@ -3065,3 +3065,82 @@ body::after {
         grid-template-columns: 1fr;
     }
 }
+
+/* ---------- Geo Threat Map Enhancements ---------- */
+.geo-map-canvas {
+    background: radial-gradient(circle at 20% 16%, #0c1731 0%, #091126 45%, #060c1a 100%);
+}
+
+.geo-map-canvas .leaflet-pane,
+.geo-map-canvas .leaflet-tile-pane {
+    filter: saturate(1.15) contrast(1.05);
+}
+
+.geo-map-canvas .leaflet-popup-content-wrapper {
+    background: rgba(6, 12, 24, 0.95);
+    color: #dbe7ff;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    box-shadow: 0 14px 28px rgba(2, 6, 23, 0.55);
+}
+
+.geo-map-canvas .leaflet-popup-tip {
+    background: rgba(6, 12, 24, 0.95);
+}
+
+.threat-line {
+    opacity: 0.88;
+    stroke-width: 1.9;
+    stroke-dasharray: 8 10;
+    animation: threatLineFlow 1.8s linear infinite !important;
+}
+
+.threat-line-critical {
+    stroke-width: 2.3;
+    opacity: 0.95;
+}
+
+.threat-line-high {
+    stroke-width: 2.1;
+    opacity: 0.92;
+}
+
+.defender-ring {
+    animation: defenderPulse 2.6s ease-out infinite;
+}
+
+.defender-node,
+.threat-pulse,
+.threat-hotspot {
+    filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.42));
+}
+
+@keyframes threatLineFlow {
+    from {
+        stroke-dashoffset: 42;
+    }
+    to {
+        stroke-dashoffset: 0;
+    }
+}
+
+@keyframes defenderPulse {
+    0% {
+        opacity: 0.78;
+        stroke-width: 1.2;
+    }
+    60% {
+        opacity: 0.3;
+        stroke-width: 1.8;
+    }
+    100% {
+        opacity: 0.08;
+        stroke-width: 2.1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .threat-line,
+    .defender-ring {
+        animation: none !important;
+    }
+}
