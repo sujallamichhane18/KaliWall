@@ -102,6 +102,7 @@
                 <div class="soc-kpi-grid">
                     <div class="soc-kpi-card"><span class="label">Firewall</span><span class="value" id="socFwState">ACTIVE</span></div>
                     <div class="soc-kpi-card"><span class="label">DPI</span><span class="value" id="socDpiState">OFF</span></div>
+                    <div class="soc-kpi-card"><span class="label">Traffic Anomaly Risk</span><span class="value" id="socAnomalyRisk">NORMAL (0)</span></div>
                     <div class="soc-kpi-card"><span class="label">Decode Errors</span><span class="value" id="socDecodeErrors">0</span></div>
                     <div class="soc-kpi-card"><span class="label">TI Feed</span><span class="value" id="socTiFreshness">-</span></div>
                     <div class="soc-kpi-card"><span class="label">Events/sec</span><span class="value" id="socEventsRate">0</span></div>
@@ -766,17 +767,30 @@
 
         <!-- ===== WEBSITE BLOCKS PAGE ===== -->
         <section class="page" id="page-websites">
-            <div class="page-toolbar">
+            <div class="page-toolbar ops-toolbar">
                 <h2>Website Blocking</h2>
-                <button class="btn btn-danger" id="btnBlockWebsite">
-                    <i class="fa-solid fa-globe"></i> Block Website
-                </button>
+                <div class="toolbar-actions">
+                    <span class="badge badge-disabled" id="websitesTotalBadge">0 blocked</span>
+                    <span class="badge badge-disabled" id="websitesHitsBadge">0 hits</span>
+                    <input type="search" id="websiteSearchInput" class="input-inline-sm input-inline-wide" placeholder="Search domain or reason">
+                    <select id="websiteSortSelect" class="input-inline-sm">
+                        <option value="recent">Sort: newest</option>
+                        <option value="hits">Sort: most hits</option>
+                        <option value="domain">Sort: domain</option>
+                    </select>
+                    <button class="btn btn-secondary" id="btnRefreshWebsites">
+                        <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                    </button>
+                    <button class="btn btn-danger" id="btnBlockWebsite">
+                        <i class="fa-solid fa-globe"></i> Block Website
+                    </button>
+                </div>
             </div>
             <div class="card">
                 <div class="card-body table-responsive">
                     <table class="table" id="websitesTable">
                         <thead>
-                            <tr><th>Domain</th><th>Reason</th><th>Blocked At</th><th>Actions</th></tr>
+                            <tr><th>Domain</th><th>Status</th><th>Block Hits</th><th>Reason</th><th>Blocked At</th><th>Actions</th></tr>
                         </thead>
                         <tbody></tbody>
                     </table>
@@ -786,12 +800,23 @@
 
         <!-- ===== LOGS PAGE ===== -->
         <section class="page" id="page-logs">
-            <div class="page-toolbar">
+            <div class="page-toolbar ops-toolbar">
                 <h2>Traffic Logs</h2>
                 <div class="toolbar-actions">
                     <span class="live-indicator" id="liveIndicator">
                         <i class="fa-solid fa-circle live-dot"></i> LIVE
                     </span>
+                    <span class="badge badge-disabled" id="logsTotalCount">0 logs</span>
+                    <span class="badge badge-drop" id="logsBlockedCount">0 blocked</span>
+                    <span class="badge badge-enabled" id="logsDpiCount">0 dpi</span>
+                    <span class="badge badge-reject" id="logsAnomalyCount">0 anomalies</span>
+                    <input type="search" id="logsSearchInput" class="input-inline-sm input-inline-wide" placeholder="Search IP, protocol, or detail">
+                    <select id="logsActionFilter" class="input-inline-sm">
+                        <option value="all">All actions</option>
+                        <option value="blocked">Blocked/Dropped</option>
+                        <option value="allowed">Allowed</option>
+                        <option value="dpi">DPI only</option>
+                    </select>
                     <div class="logs-toolbar-group">
                         <label for="logsDensitySelect">Size</label>
                         <select id="logsDensitySelect">
@@ -842,6 +867,30 @@
                             <tr><th class="col-timestamp">Timestamp</th><th class="col-action">Action</th><th class="col-src">Source IP</th><th class="col-dst">Dest IP</th><th class="col-protocol">Protocol</th><th class="col-detail">Detail</th></tr>
                         </thead>
                         <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <h3>Traffic Anomaly Analysis</h3>
+                    <span class="badge badge-disabled" id="anomalyRiskBadge">Risk: normal (0)</span>
+                </div>
+                <div class="card-body table-responsive">
+                    <div class="toolbar-actions" style="margin-bottom:10px">
+                        <span class="badge badge-disabled" id="anomalyGeneratedAt">Updated: -</span>
+                        <button class="btn btn-secondary" id="btnRefreshAnomalies">
+                            <i class="fa-solid fa-chart-line"></i> Analyze Now
+                        </button>
+                    </div>
+                    <table class="table" id="trafficAnomalyTable">
+                        <thead>
+                            <tr><th>Severity</th><th>Type</th><th>Summary</th><th>Score</th><th>Current</th><th>Baseline</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td colspan="6" style="text-align:center;color:#9ca3af;padding:20px">No anomaly analysis generated yet</td></tr>
+                        </tbody>
                     </table>
                 </div>
             </div>

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -169,6 +171,7 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/firewall/engine", h.handleFirewallEngine)
 	mux.HandleFunc("/api/v1/firewall/logs", h.handleFirewallLogs)
 	mux.HandleFunc("/api/v1/traffic/visibility", h.handleTrafficVisibility)
+	mux.HandleFunc("/api/v1/traffic/anomalies", h.handleTrafficAnomalies)
 	mux.HandleFunc("/api/v1/dns/stats", h.handleDNSStats)
 	mux.HandleFunc("/api/v1/dns/cache", h.handleDNSCache)
 	mux.HandleFunc("/api/v1/dns/refresh", h.handleDNSRefresh)
@@ -338,6 +341,383 @@ func (h *handlers) handleTrafficVisibility(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: h.fw.TrafficVisibility(limit)})
+}
+
+func (h *handlers) handleTrafficAnomalies(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+
+	limit := 1500
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 5000 {
+			limit = v
+		}
+	}
+
+	windowMinutes := 15
+	if q := r.URL.Query().Get("window_minutes"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v >= 1 && v <= 120 {
+			windowMinutes = v
+		}
+	}
+	if q := r.URL.Query().Get("window_min"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v >= 1 && v <= 120 {
+			windowMinutes = v
+		}
+	}
+
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: h.buildTrafficAnomalySnapshot(limit, windowMinutes)})
+}
+
+func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) models.TrafficAnomalySnapshot {
+	if limit <= 0 || limit > 5000 {
+		limit = 1500
+	}
+	if windowMinutes <= 0 || windowMinutes > 120 {
+		windowMinutes = 15
+	}
+
+	now := time.Now()
+	windowStart := now.Add(-time.Duration(windowMinutes) * time.Minute)
+
+	entries := h.logger.RecentEntries(limit)
+	conns := h.fw.ActiveConnections()
+
+	minuteTotals := make(map[int64]int)
+	windowTotal := 0
+	windowBlocked := 0
+	windowSuspicious := 0
+	sourceWindow := make(map[string]int)
+
+	firstSeen := time.Time{}
+	lastSeen := time.Time{}
+
+	for _, entry := range entries {
+		ts := entry.Timestamp
+		if firstSeen.IsZero() || ts.Before(firstSeen) {
+			firstSeen = ts
+		}
+		if lastSeen.IsZero() || ts.After(lastSeen) {
+			lastSeen = ts
+		}
+
+		minuteTotals[ts.Unix()/60]++
+		if ts.Before(windowStart) {
+			continue
+		}
+
+		windowTotal++
+		if isBlockingAction(entry.Action) {
+			windowBlocked++
+		}
+		if isSuspiciousDetail(entry.Detail) {
+			windowSuspicious++
+		}
+
+		src := strings.TrimSpace(entry.SrcIP)
+		if src != "" && src != "-" && src != "0.0.0.0" && src != "::" {
+			sourceWindow[src]++
+		}
+	}
+
+	type fanoutStat struct {
+		IP    string
+		Ports int
+	}
+	fanout := make(map[string]map[string]struct{})
+	for _, c := range conns {
+		remote := strings.TrimSpace(c.RemoteIP)
+		localPort := strings.TrimSpace(c.LocalPort)
+		if remote == "" || remote == "-" || remote == "0.0.0.0" || remote == "::" || remote == "127.0.0.1" || remote == "::1" || localPort == "" {
+			continue
+		}
+		if _, ok := fanout[remote]; !ok {
+			fanout[remote] = make(map[string]struct{})
+		}
+		fanout[remote][localPort] = struct{}{}
+	}
+
+	maxFanout := fanoutStat{}
+	for ip, ports := range fanout {
+		if len(ports) > maxFanout.Ports {
+			maxFanout = fanoutStat{IP: ip, Ports: len(ports)}
+		}
+	}
+
+	currentBucket := now.Unix() / 60
+	currentMinuteCount := minuteTotals[currentBucket]
+	historyCounts := make([]int, 0, len(minuteTotals))
+	for bucket, count := range minuteTotals {
+		if bucket == currentBucket {
+			continue
+		}
+		historyCounts = append(historyCounts, count)
+	}
+	meanPerMin, stdPerMin := intSeriesStats(historyCounts)
+
+	anomalies := make([]models.TrafficAnomaly, 0, 6)
+	idx := 1
+	appendAnomaly := func(kind string, severity string, score int, title string, summary string, sampleCount int, baseline float64, current float64, evidence map[string]interface{}) {
+		anomalies = append(anomalies, models.TrafficAnomaly{
+			ID:            fmt.Sprintf("%s-%d", kind, idx),
+			Type:          kind,
+			Severity:      severity,
+			Score:         clampInt(score, 1, 100),
+			Title:         title,
+			Summary:       summary,
+			SampleCount:   sampleCount,
+			BaselineValue: baseline,
+			CurrentValue:  current,
+			FirstSeen:     firstSeen,
+			LastSeen:      lastSeen,
+			Evidence:      evidence,
+		})
+		idx++
+	}
+
+	if currentMinuteCount >= 18 {
+		if meanPerMin > 0 {
+			threshold := meanPerMin + 2*math.Max(stdPerMin, 3)
+			if float64(currentMinuteCount) > threshold {
+				severity := "warning"
+				if float64(currentMinuteCount) > threshold*1.35 {
+					severity = "critical"
+				}
+				score := int(40 + (float64(currentMinuteCount)-threshold)*2.5)
+				appendAnomaly(
+					"traffic_spike",
+					severity,
+					score,
+					"Traffic Spike Detected",
+					fmt.Sprintf("Current minute traffic (%d events) is significantly above historical baseline (%.1f/min).", currentMinuteCount, meanPerMin),
+					currentMinuteCount,
+					meanPerMin,
+					float64(currentMinuteCount),
+					map[string]interface{}{
+						"current_minute_events": currentMinuteCount,
+						"baseline_avg_per_min": meanPerMin,
+						"baseline_stddev":      stdPerMin,
+						"window_minutes":       windowMinutes,
+					},
+				)
+			}
+		} else if currentMinuteCount >= 40 {
+			appendAnomaly(
+				"traffic_spike",
+				"warning",
+				60,
+				"Traffic Spike Detected",
+				fmt.Sprintf("Current minute traffic is elevated (%d events) with no stable baseline yet.", currentMinuteCount),
+				currentMinuteCount,
+				0,
+				float64(currentMinuteCount),
+				map[string]interface{}{
+					"current_minute_events": currentMinuteCount,
+					"window_minutes":       windowMinutes,
+				},
+			)
+		}
+	}
+
+	if windowTotal >= 30 {
+		blockedRatio := float64(windowBlocked) / float64(windowTotal)
+		if blockedRatio >= 0.58 {
+			severity := "warning"
+			if blockedRatio >= 0.75 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"blocked_ratio_spike",
+				severity,
+				int(blockedRatio*110),
+				"Blocked Ratio Surge",
+				fmt.Sprintf("%d of %d recent events were blocked/rejected (%.1f%%).", windowBlocked, windowTotal, blockedRatio*100),
+				windowTotal,
+				0.35,
+				blockedRatio,
+				map[string]interface{}{
+					"window_blocked": windowBlocked,
+					"window_total":   windowTotal,
+					"window_minutes": windowMinutes,
+				},
+			)
+		}
+	}
+
+	if windowTotal >= 30 && len(sourceWindow) > 0 {
+		topSource := ""
+		topHits := 0
+		for src, hits := range sourceWindow {
+			if hits > topHits {
+				topSource = src
+				topHits = hits
+			}
+		}
+		if topHits >= 12 {
+			share := float64(topHits) / float64(windowTotal)
+			if share >= 0.34 {
+				severity := "warning"
+				if share >= 0.5 {
+					severity = "critical"
+				}
+				appendAnomaly(
+					"source_concentration",
+					severity,
+					int(share*120)+topHits/2,
+					"Single Source Concentration",
+					fmt.Sprintf("Source %s accounts for %.1f%% of recent traffic (%d/%d events).", topSource, share*100, topHits, windowTotal),
+					topHits,
+					0.2,
+					share,
+					map[string]interface{}{
+						"source_ip":      topSource,
+						"source_hits":    topHits,
+						"window_total":   windowTotal,
+						"window_minutes": windowMinutes,
+					},
+				)
+			}
+		}
+	}
+
+	if windowTotal >= 30 && windowSuspicious >= 10 {
+		suspiciousRatio := float64(windowSuspicious) / float64(windowTotal)
+		if suspiciousRatio >= 0.25 {
+			severity := "warning"
+			if suspiciousRatio >= 0.4 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"suspicious_payload_burst",
+				severity,
+				int(45 + suspiciousRatio*80),
+				"Suspicious Payload Burst",
+				fmt.Sprintf("%d events in the analysis window include suspicious markers (%.1f%%).", windowSuspicious, suspiciousRatio*100),
+				windowSuspicious,
+				0.15,
+				suspiciousRatio,
+				map[string]interface{}{
+					"suspicious_events": windowSuspicious,
+					"window_total":      windowTotal,
+					"window_minutes":    windowMinutes,
+				},
+			)
+		}
+	}
+
+	if maxFanout.Ports >= 12 {
+		severity := "warning"
+		if maxFanout.Ports >= 20 {
+			severity = "critical"
+		}
+		appendAnomaly(
+			"port_fanout",
+			severity,
+			int(40+float64(maxFanout.Ports)*2.4),
+			"Port Fanout Pattern",
+			fmt.Sprintf("Remote %s is connected across %d local ports, suggesting broad probing behavior.", maxFanout.IP, maxFanout.Ports),
+			maxFanout.Ports,
+			6,
+			float64(maxFanout.Ports),
+			map[string]interface{}{
+				"remote_ip":          maxFanout.IP,
+				"local_ports_touched": maxFanout.Ports,
+				"active_connections": len(conns),
+			},
+		)
+	}
+
+	sort.SliceStable(anomalies, func(i, j int) bool {
+		return anomalies[i].Score > anomalies[j].Score
+	})
+
+	riskScore := 0
+	if len(anomalies) > 0 {
+		totalScore := 0
+		maxScore := 0
+		for _, a := range anomalies {
+			totalScore += a.Score
+			if a.Score > maxScore {
+				maxScore = a.Score
+			}
+		}
+		avg := float64(totalScore) / float64(len(anomalies))
+		riskScore = clampInt(int(math.Round(avg*0.65+float64(maxScore)*0.35+float64(len(anomalies)-1)*4)), 0, 100)
+	}
+
+	status := "normal"
+	switch {
+	case riskScore >= 80:
+		status = "critical"
+	case riskScore >= 60:
+		status = "high"
+	case riskScore >= 35:
+		status = "elevated"
+	}
+
+	return models.TrafficAnomalySnapshot{
+		GeneratedAt:    now,
+		WindowMinutes:  windowMinutes,
+		SampleSize:     len(entries),
+		RiskScore:      riskScore,
+		Status:         status,
+		TotalAnomalies: len(anomalies),
+		Anomalies:      anomalies,
+	}
+}
+
+func isBlockingAction(action string) bool {
+	a := strings.ToUpper(strings.TrimSpace(action))
+	return a == "BLOCK" || a == "DROP" || a == "REJECT"
+}
+
+func isSuspiciousDetail(detail string) bool {
+	d := strings.ToLower(detail)
+	if d == "" {
+		return false
+	}
+	keywords := []string{"suspicious", "malicious", "malware", "exploit", "attack", "bruteforce", "scan", "dns tunneling", "c2", "exfil", "payload"}
+	for _, kw := range keywords {
+		if strings.Contains(d, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func intSeriesStats(values []int) (mean float64, stddev float64) {
+	if len(values) == 0 {
+		return 0, 0
+	}
+	total := 0
+	for _, v := range values {
+		total += v
+	}
+	mean = float64(total) / float64(len(values))
+
+	if len(values) == 1 {
+		return mean, 0
+	}
+	variance := 0.0
+	for _, v := range values {
+		delta := float64(v) - mean
+		variance += delta * delta
+	}
+	variance /= float64(len(values))
+	stddev = math.Sqrt(variance)
+	return mean, stddev
+}
+
+func clampInt(v int, minV int, maxV int) int {
+	if v < minV {
+		return minV
+	}
+	if v > maxV {
+		return maxV
+	}
+	return v
 }
 
 func (h *handlers) handleDNSStats(w http.ResponseWriter, r *http.Request) {

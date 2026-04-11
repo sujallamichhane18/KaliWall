@@ -152,6 +152,33 @@ type TrafficVisibility struct {
 	RecentAllowed      int         `json:"recent_allowed"`
 }
 
+// TrafficAnomaly represents a scored anomaly derived from recent traffic behavior.
+type TrafficAnomaly struct {
+	ID            string                 `json:"id"`
+	Type          string                 `json:"type"`
+	Severity      string                 `json:"severity"`
+	Score         int                    `json:"score"`
+	Title         string                 `json:"title"`
+	Summary       string                 `json:"summary"`
+	SampleCount   int                    `json:"sample_count"`
+	BaselineValue float64                `json:"baseline_value,omitempty"`
+	CurrentValue  float64                `json:"current_value,omitempty"`
+	FirstSeen     time.Time              `json:"first_seen,omitempty"`
+	LastSeen      time.Time              `json:"last_seen,omitempty"`
+	Evidence      map[string]interface{} `json:"evidence,omitempty"`
+}
+
+// TrafficAnomalySnapshot is the aggregated anomaly report consumed by the UI.
+type TrafficAnomalySnapshot struct {
+	GeneratedAt    time.Time        `json:"generated_at"`
+	WindowMinutes  int              `json:"window_minutes"`
+	SampleSize     int              `json:"sample_size"`
+	RiskScore      int              `json:"risk_score"`
+	Status         string           `json:"status"`
+	TotalAnomalies int              `json:"total_anomalies"`
+	Anomalies      []TrafficAnomaly `json:"anomalies"`
+}
+
 // BlockedIP represents a manually blocked IP address.
 type BlockedIP struct {
 	IP        string    `json:"ip"`
