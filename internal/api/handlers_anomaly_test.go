@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"kaliwall/internal/firewall"
 	"kaliwall/internal/logger"
@@ -60,7 +61,7 @@ func TestBuildTrafficAnomalySnapshotDetectsBlockedRatioSpike(t *testing.T) {
 	}
 }
 
-func TestBuildTrafficAnomalySnapshotNoAnomalyForLowVolume(t *testing.T) {
+func TestBuildTrafficAnomalySnapshotLearningModeForLowVolume(t *testing.T) {
 	h, cleanup := newAnomalyTestHandlers(t)
 	defer cleanup()
 
@@ -70,10 +71,22 @@ func TestBuildTrafficAnomalySnapshotNoAnomalyForLowVolume(t *testing.T) {
 
 	snapshot := h.buildTrafficAnomalySnapshot(200, 15)
 	if snapshot.TotalAnomalies != 0 {
-		t.Fatalf("expected no anomalies for low-volume benign traffic, got %d", snapshot.TotalAnomalies)
+		t.Fatalf("expected no anomalies while history is insufficient, got %d", snapshot.TotalAnomalies)
 	}
-	if snapshot.Status != "normal" {
-		t.Fatalf("expected normal status, got %q", snapshot.Status)
+	if snapshot.Status != "learning" {
+		t.Fatalf("expected learning status before history readiness, got %q", snapshot.Status)
+	}
+	if snapshot.HistoryReady {
+		t.Fatalf("expected history_ready=false for low sample count")
+	}
+	if snapshot.HistorySamples != 12 {
+		t.Fatalf("expected history sample count 12, got %d", snapshot.HistorySamples)
+	}
+	if snapshot.HistoryRequiredSamples <= snapshot.HistorySamples {
+		t.Fatalf("expected required history to exceed current samples, got required=%d samples=%d", snapshot.HistoryRequiredSamples, snapshot.HistorySamples)
+	}
+	if snapshot.LearningMessage == "" {
+		t.Fatalf("expected non-empty learning message when history is not ready")
 	}
 }
 
@@ -157,5 +170,55 @@ func TestBuildTrafficAnomalySnapshotRiskScoreBoundedAndElevated(t *testing.T) {
 	}
 	if snapshot.Status == "normal" {
 		t.Fatalf("expected non-normal status under attack load, got %q", snapshot.Status)
+	}
+}
+
+func TestAnomalyTrendHistoryIncludesRiskAndDetectors(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	for i := 0; i < 90; i++ {
+		src := fmt.Sprintf("203.0.113.%d", (i%8)+10)
+		h.logger.Log("BLOCK", src, "10.0.0.50", "tcp", "suspicious payload scan detected")
+	}
+	for i := 0; i < 30; i++ {
+		src := fmt.Sprintf("198.51.100.%d", (i%6)+20)
+		h.logger.Log("ALLOW", src, "10.0.0.10", "tcp", "normal traffic")
+	}
+
+	first := h.buildTrafficAnomalySnapshot(800, 15)
+	if !first.HistoryReady {
+		t.Fatalf("expected history ready for high sample volume")
+	}
+	if first.TotalAnomalies == 0 {
+		t.Fatalf("expected anomalies for trend-history test setup")
+	}
+
+	first.GeneratedAt = time.Now().UTC().Add(-2 * time.Minute)
+	h.recordAnomalySnapshot(first)
+
+	second := first
+	second.GeneratedAt = first.GeneratedAt.Add(1 * time.Minute)
+	second.RiskScore = 72
+	second.Status = "high"
+	h.recordAnomalySnapshot(second)
+
+	withTrend := h.withAnomalyTrendHistory(second, 180)
+	if len(withTrend.RiskTrend) < 2 {
+		t.Fatalf("expected at least two risk trend points, got %d", len(withTrend.RiskTrend))
+	}
+	if len(withTrend.DetectorTrends) == 0 {
+		t.Fatalf("expected detector trend series to be present")
+	}
+
+	hasPoints := false
+	for _, series := range withTrend.DetectorTrends {
+		if len(series.Points) > 0 {
+			hasPoints = true
+			break
+		}
+	}
+	if !hasPoints {
+		t.Fatalf("expected detector trend points in returned series")
 	}
 }
