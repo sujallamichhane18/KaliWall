@@ -56,25 +56,16 @@
     };
 
     // ---------- Theme Management ----------
-    const themeToggle = document.getElementById("themeToggle");
     const html = document.documentElement;
     
     function initTheme() {
-        const savedTheme = localStorage.getItem("theme");
-        const theme = savedTheme || "dark";
+        const theme = "light";
         setTheme(theme);
     }
 
     function setTheme(theme) {
         html.setAttribute("data-theme", theme);
         localStorage.setItem("theme", theme);
-        
-        // Update icon
-        if (themeToggle) {
-            themeToggle.innerHTML = theme === "dark" 
-                ? '<i class="fa-solid fa-sun"></i>' 
-                : '<i class="fa-solid fa-moon"></i>';
-        }
 
         // Update Chart.js defaults
         const textColor = theme === "dark" ? "#9ca3af" : "#4b5563";
@@ -105,13 +96,6 @@
         // Update gauges
         document.querySelectorAll(".gauge-bg").forEach(bg => {
             bg.style.stroke = theme === "dark" ? "#334155" : "#f3f4f6";
-        });
-    }
-
-    if (themeToggle) {
-        themeToggle.addEventListener("click", () => {
-            const current = html.getAttribute("data-theme");
-            setTheme(current === "dark" ? "light" : "dark");
         });
     }
 
@@ -2284,14 +2268,28 @@
 
     async function loadBlocked() {
         const res = await apiFetch("/logs?limit=1200");
-        if (!res.success) return;
         const tbody = document.querySelector("#blockedTable tbody");
+        const countBadge = document.getElementById("blockedEventsCount");
+        if (!res.success || !tbody) {
+            if (countBadge) {
+                countBadge.className = "badge badge-disabled";
+                countBadge.textContent = "0 events";
+            }
+            return;
+        }
         tbody.innerHTML = "";
 
         const blockedRows = (res.data || []).filter(function (entry) {
             const action = String((entry && entry.action) || "").toLowerCase();
             return action === "block" || action === "drop" || action === "reject";
+        }).sort(function (a, b) {
+            return new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime();
         });
+
+        if (countBadge) {
+            countBadge.className = blockedRows.length > 0 ? "badge badge-drop" : "badge badge-disabled";
+            countBadge.textContent = blockedRows.length + " events";
+        }
 
         if (blockedRows.length === 0) {
             tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#9ca3af;padding:20px">No blocked traffic events found</td></tr>';
@@ -2719,10 +2717,23 @@
 
     // ---------- Block IP Modal ----------
 
-    document.getElementById("btnBlockIP").addEventListener("click", function () {
-        loadBlocked();
-        toast("Blocked traffic refreshed", "success");
-    });
+    var btnRefreshBlocked = document.getElementById("btnRefreshBlocked");
+    if (btnRefreshBlocked) {
+        btnRefreshBlocked.addEventListener("click", function () {
+            loadBlocked();
+            toast("Blocked traffic refreshed", "success");
+        });
+    }
+
+    var btnOpenBlockIPModal = document.getElementById("btnOpenBlockIPModal");
+    if (btnOpenBlockIPModal) {
+        btnOpenBlockIPModal.addEventListener("click", function () {
+            var form = document.getElementById("blockIPForm");
+            if (form) form.reset();
+            var modal = document.getElementById("blockIPModal");
+            if (modal) modal.classList.add("open");
+        });
+    }
 
     document.getElementById("blockIPForm").addEventListener("submit", async function (e) {
         e.preventDefault();

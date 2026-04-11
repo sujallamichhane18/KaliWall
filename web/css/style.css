@@ -2787,3 +2787,233 @@ body::after,
         scroll-behavior: auto !important;
     }
 }
+
+/* ---------- Professional White Theme ---------- */
+:root,
+[data-theme="light"],
+[data-theme="dark"] {
+    --color-primary: #2563eb;
+    --color-primary-dark: #1d4ed8;
+    --color-primary-light: #e8f0ff;
+    --color-danger: #dc2626;
+    --color-danger-light: #fee2e2;
+    --color-success: #0f9f6e;
+    --color-success-light: #dcfce7;
+    --color-warning: #d97706;
+    --color-warning-light: #fef3c7;
+    --color-info: #2563eb;
+    --color-info-light: #e0ebff;
+
+    --bg-body: #f4f7fb;
+    --bg-white: #ffffff;
+    --bg-card: #ffffff;
+    --bg-sidebar: #ffffff;
+    --bg-sidebar-hover: #f8fafc;
+    --bg-sidebar-active: #e8f0ff;
+
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #94a3b8;
+    --text-sidebar: #475569;
+    --text-sidebar-hover: #0f172a;
+
+    --border-color: #e2e8f0;
+    --border-sidebar: #e2e8f0;
+}
+
+body {
+    font-family: "Space Grotesk", "Segoe UI", Tahoma, sans-serif;
+    background: #f4f7fb;
+    color: #0f172a;
+}
+
+body::before,
+body::after {
+    display: none;
+}
+
+.sidebar {
+    background: #ffffff;
+    border-right: 1px solid #e2e8f0;
+    box-shadow: 8px 0 26px rgba(15, 23, 42, 0.05);
+}
+
+.sidebar-header,
+.sidebar-footer {
+    background: #ffffff;
+    border-color: #e2e8f0;
+}
+
+.sidebar-logo-badge {
+    background: linear-gradient(165deg, #eff6ff, #ffffff);
+    border-color: #dbe3ef;
+    box-shadow: none;
+}
+
+.sidebar-brand-logo {
+    filter: none;
+}
+
+.brand-kali {
+    color: #dc2626;
+}
+
+.brand-wall {
+    color: #0f172a;
+}
+
+.brand-edition {
+    color: #64748b;
+}
+
+.nav-item {
+    color: #475569;
+    border: 1px solid transparent;
+    border-radius: 10px;
+}
+
+.nav-item:hover {
+    background: #f8fafc;
+    color: #0f172a;
+    transform: none;
+    border-color: #e2e8f0;
+}
+
+.nav-item.active {
+    background: #e8f0ff;
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+    box-shadow: none;
+}
+
+.topbar {
+    background: #ffffff;
+    border-bottom: 1px solid #e2e8f0;
+    backdrop-filter: none;
+}
+
+.topbar-badge {
+    background: #e8f0ff;
+    color: #1d4ed8;
+    border: 1px solid #bfdbfe;
+}
+
+.card,
+.stat-card,
+.system-banner,
+.modal,
+.logs-columns-panel,
+.logs-toolbar-group,
+.dpi-decode-panel,
+.ai-provider-chip,
+.ops-kpi-card,
+.ai-control-shell {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 4px 18px rgba(15, 23, 42, 0.05);
+}
+
+.card:hover,
+.stat-card:hover {
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+.system-banner {
+    border-left-color: #2563eb;
+}
+
+.table th,
+.soc-card .table th {
+    background: #f8fafc;
+    color: #334155;
+}
+
+.table td {
+    color: #1f2937;
+}
+
+.table tr:hover td,
+.soc-card .table tr:hover td {
+    background: #f8fafc;
+}
+
+.btn-secondary,
+.btn-refresh,
+.topbar-mini-btn,
+.dashboard-nav-links .btn {
+    background: #ffffff;
+    border: 1px solid #dbe3ef;
+    color: #334155;
+    box-shadow: none;
+}
+
+.btn-secondary:hover,
+.btn-refresh:hover,
+.topbar-mini-btn:hover,
+.dashboard-nav-links .btn:hover {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    color: #0f172a;
+}
+
+.btn-primary {
+    background: #2563eb;
+    border: 1px solid #1d4ed8;
+    color: #ffffff;
+    box-shadow: none;
+}
+
+.btn-primary:hover {
+    background: #1d4ed8;
+    border-color: #1e40af;
+    box-shadow: none;
+}
+
+.form-group input,
+.form-group select,
+.ai-explain-textarea,
+.input-inline-sm,
+.logs-toolbar-group select,
+.logs-toolbar-group input[type="range"],
+.dashboard-nav-controls select {
+    background: #ffffff;
+    border: 1px solid #dbe3ef;
+    color: #0f172a;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.ai-explain-textarea:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.modal-header,
+.modal-footer {
+    background: #ffffff;
+    border-color: #e2e8f0;
+}
+
+.badge-disabled,
+.badge-time_wait,
+.badge-close_wait {
+    background: #f1f5f9;
+    color: #64748b;
+}
+
+.geo-map-canvas {
+    background: #eef2f7;
+    border: 1px solid #dbe3ef;
+}
+
+#page-connections .ops-layout-grid {
+    grid-template-columns: 1fr;
+}
+
+#page-blocked .page-toolbar .toolbar-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
