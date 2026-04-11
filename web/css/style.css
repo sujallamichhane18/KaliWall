@@ -3123,6 +3123,22 @@ body::after {
     filter: saturate(1.02) contrast(1.01);
 }
 
+.geo-home-emoji-marker {
+    background: transparent;
+    border: 0;
+}
+
+.geo-home-emoji {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    font-size: 19px;
+    text-shadow: 0 2px 8px rgba(15, 23, 42, 0.35);
+    transform: translateY(-1px);
+}
+
 .geo-map-canvas .leaflet-popup-content-wrapper {
     background: #ffffff;
     color: #0f172a;

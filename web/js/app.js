@@ -21,6 +21,10 @@
     var geoDefenderRing = null;
     var geoHotspots = {};
     var geoPulseTimers = [];
+    var geoLocationResolved = false;
+    var geoInitialSnapshotLoaded = false;
+    var geoTableRenderTimer = null;
+    var geoAnchorHasCentered = false;
     var maxEventRows = 120;
     var maxGeoMarkers = 450;
     var peerHostMap = {};
@@ -356,7 +360,6 @@
             loadDashboardConnections();
             loadFirewallEvents();
             loadDNSStats();
-            loadSOCGeoAttacks();
         }, sec * 1000);
     }
 
@@ -622,29 +625,46 @@
 
     async function loadSOCGeoAttacks() {
         initGeoMap();
+        await loadGeoMyLocation({ force: false, recenter: !geoAnchorHasCentered });
+
+        // Load baseline once, then rely on stream updates to avoid map flicker.
+        if (geoInitialSnapshotLoaded) {
+            scheduleGeoTableRender();
+            return;
+        }
+
         geoCountryAgg = {};
         clearGeoMarkers();
-        await loadGeoMyLocation();
-        const res = await apiFetch("/geo/attacks?limit=600");
+        renderGeoDefenderAnchor(!geoAnchorHasCentered);
+
+        const res = await apiFetch("/geo/attacks?limit=450");
         if (!res.success) {
-            renderSOCGeoTable();
+            scheduleGeoTableRender();
             return;
         }
         (res.data || []).forEach(function (point) {
             ingestGeoPoint(point, true);
         });
-        focusGeoMapOnThreats();
-        renderSOCGeoTable();
+        geoInitialSnapshotLoaded = true;
+        if (!geoAnchorHasCentered) {
+            focusGeoMapOnThreats();
+            geoAnchorHasCentered = true;
+        }
+        scheduleGeoTableRender();
     }
 
     function startGeoAttackStream() {
+        if (geoAttackEventSource && (geoAttackEventSource.readyState === EventSource.OPEN || geoAttackEventSource.readyState === EventSource.CONNECTING)) {
+            return;
+        }
+
         stopGeoAttackStream();
         geoAttackEventSource = new EventSource(API + "/geo/stream");
         geoAttackEventSource.addEventListener("geo-attack", function (e) {
             try {
                 var point = JSON.parse(e.data);
                 ingestGeoPoint(point, true);
-                renderSOCGeoTable();
+                scheduleGeoTableRender();
             } catch (_) {}
         });
     }
@@ -656,31 +676,49 @@
         }
     }
 
-    async function loadGeoMyLocation() {
+    async function loadGeoMyLocation(options) {
+        options = options || {};
+        var force = !!options.force;
+        var recenter = !!options.recenter;
         const badge = document.getElementById("geoMyLocationBadge");
+
+        if (!force && geoLocationResolved && geoMyLocation) {
+            updateGeoHomeBadge(geoMyLocation);
+            renderGeoDefenderAnchor(recenter && !geoAnchorHasCentered);
+            return;
+        }
+
         if (badge) {
             badge.className = "badge badge-disabled";
-            badge.textContent = "Home: detecting...";
+            badge.textContent = "🏠 Home: detecting...";
+        }
+
+        var browserLoc = await resolveBrowserGeoLocation();
+        if (browserLoc) {
+            geoMyLocation = browserLoc;
+            geoLocationResolved = true;
+            updateGeoHomeBadge(browserLoc);
+            renderGeoDefenderAnchor(recenter && !geoAnchorHasCentered);
+            return;
         }
 
         const res = await apiFetch("/geo/me");
         if (!res.success || !res.data) {
             geoMyLocation = null;
+            geoLocationResolved = true;
             if (badge) {
                 badge.className = "badge badge-reject";
-                badge.textContent = "Home: unavailable";
-                badge.title = res.message || "Unable to detect your public geo location";
+                badge.textContent = "🏠 Home: unavailable";
+                badge.title = res.message || "Unable to detect your location";
             }
             return;
         }
 
         geoMyLocation = res.data;
-        if (badge) {
-            badge.className = "badge badge-enabled";
-            badge.textContent = "Home: " + ((geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Unknown"));
-            badge.title = (geoMyLocation.city || "") ? (geoMyLocation.city + ", " + (geoMyLocation.country || "")) : (geoMyLocation.country || "");
-        }
-        renderGeoDefenderAnchor(true);
+        geoMyLocation.source = "ip";
+        geoLocationResolved = true;
+        updateGeoHomeBadge(geoMyLocation);
+        renderGeoDefenderAnchor(recenter && !geoAnchorHasCentered);
     }
 
     function initGeoMap() {
@@ -690,17 +728,17 @@
         if (!canvas) return;
 
         if (geoMap) {
-            // Rebuild when the active dashboard layout points to a different map canvas.
-            if (geoMapCanvasId !== canvas.id) {
-                clearGeoMarkers();
-                geoMap.remove();
-                geoMap = null;
-                geoLayer = null;
-                geoMapCanvasId = "";
-            } else {
+            var existingCanvas = document.getElementById(geoMapCanvasId);
+            if (existingCanvas) {
                 setTimeout(function () { geoMap.invalidateSize(); }, 200);
                 return;
             }
+
+            clearGeoMarkers();
+            geoMap.remove();
+            geoMap = null;
+            geoLayer = null;
+            geoMapCanvasId = "";
         }
 
         geoMapCanvasId = canvas.id;
@@ -716,15 +754,13 @@
     }
 
     function resolveGeoMapCanvas() {
-        var canvases = [
-            document.getElementById("geoWidgetMap"),
-            document.getElementById("socGeoMap"),
-        ].filter(Boolean);
+        var widget = document.getElementById("geoWidgetMap");
+        var soc = document.getElementById("socGeoMap");
 
-        if (canvases.length === 0) return null;
-
-        var visible = canvases.find(function (el) { return isGeoCanvasVisible(el); });
-        return visible || canvases[0];
+        if (widget && isGeoCanvasVisible(widget)) return widget;
+        if (soc && isGeoCanvasVisible(soc)) return soc;
+        if (widget) return widget;
+        return soc || null;
     }
 
     function isGeoCanvasVisible(el) {
@@ -766,6 +802,8 @@
         geoMarkers = [];
         geoDefenderMarker = null;
         geoDefenderRing = null;
+        geoInitialSnapshotLoaded = false;
+        geoAnchorHasCentered = false;
         renderGeoDefenderAnchor(false);
     }
 
@@ -926,13 +964,16 @@
             className: "defender-ring",
         }).addTo(geoLayer);
 
-        geoDefenderMarker = L.circleMarker([lat, lon], {
-            radius: 8,
-            color: "#67e8f9",
-            weight: 2,
-            fillColor: "#06b6d4",
-            fillOpacity: 0.95,
-            className: "defender-node",
+        var homeIcon = L.divIcon({
+            className: "geo-home-emoji-marker",
+            html: '<span class="geo-home-emoji">🏠</span>',
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
+        });
+        geoDefenderMarker = L.marker([lat, lon], {
+            icon: homeIcon,
+            keyboard: false,
+            zIndexOffset: 1200,
         }).addTo(geoLayer);
 
         geoDefenderMarker.bindTooltip("Home Location: " + ((geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Unknown")), {
@@ -942,7 +983,84 @@
 
         if (recenter && geoMap) {
             geoMap.setView([lat, lon], 3);
+            geoAnchorHasCentered = true;
         }
+    }
+
+    function scheduleGeoTableRender() {
+        if (geoTableRenderTimer) {
+            return;
+        }
+        geoTableRenderTimer = setTimeout(function () {
+            geoTableRenderTimer = null;
+            renderSOCGeoTable();
+        }, 180);
+    }
+
+    async function resolveBrowserGeoLocation() {
+        if (!navigator.geolocation || !window.isSecureContext) {
+            return null;
+        }
+
+        return new Promise(function (resolve) {
+            var settled = false;
+            var done = function (value) {
+                if (settled) return;
+                settled = true;
+                resolve(value || null);
+            };
+
+            navigator.geolocation.getCurrentPosition(
+                function (pos) {
+                    if (!pos || !pos.coords) {
+                        done(null);
+                        return;
+                    }
+                    done({
+                        latitude: pos.coords.latitude,
+                        longitude: pos.coords.longitude,
+                        city: "Device",
+                        country: "Real Location",
+                        ip: "-",
+                        accuracy: pos.coords.accuracy,
+                        source: "browser",
+                    });
+                },
+                function () {
+                    done(null);
+                },
+                {
+                    enableHighAccuracy: true,
+                    timeout: 6000,
+                    maximumAge: 120000,
+                }
+            );
+
+            setTimeout(function () {
+                done(null);
+            }, 6500);
+        });
+    }
+
+    function updateGeoHomeBadge(location) {
+        var badge = document.getElementById("geoMyLocationBadge");
+        if (!badge || !location) return;
+
+        var lat = Number(location.latitude);
+        var lon = Number(location.longitude);
+        var source = String(location.source || "").toLowerCase();
+        var cityCountry = ((location.city ? location.city + ", " : "") + (location.country || "Unknown")).trim();
+        if (!cityCountry) cityCountry = "Unknown";
+
+        badge.className = "badge badge-enabled";
+        if (source === "browser" && isFinite(lat) && isFinite(lon)) {
+            badge.textContent = "🏠 Home: Real device location";
+            badge.title = cityCountry + " | " + lat.toFixed(4) + ", " + lon.toFixed(4);
+            return;
+        }
+
+        badge.textContent = "🏠 Home: " + cityCountry;
+        badge.title = source === "ip" ? (cityCountry + " (IP-based)") : cityCountry;
     }
 
     function buildThreatArc(srcLat, srcLon, dstLat, dstLon) {
