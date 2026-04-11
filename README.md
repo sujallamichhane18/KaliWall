@@ -124,76 +124,17 @@
 - 🧩 Stream-aware L7 extraction for HTTP, DNS, and TLS metadata
 - 🌐 L3 telemetry: IPv4/IPv6, TCP/UDP/ICMP counters, unique IPs, and top talkers
 
-#### DPI Validation
-
-Start KaliWall with DPI enabled:
-
-```bash
-./kaliwall --dpi --dpi-lite --dpi-interface eth0
-```
-
-Run traffic generation tests:
-
-```bash
-curl -v http://example.com/test
-curl -vk https://google.com
-dig openai.com
-```
-
-Expected runtime verification logs include:
-
-```text
-[HTTP] GET /test Host: example.com
-[TLS] SNI: google.com
-[DNS] Query: openai.com
-```
-
-You can also confirm engine health via API:
-
-```bash
-curl -s http://localhost:8080/api/v1/dpi/status
-```
-
 ### 🧪 Lightweight IDS/DPI Mode
 
-KaliWall includes a lightweight IDS/DPI module for fast protocol telemetry (HTTP, DNS, TLS):
+KaliWall includes a lightweight IDS/DPI module for fast protocol telemetry (HTTP, DNS, TLS).
 
-```bash
-./kaliwall --dpi --dpi-lite --dpi-interface eth0
-```
-
-Environment-based start via script:
-
-```bash
-KALIWALL_DPI_LITE=1 ./start.sh --foreground
-```
-
-Detailed protocol counters and last-seen artifacts are available at:
-
-```bash
-curl -s http://localhost:8080/api/v1/dpi/stats
-```
-
-The response includes Layer 7 detections and Layer 3 telemetry such as:
+The dashboard and API expose Layer 7 detections and Layer 3 telemetry such as:
 
 - `http_detected`, `dns_detected`, `tls_detected`
 - `ipv4_packets`, `ipv6_packets`, `tcp_packets`, `udp_packets`, `icmp_packets`
 - `unique_src_ips`, `unique_dst_ips`, `top_src_ips`, `top_dst_ips`
 
-#### High-Capacity DPI Tuning
-
-For higher throughput deployments, KaliWall now supports queue, batching, and cardinality tuning:
-
-```bash
-./kaliwall --dpi --dpi-lite --dpi-interface eth0 \
-  --dpi-workers 24 \
-  --dpi-queue 32768 \
-  --dpi-batch 64 \
-  --dpi-max-ips 100000 \
-  --dpi-log-every 16
-```
-
-Equivalent environment variables:
+For higher throughput deployments, KaliWall supports queue, batching, and cardinality tuning with these environment variables:
 
 - `KALIWALL_DPI_QUEUE`
 - `KALIWALL_DPI_BATCH`
@@ -239,7 +180,7 @@ Detailed `/api/v1/dpi/stats` now also reports queue pressure and drop counters:
 ```bash
 git clone https://github.com/sujallamichhane18/KaliWall.git
 cd KaliWall
-chmod +x setup.sh && ./setup.sh
+./setup.sh
 ```
 
 <br/>
@@ -248,7 +189,7 @@ chmod +x setup.sh && ./setup.sh
 
 **Background mode** *(default)*:
 ```bash
-chmod +x start.sh && ./start.sh
+./start.sh
 ```
 
 **Foreground mode**:
@@ -302,10 +243,7 @@ chmod +x start.sh && ./start.sh
 📁 IP2LOCATION-LITE-DB1.CSV
 ```
 
-```bash
-./kaliwall --geo-db /path/to/GeoLite2-City.mmdb
-./kaliwall --geo-db /path/to/IP2LOCATION-LITE-DB1.CSV
-```
+Use either database file format above for GeoIP support.
 
 ---
 
