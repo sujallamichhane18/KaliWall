@@ -21,14 +21,14 @@ echo -e "${GREEN}=======================================${NC}"
 echo -e "${GREEN}  KaliWall ❤️ Firewall Setup${NC}"
 echo -e "${GREEN}=======================================${NC}"
 
-if [[ "${EUID:-$(id -u)}" -ne 0 ]] && ! command -v sudo &> /dev/null; then
-    echo -e "${RED}[!] sudo is required to install missing packages or write to /usr/local.${NC}"
-    exit 1
-fi
-
 run_as_root() {
     if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
         "$@"
+        return
+    fi
+    if ! command -v sudo &> /dev/null; then
+        echo -e "${RED}[!] sudo is required to run: $*${NC}"
+        exit 1
     else
         sudo "$@"
     fi
@@ -74,16 +74,19 @@ go_meets_minimum_version() {
 
 install_go() {
     echo -e "${YELLOW}[*] Go not found or outdated. Installing Go 1.22...${NC}"
-    GO_TAR="go1.22.0.linux-amd64.tar.gz"
+    local GO_TAR="go1.22.0.linux-amd64.tar.gz"
     curl -fsSL "https://go.dev/dl/${GO_TAR}" -o "/tmp/${GO_TAR}"
     run_as_root rm -rf /usr/local/go
     run_as_root tar -C /usr/local -xzf "/tmp/${GO_TAR}"
     export PATH="/usr/local/go/bin:$PATH"
 
+    local USER_HOME="${HOME}"
     if [[ -n "${SUDO_USER:-}" ]]; then
-        USER_HOME="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
-    else
-        USER_HOME="${HOME}"
+        if command -v getent &> /dev/null; then
+            USER_HOME="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
+        else
+            USER_HOME="$(eval echo "~${SUDO_USER}")"
+        fi
     fi
 
     if [[ -n "${USER_HOME}" && -f "${USER_HOME}/.bashrc" ]] && ! grep -q '/usr/local/go/bin' "${USER_HOME}/.bashrc"; then
@@ -123,7 +126,7 @@ cd "$SCRIPT_DIR"
 
 # 3. Download dependencies
 echo -e "${YELLOW}[*] Downloading Go dependencies...${NC}"
-go mod download
+go mod tidy
 
 # 4. Build daemon
 echo -e "${YELLOW}[*] Building KaliWall daemon...${NC}"
