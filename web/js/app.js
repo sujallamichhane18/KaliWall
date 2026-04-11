@@ -346,6 +346,7 @@
             loadDashboardConnections();
             loadFirewallEvents();
             loadDNSStats();
+            loadSOCGeoAttacks();
         }, sec * 1000);
     }
 
@@ -614,7 +615,7 @@
         geoCountryAgg = {};
         clearGeoMarkers();
         await loadGeoMyLocation();
-        const res = await apiFetch("/geo/attacks?limit=300");
+        const res = await apiFetch("/geo/attacks?limit=600");
         if (!res.success) {
             renderSOCGeoTable();
             return;
@@ -649,7 +650,7 @@
         const badge = document.getElementById("geoMyLocationBadge");
         if (badge) {
             badge.className = "badge badge-disabled";
-            badge.textContent = "My Location: detecting...";
+            badge.textContent = "Home: detecting...";
         }
 
         const res = await apiFetch("/geo/me");
@@ -657,7 +658,7 @@
             geoMyLocation = null;
             if (badge) {
                 badge.className = "badge badge-reject";
-                badge.textContent = "My Location: unavailable";
+                badge.textContent = "Home: unavailable";
                 badge.title = res.message || "Unable to detect your public geo location";
             }
             return;
@@ -666,7 +667,7 @@
         geoMyLocation = res.data;
         if (badge) {
             badge.className = "badge badge-enabled";
-            badge.textContent = "My Location: " + (geoMyLocation.country || "Unknown") + " (" + (geoMyLocation.ip || "-") + ")";
+            badge.textContent = "Home: " + ((geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Unknown"));
             badge.title = (geoMyLocation.city || "") ? (geoMyLocation.city + ", " + (geoMyLocation.country || "")) : (geoMyLocation.country || "");
         }
         renderGeoDefenderAnchor(true);
@@ -694,7 +695,7 @@
 
         geoMapCanvasId = canvas.id;
         geoMap = L.map(canvas.id, { zoomControl: true, worldCopyJump: true, preferCanvas: true }).setView([18, 8], 2);
-        L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+        L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
             subdomains: "abcd",
             maxZoom: 18,
             attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
@@ -747,6 +748,7 @@
             geoMarkers.forEach(function(obj) {
                 if (obj.marker) geoLayer.removeLayer(obj.marker);
                 if (obj.line) geoLayer.removeLayer(obj.line);
+                if (obj.arrow) geoLayer.removeLayer(obj.arrow);
             });
             geoLayer.clearLayers();
         }
@@ -788,6 +790,7 @@
 
         var target = resolveGeoTarget(point.target || {});
         var line = null;
+        var arrow = null;
         var arcPath = null;
         if (target) {
             arcPath = buildThreatArc(lat, lon, target.lat, target.lon);
@@ -799,6 +802,7 @@
                 className: "threat-line threat-line-" + sev,
                 lineCap: "round",
             }).addTo(geoLayer);
+            arrow = buildThreatArrowHead(arcPath, sev);
             animateThreatPulse(arcPath, sev);
         }
 
@@ -810,19 +814,23 @@
             "<strong>Flow:</strong> " + (target ? (escapeHtml(country) + " -> " + escapeHtml(target.label)) : "source only")
         );
         marker.addTo(geoLayer);
-        geoMarkers.push({ marker: marker, line: line, time: Date.now() });
+        geoMarkers.push({ marker: marker, line: line, arrow: arrow, time: Date.now() });
 
         // Cleanup old markers/lines
         while (geoMarkers.length > maxGeoMarkers) {
             var old = geoMarkers.shift();
             if (old.marker) geoLayer.removeLayer(old.marker);
             if (old.line) geoLayer.removeLayer(old.line);
+            if (old.arrow) geoLayer.removeLayer(old.arrow);
         }
 
         // Auto-remove trajectories after a short lifetime to keep the map readable.
         setTimeout(function() {
             if (line && geoLayer && geoLayer.hasLayer(line)) {
                 geoLayer.removeLayer(line);
+            }
+            if (arrow && geoLayer && geoLayer.hasLayer(arrow)) {
+                geoLayer.removeLayer(arrow);
             }
         }, 6500);
 
@@ -861,6 +869,15 @@
     }
 
     function resolveGeoTarget(target) {
+        if (geoMyLocation && isFinite(Number(geoMyLocation.latitude)) && isFinite(Number(geoMyLocation.longitude))) {
+            return {
+                lat: Number(geoMyLocation.latitude),
+                lon: Number(geoMyLocation.longitude),
+                label: (geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Home"),
+                ip: geoMyLocation.ip || "-",
+            };
+        }
+
         var lat = Number(target.latitude);
         var lon = Number(target.longitude);
         if (isFinite(lat) && isFinite(lon) && !(lat === 0 && lon === 0)) {
@@ -869,15 +886,6 @@
                 lon: lon,
                 label: (target.city ? target.city + ", " : "") + (target.country || "Protected Host"),
                 ip: target.ip || "-",
-            };
-        }
-
-        if (geoMyLocation && isFinite(Number(geoMyLocation.latitude)) && isFinite(Number(geoMyLocation.longitude))) {
-            return {
-                lat: Number(geoMyLocation.latitude),
-                lon: Number(geoMyLocation.longitude),
-                label: (geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Defender"),
-                ip: geoMyLocation.ip || "-",
             };
         }
 
@@ -917,7 +925,7 @@
             className: "defender-node",
         }).addTo(geoLayer);
 
-        geoDefenderMarker.bindTooltip("Defender Node: " + ((geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Unknown")), {
+        geoDefenderMarker.bindTooltip("Home Location: " + ((geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Unknown")), {
             direction: "top",
             offset: [0, -10],
         });
@@ -951,6 +959,30 @@
             points.push([lat, lon]);
         }
         return points;
+    }
+
+    function buildThreatArrowHead(path, sev) {
+        if (!geoLayer || !window.L || !Array.isArray(path) || path.length < 2) return null;
+
+        var tail = path[path.length - 2];
+        var head = path[path.length - 1];
+        var dLat = head[0] - tail[0];
+        var dLon = head[1] - tail[1];
+        var angle = Math.atan2(dLon, dLat) * 180 / Math.PI;
+        var color = geoSeverityColor(sev);
+        var icon = L.divIcon({
+            className: "threat-arrow-head",
+            html: '<span style="display:inline-block;font-size:12px;line-height:12px;color:' + color + ';transform:rotate(' + angle + 'deg)">&#9650;</span>',
+            iconSize: [14, 14],
+            iconAnchor: [7, 7],
+        });
+
+        return L.marker(head, {
+            icon: icon,
+            interactive: false,
+            keyboard: false,
+            zIndexOffset: 900,
+        }).addTo(geoLayer);
     }
 
     function animateThreatPulse(path, sev) {

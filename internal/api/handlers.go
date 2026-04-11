@@ -1355,7 +1355,16 @@ func (h *handlers) handleGeoAttacks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	points := make([]models.GeoAttackPoint, 0, limit)
-	for _, ev := range h.logger.RecentFirewallEvents(limit) {
+
+	// Prioritize active connection arcs so map consistently shows current remote flow to home.
+	connPoints := h.geoConnectionPoints(limit)
+	points = append(points, connPoints...)
+
+	remaining := limit - len(points)
+	if remaining < 0 {
+		remaining = 0
+	}
+	for _, ev := range h.logger.RecentFirewallEvents(remaining) {
 		if p, ok := h.toGeoAttackPoint(ev); ok {
 			points = append(points, p)
 		}
@@ -1429,11 +1438,17 @@ func (h *handlers) toGeoAttackPoint(ev models.FirewallEvent) (models.GeoAttackPo
 	if !srcOK {
 		return models.GeoAttackPoint{}, false
 	}
+	if src.IP == "" {
+		src.IP = ev.SrcIP
+	}
 
 	target, targetOK := h.resolveMyGeoLocation()
 	if !targetOK {
 		dst, dstOK := h.geo.Lookup(ev.DstIP)
 		if dstOK {
+			if dst.IP == "" {
+				dst.IP = ev.DstIP
+			}
 			target = dst
 			targetOK = true
 		}
@@ -1452,6 +1467,65 @@ func (h *handlers) toGeoAttackPoint(ev models.FirewallEvent) (models.GeoAttackPo
 		Source:    src,
 		Target:    target,
 	}, true
+}
+
+func (h *handlers) geoConnectionPoints(limit int) []models.GeoAttackPoint {
+	if h == nil || h.geo == nil || h.fw == nil || limit <= 0 {
+		return nil
+	}
+
+	target, targetOK := h.resolveMyGeoLocation()
+	now := time.Now()
+	conns := h.fw.ActiveConnections()
+	points := make([]models.GeoAttackPoint, 0, len(conns))
+	seen := make(map[string]struct{}, len(conns))
+
+	for _, c := range conns {
+		remoteIP := strings.TrimSpace(c.RemoteIP)
+		if remoteIP == "" || remoteIP == "0.0.0.0" || remoteIP == "::" || remoteIP == "127.0.0.1" || remoteIP == "::1" {
+			continue
+		}
+
+		key := strings.Join([]string{c.Protocol, c.LocalIP, c.LocalPort, c.RemoteIP, c.RemotePort, c.State}, "|")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		src, ok := h.geo.Lookup(remoteIP)
+		if !ok {
+			continue
+		}
+		if src.IP == "" {
+			src.IP = remoteIP
+		}
+
+		dst := target
+		if !targetOK {
+			if loc, found := h.geo.Lookup(strings.TrimSpace(c.LocalIP)); found {
+				if loc.IP == "" {
+					loc.IP = strings.TrimSpace(c.LocalIP)
+				}
+				dst = loc
+			}
+		}
+
+		points = append(points, models.GeoAttackPoint{
+			Timestamp: now,
+			EventType: "connection",
+			Action:    "ALLOW",
+			Severity:  "low",
+			Detail:    fmt.Sprintf("Connection %s %s:%s -> %s:%s (%s)", strings.ToUpper(c.Protocol), c.RemoteIP, c.RemotePort, c.LocalIP, c.LocalPort, c.State),
+			Source:    src,
+			Target:    dst,
+		})
+
+		if len(points) >= limit {
+			break
+		}
+	}
+
+	return points
 }
 
 func (h *handlers) resolveMyGeoLocation() (models.GeoLocation, bool) {

@@ -144,15 +144,21 @@ func main() {
 						if !strings.Contains(strings.ToLower(entry.Detail), "malicious ip feed match") {
 							continue
 						}
-						srcIP := strings.TrimSpace(entry.SrcIP)
-						if net.ParseIP(srcIP) == nil {
+						matchedIP := extractMatchedFeedIP(entry.Detail)
+						if matchedIP == "" {
+							srcIP := strings.TrimSpace(entry.SrcIP)
+							if net.ParseIP(srcIP) != nil {
+								matchedIP = srcIP
+							}
+						}
+						if matchedIP == "" {
 							continue
 						}
-						if fw.IsIPBlocked(srcIP) {
+						if fw.IsIPBlocked(matchedIP) {
 							continue
 						}
-						if _, err := fw.BlockIP(srcIP, "Auto-blocked by malicious IP feed match"); err != nil {
-							trafficLogger.Log("ERROR", srcIP, "-", "THREAT", fmt.Sprintf("malicious feed auto-block failed: %v", err))
+						if _, err := fw.BlockIP(matchedIP, "Auto-blocked by malicious IP feed match"); err != nil {
+							trafficLogger.Log("ERROR", matchedIP, "-", "THREAT", fmt.Sprintf("malicious feed auto-block failed: %v", err))
 						}
 					}
 				}
@@ -441,6 +447,30 @@ func startMaliciousIPFeedAutoReload(ctx context.Context, feed *threatintel.Malic
 			}
 		}
 	}()
+}
+
+func extractMatchedFeedIP(detail string) string {
+	needle := "malicious ip feed match ("
+	text := strings.TrimSpace(detail)
+	lower := strings.ToLower(text)
+	start := strings.Index(lower, needle)
+	if start < 0 {
+		return ""
+	}
+	start += len(needle)
+	if start >= len(text) {
+		return ""
+	}
+	rest := text[start:]
+	end := strings.Index(rest, ")")
+	if end <= 0 {
+		return ""
+	}
+	candidate := strings.TrimSpace(rest[:end])
+	if net.ParseIP(candidate) == nil {
+		return ""
+	}
+	return candidate
 }
 
 func defaultCaptureInterface() string {
