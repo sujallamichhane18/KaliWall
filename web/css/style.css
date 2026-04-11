@@ -2662,3 +2662,94 @@ body::after {
         padding: 10px;
     }
 }
+
+/* ---------- Layout Normalization Pass ---------- */
+.page-container {
+    max-width: none;
+    overflow-x: hidden;
+}
+
+.page {
+    width: 100%;
+}
+
+.page.active {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+}
+
+#page-dashboard.page.active {
+    display: flex;
+    flex-direction: column;
+}
+
+#page-dashboard > * {
+    order: initial;
+}
+
+#page-dashboard .card,
+#page-dashboard .system-banner,
+#page-dashboard .dashboard-grid,
+#page-dashboard .gauge-grid,
+#page-dashboard .charts-grid,
+#page-dashboard #socDashboard {
+    margin-bottom: 0;
+}
+
+.page-toolbar {
+    margin-bottom: 0;
+    padding: 0;
+}
+
+.page-toolbar .toolbar-actions {
+    margin-left: auto;
+}
+
+.card-body > .toolbar-actions {
+    width: 100%;
+}
+
+.table-responsive,
+.dashboard-table-wrap,
+.log-container {
+    min-width: 0;
+}
+
+.ops-layout-grid {
+    align-items: start;
+}
+
+.ops-main > .card:last-child,
+.ops-rail > .card:last-child,
+.page > .card:last-child {
+    margin-bottom: 0;
+}
+
+@media (max-width: 900px) {
+    .page.active {
+        gap: 12px;
+    }
+
+    .toolbar-actions .btn {
+        width: auto;
+    }
+
+    .page-toolbar > .btn,
+    .page-toolbar .toolbar-actions .btn {
+        width: 100%;
+    }
+
+    .page-toolbar .toolbar-actions {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    #page-blocked .card,
+    #page-threats .card,
+    #page-connections .card,
+    #page-rules .card {
+        margin-bottom: 12px;
+    }
+}

@@ -147,6 +147,10 @@
         pages.forEach((p) => p.classList.remove("active"));
         document.getElementById("page-" + target).classList.add("active");
         pageTitle.textContent = pageTitles[target] || "KaliWall";
+        // Prevent page-switch glitch where previous scroll offset leaves large blank space.
+        window.scrollTo({ top: 0, behavior: "auto" });
+        var container = document.querySelector(".page-container");
+        if (container) container.scrollTop = 0;
         sidebar.classList.remove("open");
         if (target !== "logs") stopLogStream();
         loadPageData(target);
@@ -1160,8 +1164,6 @@
         }
 
         filtered.forEach(function (row) {
-            const explainMeta = "DPI Alert on " + (row.src || "-") + ": " + (row.reason || "-");
-            const encodedMeta = encodeURIComponent(explainMeta);
             const tr = document.createElement("tr");
             tr.innerHTML =
                 "<td>" + formatTime(row.timestamp) + "</td>" +
@@ -1169,8 +1171,7 @@
                 "<td>" + actionBadge(row.action) + "</td>" +
                 "<td>" + escapeHtml(row.src) + "</td>" +
                 "<td>" + escapeHtml(row.protocol.toUpperCase()) + "</td>" +
-                "<td><div style='display:flex; justify-content:space-between; align-items:center;'>" + escapeHtml(row.reason) + 
-                " <button class='btn-icon secondary' onclick=\"KaliWall.explainPacket(decodeURIComponent('" + encodedMeta + "'))\" title='Explain with AI'><i class='fa-solid fa-magic'></i></button></div></td>";
+                "<td>" + escapeHtml(row.reason) + "</td>";
             tbody.appendChild(tr);
         });
     }
@@ -2293,18 +2294,11 @@
         });
 
         if (blockedRows.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#9ca3af;padding:20px">No blocked traffic events found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#9ca3af;padding:20px">No blocked traffic events found</td></tr>';
             return;
         }
 
         blockedRows.forEach(function (entry) {
-            const explainMeta =
-                "Action: " + (entry.action || "-") +
-                " Source: " + (entry.src_ip || "-") +
-                " Destination: " + (entry.dst_ip || "-") +
-                " Protocol: " + (entry.protocol || "-") +
-                " Detail: " + (entry.detail || "-");
-            const encodedMeta = encodeURIComponent(explainMeta);
             const tr = document.createElement("tr");
             tr.innerHTML =
                 "<td>" + formatTime(entry.timestamp) + "</td>" +
@@ -2312,11 +2306,7 @@
                 "<td>" + escapeHtml(entry.src_ip || "-") + "</td>" +
                 "<td>" + escapeHtml(entry.dst_ip || "-") + "</td>" +
                 "<td>" + escapeHtml((entry.protocol || "-").toUpperCase()) + "</td>" +
-                "<td>" + escapeHtml(entry.detail || "-") + "</td>" +
-                '<td class="action-cell">' +
-                    '<button class="btn btn-sm btn-secondary" onclick="KaliWall.explainPacket(decodeURIComponent(\'' + encodedMeta + '\'))"><i class="fa-solid fa-magic"></i> Explain</button>' +
-                    '<button class="btn btn-sm btn-primary" onclick="KaliWall.suggestRuleDecision(decodeURIComponent(\'' + encodedMeta + '\'))"><i class="fa-solid fa-gavel"></i> Auto Rule</button>' +
-                "</td>";
+                "<td>" + escapeHtml(entry.detail || "-") + "</td>";
             tbody.appendChild(tr);
         });
     }
@@ -3058,9 +3048,12 @@
         await suggestRuleDecisionFromTraffic();
     });
 
-    document.getElementById("btnAutoRuleFromTraffic").addEventListener("click", async function () {
-        await suggestRuleDecisionFromTraffic();
-    });
+    var btnAutoRuleFromTraffic = document.getElementById("btnAutoRuleFromTraffic");
+    if (btnAutoRuleFromTraffic) {
+        btnAutoRuleFromTraffic.addEventListener("click", async function () {
+            await suggestRuleDecisionFromTraffic();
+        });
+    }
 
     document.getElementById("btnClearAIExplanation").addEventListener("click", function () {
         var input = document.getElementById("aiExplainInput");

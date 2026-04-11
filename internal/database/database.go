@@ -51,6 +51,7 @@ func Open(path string) (*Store, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read db: %w", err)
 		}
+		migratedWebsiteBlocks := false
 		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &s.data); err != nil {
 				return nil, fmt.Errorf("parse db: %w", err)
@@ -63,11 +64,24 @@ func Open(path string) (*Store, error) {
 		if s.data.WebsiteBlocks == nil {
 			s.data.WebsiteBlocks = make([]models.WebsiteBlock, 0)
 		}
+		for i := range s.data.WebsiteBlocks {
+			// Website blocks were historically saved without the Enabled flag,
+			// which defaults to false after JSON unmarshal.
+			if !s.data.WebsiteBlocks[i].Enabled {
+				s.data.WebsiteBlocks[i].Enabled = true
+				migratedWebsiteBlocks = true
+			}
+		}
 		if s.data.Rules == nil {
 			s.data.Rules = make([]models.Rule, 0)
 		}
 		if s.data.Settings == nil {
 			s.data.Settings = make(map[string]string)
+		}
+		if migratedWebsiteBlocks {
+			if err := s.flush(); err != nil {
+				return nil, fmt.Errorf("migrate website blocks: %w", err)
+			}
 		}
 	}
 
@@ -161,6 +175,7 @@ func (s *Store) AddWebsiteBlock(domain, reason string) models.WebsiteBlock {
 	entry := models.WebsiteBlock{
 		Domain:    domain,
 		Reason:    reason,
+		Enabled:   true,
 		CreatedAt: time.Now(),
 	}
 	s.data.WebsiteBlocks = append(s.data.WebsiteBlocks, entry)
