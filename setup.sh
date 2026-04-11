@@ -3,11 +3,12 @@
 # Usage: chmod +x setup.sh && ./setup.sh
 #
 # This script only sets up KaliWall:
-#   1. Installs Go (if not present)
-#   2. Downloads dependencies
-#   3. Builds the KaliWall daemon and CLI
-#   4. Creates data directory
-#   5. Optionally installs systemd service
+#   1. Detects and installs missing prerequisites
+#   2. Installs Go only when needed
+#   3. Downloads dependencies
+#   4. Builds the KaliWall daemon and CLI
+#   5. Creates data directory
+#   6. Optionally installs systemd service
 
 set -euo pipefail
 
@@ -20,19 +21,100 @@ echo -e "${GREEN}=======================================${NC}"
 echo -e "${GREEN}  KaliWall ❤️ Firewall Setup${NC}"
 echo -e "${GREEN}=======================================${NC}"
 
-# 1. Check / Install Go
-if ! command -v go &> /dev/null; then
-    echo -e "${YELLOW}[*] Go not found. Installing Go 1.22...${NC}"
+if [[ "${EUID:-$(id -u)}" -ne 0 ]] && ! command -v sudo &> /dev/null; then
+    echo -e "${RED}[!] sudo is required to install missing packages or write to /usr/local.${NC}"
+    exit 1
+fi
+
+run_as_root() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+ensure_apt_packages() {
+    local packages=("$@")
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        return 0
+    fi
+    if ! command -v apt-get &> /dev/null; then
+        echo -e "${RED}[!] apt-get is not available. Install these prerequisites manually: ${packages[*]}${NC}"
+        exit 1
+    fi
+    echo -e "${YELLOW}[*] Installing missing system dependencies: ${packages[*]}${NC}"
+    run_as_root apt-get update
+    run_as_root apt-get install -y "${packages[@]}"
+}
+
+go_meets_minimum_version() {
+    local version_string="${1#go}"
+    version_string="${version_string%% *}"
+
+    if [[ "${version_string}" == devel* ]]; then
+        return 0
+    fi
+
+    if [[ ! "${version_string}" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+        return 1
+    fi
+
+    local major="${BASH_REMATCH[1]}"
+    local minor="${BASH_REMATCH[2]}"
+
+    if (( major > 1 )); then
+        return 0
+    fi
+    if (( major < 1 )); then
+        return 1
+    fi
+    (( minor >= 21 ))
+}
+
+install_go() {
+    echo -e "${YELLOW}[*] Go not found or outdated. Installing Go 1.22...${NC}"
     GO_TAR="go1.22.0.linux-amd64.tar.gz"
     curl -fsSL "https://go.dev/dl/${GO_TAR}" -o "/tmp/${GO_TAR}"
-    sudo rm -rf /usr/local/go
-    sudo tar -C /usr/local -xzf "/tmp/${GO_TAR}"
+    run_as_root rm -rf /usr/local/go
+    run_as_root tar -C /usr/local -xzf "/tmp/${GO_TAR}"
     export PATH="/usr/local/go/bin:$PATH"
-    echo 'export PATH="/usr/local/go/bin:$PATH"' >> ~/.bashrc
+
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        USER_HOME="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
+    else
+        USER_HOME="${HOME}"
+    fi
+
+    if [[ -n "${USER_HOME}" && -f "${USER_HOME}/.bashrc" ]] && ! grep -q '/usr/local/go/bin' "${USER_HOME}/.bashrc"; then
+        echo 'export PATH="/usr/local/go/bin:$PATH"' >> "${USER_HOME}/.bashrc"
+    fi
+
     rm -f "/tmp/${GO_TAR}"
     echo -e "${GREEN}[+] Go installed: $(go version)${NC}"
+}
+
+missing_packages=()
+for dependency in curl tar; do
+    if command -v "${dependency}" &> /dev/null; then
+        echo -e "${GREEN}[+] Found dependency: ${dependency} ($(command -v "${dependency}"))${NC}"
+    else
+        missing_packages+=("${dependency}")
+    fi
+done
+
+ensure_apt_packages "${missing_packages[@]}"
+
+# 1. Check / Install Go
+if command -v go &> /dev/null; then
+    current_go_version="$(go version | awk '{print $3}')"
+    if go_meets_minimum_version "${current_go_version}"; then
+        echo -e "${GREEN}[+] Go already installed: $(go version)${NC}"
+    else
+        install_go
+    fi
 else
-    echo -e "${GREEN}[+] Go already installed: $(go version)${NC}"
+    install_go
 fi
 
 # 2. Navigate to project directory
@@ -41,7 +123,7 @@ cd "$SCRIPT_DIR"
 
 # 3. Download dependencies
 echo -e "${YELLOW}[*] Downloading Go dependencies...${NC}"
-go mod tidy
+go mod download
 
 # 4. Build daemon
 echo -e "${YELLOW}[*] Building KaliWall daemon...${NC}"
@@ -77,9 +159,9 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-    sudo mv /tmp/kaliwall.service /etc/systemd/system/kaliwall.service
-    sudo systemctl daemon-reload
-    sudo systemctl enable kaliwall
+    run_as_root mv /tmp/kaliwall.service /etc/systemd/system/kaliwall.service
+    run_as_root systemctl daemon-reload
+    run_as_root systemctl enable kaliwall
     echo -e "${GREEN}[+] Systemd service installed and enabled${NC}"
     echo -e "${GREEN}[+] Use start.sh or systemctl to run KaliWall${NC}"
 }

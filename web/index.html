@@ -1,3 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KaliWall &mdash; Firewall Management</title>
+    <link rel="stylesheet" href="css/style.css?v=4">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+</head>
+<body>
+
+<!-- Sidebar Navigation -->
+<aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+        <div class="sidebar-logo-badge">
+            <img src="kaliwall.png" alt="KaliWall logo" class="sidebar-brand-logo">
+        </div>
+        <div class="sidebar-brand-text">
+            <span class="sidebar-brand-name"><span class="brand-kali">KALI</span><span class="brand-wall">WALL</span></span>
+            <span class="brand-edition">Firewall Console</span>
+        </div>
+    </div>
+    <nav class="sidebar-nav">
+        <a href="#" class="nav-item active" data-page="dashboard">
+            <i class="fa-solid fa-gauge-high"></i><span>Dashboard</span>
+        </a>
+        <a href="#" class="nav-item" data-page="rules">
+            <i class="fa-solid fa-list-check"></i><span>Firewall Rules</span>
+        </a>
+        <a href="#" class="nav-item" data-page="connections">
+            <i class="fa-solid fa-network-wired"></i><span>Connections</span>
         </a>
         <a href="#" class="nav-item" data-page="blocked">
             <i class="fa-solid fa-ban"></i><span>Blocked Traffic</span>
@@ -930,6 +966,42 @@
     </div>
 </main>
 
+<!-- AI Explanation Modal -->
+<div class="modal-overlay" id="aiExplanationModal">
+    <div class="modal" style="max-width: 640px;">
+        <div class="modal-header">
+            <h3><i class="fa-solid fa-robot"></i> AI Explanation</h3>
+            <button class="modal-close" id="aiModalClose"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="modal-body">
+            <p id="aiExplanationText" style="font-size:1.05rem; line-height:1.6; margin:0;"></p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" id="btnAIModalClose">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add/Edit Rule Modal -->
+<div class="modal-overlay" id="ruleModal">
+    <div class="modal" style="max-width: 920px;">
+        <div class="modal-header">
+            <h3><i class="fa-solid fa-plus-circle"></i> <span id="ruleModalTitle">Add Firewall Rule</span></h3>
+            <button class="modal-close" id="modalClose"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <form id="ruleForm">
+            <input type="hidden" id="ruleEditId" value="">
+            <div class="modal-body">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="ruleChain">Chain</label>
+                        <select id="ruleChain" required>
+                            <option value="INPUT">INPUT</option>
+                            <option value="OUTPUT">OUTPUT</option>
+                            <option value="FORWARD">FORWARD</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
                         <label for="ruleProtocol">Protocol</label>
                         <select id="ruleProtocol" required>
                             <option value="tcp">TCP</option>
@@ -1066,6 +1138,6 @@
 <!-- Toast Notification -->
 <div class="toast" id="toast"></div>
 
-<script src="js/app.js?v=3"></script>
+<script src="js/app.js?v=4"></script>
 </body>
 </html>
