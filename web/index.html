@@ -837,9 +837,25 @@
                 <div class="card-body table-responsive">
                     <div class="toolbar-actions" style="margin-bottom:10px">
                         <span class="badge badge-disabled" id="anomalyGeneratedAt">Updated: -</span>
+                        <span class="badge badge-disabled" id="anomalyHistoryBadge">History: -</span>
+                        <span class="badge badge-disabled" id="anomalyLearningBadge" style="display:none">Learning mode</span>
                         <button class="btn btn-secondary" id="btnRefreshAnomalies">
                             <i class="fa-solid fa-chart-line"></i> Analyze Now
                         </button>
+                    </div>
+                    <div class="anomaly-trend-grid">
+                        <div class="anomaly-trend-card">
+                            <div class="anomaly-trend-header">Risk Timeline</div>
+                            <div class="anomaly-trend-canvas-wrap">
+                                <canvas id="chartAnomalyRiskTrend"></canvas>
+                            </div>
+                        </div>
+                        <div class="anomaly-trend-card">
+                            <div class="anomaly-trend-header">Detector Score Trend</div>
+                            <div class="anomaly-trend-canvas-wrap">
+                                <canvas id="chartAnomalyDetectorTrend"></canvas>
+                            </div>
+                        </div>
                     </div>
                     <table class="table" id="trafficAnomalyTable">
                         <thead>

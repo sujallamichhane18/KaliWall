@@ -149,6 +149,8 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux := http.NewServeMux()
 
 	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo, proxy: proxy, aiService: aiService}
+	h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
+	h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
 
 	// REST API v1 endpoints
 	mux.HandleFunc("/api/v1/rules", h.handleRules)
@@ -460,10 +462,17 @@ func (h *handlers) handleTrafficAnomalies(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	limit := 1500
+	limit := 5000
 	if q := r.URL.Query().Get("limit"); q != "" {
-		if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 5000 {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 10000 {
 			limit = v
+		}
+	}
+
+	trendLimit := 180
+	if q := r.URL.Query().Get("trend_limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v >= 10 && v <= 1440 {
+			trendLimit = v
 		}
 	}
 
@@ -479,22 +488,31 @@ func (h *handlers) handleTrafficAnomalies(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: h.buildTrafficAnomalySnapshot(limit, windowMinutes)})
+	snapshot := h.buildTrafficAnomalySnapshot(limit, windowMinutes)
+	h.recordAnomalySnapshot(snapshot)
+	snapshot = h.withAnomalyTrendHistory(snapshot, trendLimit)
+
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: snapshot})
 }
 
 func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) models.TrafficAnomalySnapshot {
-	if limit <= 0 || limit > 5000 {
-		limit = 1500
+	if limit <= 0 || limit > 10000 {
+		limit = 5000
 	}
 	if windowMinutes <= 0 || windowMinutes > 120 {
 		windowMinutes = 15
 	}
+
+	minHistorySamples := 80
 
 	now := time.Now().UTC()
 	snapshot := models.TrafficAnomalySnapshot{
 		GeneratedAt:    now,
 		WindowMinutes:  windowMinutes,
 		SampleSize:     0,
+		HistoryReady:   false,
+		HistorySamples: 0,
+		HistoryRequiredSamples: minHistorySamples,
 		RiskScore:      0,
 		Status:         "normal",
 		TotalAnomalies: 0,
@@ -512,7 +530,16 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	entries := h.logger.RecentEntries(limit)
 	conns := h.fw.ActiveConnections()
 	snapshot.SampleSize = len(entries)
+	snapshot.HistorySamples = len(entries)
+	snapshot.HistoryReady = len(entries) >= minHistorySamples
+	if !snapshot.HistoryReady {
+		snapshot.Status = "learning"
+		snapshot.LearningMessage = fmt.Sprintf("Collecting traffic history (%d/%d samples) before anomaly scoring", len(entries), minHistorySamples)
+	}
 	if len(entries) == 0 {
+		return snapshot
+	}
+	if !snapshot.HistoryReady {
 		return snapshot
 	}
 
@@ -1330,6 +1357,205 @@ func safeRatio(numerator float64, denominator float64) float64 {
 	return numerator / denominator
 }
 
+func (h *handlers) recordAnomalySnapshot(snapshot models.TrafficAnomalySnapshot) {
+	if h == nil {
+		return
+	}
+
+	const anomalyTrendHistoryCap = 1440
+	bucket := snapshot.GeneratedAt.UTC().Truncate(time.Minute)
+	if bucket.IsZero() {
+		return
+	}
+
+	riskPoint := models.TrafficAnomalyRiskPoint{
+		Timestamp:      bucket,
+		RiskScore:      clampInt(snapshot.RiskScore, 0, 100),
+		Status:         strings.TrimSpace(snapshot.Status),
+		TotalAnomalies: snapshot.TotalAnomalies,
+		SampleSize:     snapshot.SampleSize,
+	}
+
+	h.anomalyTrendMu.Lock()
+	defer h.anomalyTrendMu.Unlock()
+
+	if h.anomalyRiskHistory == nil {
+		h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
+	}
+	if len(h.anomalyRiskHistory) > 0 && h.anomalyRiskHistory[len(h.anomalyRiskHistory)-1].Timestamp.Equal(bucket) {
+		h.anomalyRiskHistory[len(h.anomalyRiskHistory)-1] = riskPoint
+	} else {
+		h.anomalyRiskHistory = append(h.anomalyRiskHistory, riskPoint)
+	}
+	if len(h.anomalyRiskHistory) > anomalyTrendHistoryCap {
+		h.anomalyRiskHistory = h.anomalyRiskHistory[len(h.anomalyRiskHistory)-anomalyTrendHistoryCap:]
+	}
+
+	if h.anomalyDetectorHistory == nil {
+		h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
+	}
+
+	present := make(map[string]models.TrafficAnomalyDetectorPoint, len(snapshot.Anomalies))
+	for _, a := range snapshot.Anomalies {
+		kind := strings.TrimSpace(a.Type)
+		if kind == "" {
+			continue
+		}
+		present[kind] = models.TrafficAnomalyDetectorPoint{
+			Timestamp: bucket,
+			Score:     clampInt(a.Score, 0, 100),
+			Severity:  strings.TrimSpace(strings.ToLower(a.Severity)),
+		}
+	}
+
+	for kind, point := range present {
+		series := h.anomalyDetectorHistory[kind]
+		if len(series) > 0 && series[len(series)-1].Timestamp.Equal(bucket) {
+			series[len(series)-1] = point
+		} else {
+			series = append(series, point)
+		}
+		if len(series) > anomalyTrendHistoryCap {
+			series = series[len(series)-anomalyTrendHistoryCap:]
+		}
+		h.anomalyDetectorHistory[kind] = series
+	}
+
+	for kind, series := range h.anomalyDetectorHistory {
+		if _, ok := present[kind]; ok {
+			continue
+		}
+		zeroPoint := models.TrafficAnomalyDetectorPoint{
+			Timestamp: bucket,
+			Score:     0,
+			Severity:  "info",
+		}
+		if len(series) > 0 && series[len(series)-1].Timestamp.Equal(bucket) {
+			series[len(series)-1] = zeroPoint
+		} else {
+			series = append(series, zeroPoint)
+		}
+		if len(series) > anomalyTrendHistoryCap {
+			series = series[len(series)-anomalyTrendHistoryCap:]
+		}
+		h.anomalyDetectorHistory[kind] = series
+	}
+}
+
+func (h *handlers) withAnomalyTrendHistory(snapshot models.TrafficAnomalySnapshot, trendLimit int) models.TrafficAnomalySnapshot {
+	if h == nil {
+		return snapshot
+	}
+	if trendLimit < 10 {
+		trendLimit = 10
+	}
+	if trendLimit > 1440 {
+		trendLimit = 1440
+	}
+
+	h.anomalyTrendMu.RLock()
+	defer h.anomalyTrendMu.RUnlock()
+
+	riskSeries := h.anomalyRiskHistory
+	if len(riskSeries) > trendLimit {
+		riskSeries = riskSeries[len(riskSeries)-trendLimit:]
+	}
+	if len(riskSeries) > 0 {
+		snapshot.RiskTrend = make([]models.TrafficAnomalyRiskPoint, len(riskSeries))
+		copy(snapshot.RiskTrend, riskSeries)
+	}
+
+	type detectorCandidate struct {
+		kind     string
+		latest   models.TrafficAnomalyDetectorPoint
+		points   []models.TrafficAnomalyDetectorPoint
+		hasSignal bool
+	}
+	candidates := make([]detectorCandidate, 0, len(h.anomalyDetectorHistory))
+	for kind, all := range h.anomalyDetectorHistory {
+		if len(all) == 0 {
+			continue
+		}
+		points := all
+		if len(points) > trendLimit {
+			points = points[len(points)-trendLimit:]
+		}
+		hasSignal := false
+		for _, p := range points {
+			if p.Score > 0 {
+				hasSignal = true
+				break
+			}
+		}
+		if !hasSignal {
+			continue
+		}
+		latest := points[len(points)-1]
+		candidates = append(candidates, detectorCandidate{kind: kind, latest: latest, points: points, hasSignal: true})
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].latest.Score == candidates[j].latest.Score {
+			return candidates[i].latest.Timestamp.After(candidates[j].latest.Timestamp)
+		}
+		return candidates[i].latest.Score > candidates[j].latest.Score
+	})
+
+	maxSeries := 8
+	if len(candidates) < maxSeries {
+		maxSeries = len(candidates)
+	}
+
+	detectorTrends := make([]models.TrafficAnomalyDetectorTrend, 0, maxSeries)
+	for i := 0; i < maxSeries; i++ {
+		item := candidates[i]
+		cp := make([]models.TrafficAnomalyDetectorPoint, len(item.points))
+		copy(cp, item.points)
+		detectorTrends = append(detectorTrends, models.TrafficAnomalyDetectorTrend{
+			Type:           item.kind,
+			Label:          detectorDisplayLabel(item.kind),
+			LatestScore:    clampInt(item.latest.Score, 0, 100),
+			LatestSeverity: item.latest.Severity,
+			Points:         cp,
+		})
+	}
+
+	if len(detectorTrends) == 0 {
+		for _, a := range snapshot.Anomalies {
+			detectorTrends = append(detectorTrends, models.TrafficAnomalyDetectorTrend{
+				Type:           a.Type,
+				Label:          detectorDisplayLabel(a.Type),
+				LatestScore:    clampInt(a.Score, 0, 100),
+				LatestSeverity: a.Severity,
+				Points: []models.TrafficAnomalyDetectorPoint{
+					{Timestamp: snapshot.GeneratedAt, Score: clampInt(a.Score, 0, 100), Severity: a.Severity},
+				},
+			})
+			if len(detectorTrends) >= 8 {
+				break
+			}
+		}
+	}
+
+	snapshot.DetectorTrends = detectorTrends
+	return snapshot
+}
+
+func detectorDisplayLabel(kind string) string {
+	kind = strings.TrimSpace(strings.ToLower(kind))
+	if kind == "" {
+		return "Detector"
+	}
+	parts := strings.Split(kind, "_")
+	for i := range parts {
+		if parts[i] == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+	}
+	return strings.Join(parts, " ")
+}
+
 func normalizeTrafficIP(ip string) string {
 	clean := strings.TrimSpace(ip)
 	if clean == "" || clean == "-" || clean == "0.0.0.0" || clean == "::" || clean == "::1" || clean == "127.0.0.1" {
@@ -1573,6 +1799,10 @@ type handlers struct {
 	geo       *geoip.Service
 	proxy     maliciousDomainProxy
 	aiService *ai.OpenRouterService
+
+	anomalyTrendMu       sync.RWMutex
+	anomalyRiskHistory   []models.TrafficAnomalyRiskPoint
+	anomalyDetectorHistory map[string][]models.TrafficAnomalyDetectorPoint
 
 	myGeoMu      sync.RWMutex
 	myGeoCache   models.GeoLocation

@@ -51,6 +51,8 @@
     var dpiQuickProtocolChart = null;
     var visProtocolDistChart = null;
     var trafficFlowDistChart = null;
+    var anomalyRiskTrendChart = null;
+    var anomalyDetectorTrendChart = null;
     var dpiAlertRows = [];
     var dpiLastPacketsSample = { count: 0, ts: 0 };
     var aiProviderState = {
@@ -97,6 +99,8 @@
             trafficFlowDistChart.options.scales.y.ticks.color = textColor;
             trafficFlowDistChart.update("none");
         }
+
+        refreshAnomalyTrendChartTheme();
 
         // Update gauges
         document.querySelectorAll(".gauge-bg").forEach(bg => {
@@ -2074,11 +2078,19 @@
         if (!isFinite(windowMinutes) || windowMinutes < 1) windowMinutes = 15;
         if (windowMinutes > 120) windowMinutes = 120;
 
-        var limit = Number(options.limit || 1800);
-        if (!isFinite(limit) || limit < 100) limit = 1800;
-        if (limit > 5000) limit = 5000;
+        var limit = Number(options.limit || 5000);
+        if (!isFinite(limit) || limit < 100) limit = 5000;
+        if (limit > 10000) limit = 10000;
 
-        var res = await apiFetch("/traffic/anomalies?limit=" + encodeURIComponent(String(limit)) + "&window_minutes=" + encodeURIComponent(String(windowMinutes)));
+        var trendLimit = Number(options.trendLimit || 240);
+        if (!isFinite(trendLimit) || trendLimit < 10) trendLimit = 240;
+        if (trendLimit > 1440) trendLimit = 1440;
+
+        var res = await apiFetch(
+            "/traffic/anomalies?limit=" + encodeURIComponent(String(limit)) +
+            "&window_minutes=" + encodeURIComponent(String(windowMinutes)) +
+            "&trend_limit=" + encodeURIComponent(String(trendLimit))
+        );
         if (!res.success || !res.data) {
             applyTrafficAnomalySnapshot(null, windowMinutes, res.message || "Anomaly service unavailable");
             return;
@@ -2090,6 +2102,8 @@
     function applyTrafficAnomalySnapshot(snapshot, fallbackWindowMinutes, errorMessage) {
         var riskBadge = document.getElementById("anomalyRiskBadge");
         var generatedAt = document.getElementById("anomalyGeneratedAt");
+        var historyBadge = document.getElementById("anomalyHistoryBadge");
+        var learningBadge = document.getElementById("anomalyLearningBadge");
         var tableBody = document.querySelector("#trafficAnomalyTable tbody");
         var logsBadge = document.getElementById("logsAnomalyCount");
         var socRisk = document.getElementById("socAnomalyRisk");
@@ -2105,6 +2119,14 @@
                 generatedAt.textContent = "Updated: failed";
                 generatedAt.title = errorMessage || "Anomaly analysis unavailable";
             }
+            if (historyBadge) {
+                historyBadge.className = "badge badge-reject";
+                historyBadge.textContent = "History: unavailable";
+                historyBadge.title = errorMessage || "Anomaly analysis unavailable";
+            }
+            if (learningBadge) {
+                learningBadge.style.display = "none";
+            }
             if (logsBadge) {
                 logsBadge.className = "badge badge-disabled";
                 logsBadge.textContent = "0 anomalies";
@@ -2112,6 +2134,8 @@
             if (socRisk) {
                 socRisk.textContent = "UNAVAILABLE (0)";
             }
+            renderAnomalyRiskTrend(null);
+            renderAnomalyDetectorTrend(null);
             if (tableBody) {
                 tableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#ef4444;padding:20px">' + escapeHtml(errorMessage || "Anomaly analysis unavailable") + '</td></tr>';
             }
@@ -2126,8 +2150,27 @@
         var totalAnomalies = Number(snapshot.total_anomalies || 0);
         if (!isFinite(totalAnomalies) || totalAnomalies < 0) totalAnomalies = 0;
 
+        var historySamples = Number(snapshot.history_samples || snapshot.sample_size || 0);
+        if (!isFinite(historySamples) || historySamples < 0) historySamples = 0;
+
+        var historyRequired = Number(snapshot.history_required_samples || 80);
+        if (!isFinite(historyRequired) || historyRequired < 1) historyRequired = 80;
+
+        var historyReady = snapshot.history_ready === true;
+        if (snapshot.history_ready === undefined || snapshot.history_ready === null) {
+            historyReady = historySamples >= historyRequired;
+        }
+        if (status === "learning") {
+            historyReady = false;
+        }
+
+        var learningMessage = String(snapshot.learning_message || "");
+        if (!learningMessage && !historyReady) {
+            learningMessage = "Collecting traffic history (" + historySamples + "/" + historyRequired + " samples) before anomaly scoring";
+        }
+
         if (riskBadge) {
-            var riskClass = status === "critical" ? "badge-drop" : status === "high" ? "badge-reject" : status === "elevated" ? "badge-reject" : "badge-disabled";
+            var riskClass = status === "critical" ? "badge-drop" : status === "high" ? "badge-reject" : status === "elevated" ? "badge-reject" : status === "learning" ? "badge-disabled" : "badge-disabled";
             riskBadge.className = "badge " + riskClass;
             riskBadge.textContent = "Risk: " + status + " (" + riskScore + ")";
         }
@@ -2137,17 +2180,40 @@
             generatedAt.textContent = "Updated: " + formatTime(snapshot.generated_at);
         }
 
+        if (historyBadge) {
+            historyBadge.className = historyReady ? "badge badge-enabled" : "badge badge-disabled";
+            historyBadge.textContent = "History: " + historySamples + "/" + historyRequired;
+        }
+
+        if (learningBadge) {
+            if (historyReady) {
+                learningBadge.style.display = "none";
+            } else {
+                learningBadge.style.display = "inline-flex";
+                learningBadge.className = "badge badge-reject";
+                learningBadge.textContent = learningMessage;
+            }
+        }
+
         if (logsBadge) {
-            logsBadge.className = totalAnomalies > 0 ? "badge badge-reject" : "badge badge-disabled";
-            logsBadge.textContent = totalAnomalies + " anomalies";
+            logsBadge.className = historyReady && totalAnomalies > 0 ? "badge badge-reject" : "badge badge-disabled";
+            logsBadge.textContent = historyReady ? (totalAnomalies + " anomalies") : "learning";
         }
 
         if (socRisk) {
             socRisk.textContent = String(status || "normal").toUpperCase() + " (" + riskScore + ")";
         }
 
+        renderAnomalyRiskTrend(snapshot);
+        renderAnomalyDetectorTrend(snapshot);
+
         if (!tableBody) return;
         tableBody.innerHTML = "";
+
+        if (!historyReady) {
+            tableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#6b7280;padding:20px">' + escapeHtml(learningMessage) + '</td></tr>';
+            return;
+        }
 
         var rows = Array.isArray(snapshot.anomalies) ? snapshot.anomalies : [];
         if (rows.length === 0) {
@@ -2171,6 +2237,322 @@
                 "<td>" + escapeHtml(formatAnomalyMetric(item.baseline_value)) + "</td>";
             tableBody.appendChild(tr);
         });
+    }
+
+    function refreshAnomalyTrendChartTheme() {
+        var theme = getChartThemeColors();
+        [anomalyRiskTrendChart, anomalyDetectorTrendChart].forEach(function (chart) {
+            if (!chart || !chart.options) return;
+            if (chart.options.plugins && chart.options.plugins.legend && chart.options.plugins.legend.labels) {
+                chart.options.plugins.legend.labels.color = theme.textColor;
+            }
+            if (chart.options.scales) {
+                Object.keys(chart.options.scales).forEach(function (axisKey) {
+                    var axis = chart.options.scales[axisKey];
+                    if (axis && axis.ticks) axis.ticks.color = theme.textColor;
+                    if (axis && axis.title) axis.title.color = theme.textColor;
+                    if (axis && axis.grid && axisKey !== "y2") axis.grid.color = theme.gridColor;
+                });
+                if (chart.options.scales.y2 && chart.options.scales.y2.grid) {
+                    chart.options.scales.y2.grid.color = "rgba(0,0,0,0)";
+                }
+            }
+            chart.update("none");
+        });
+    }
+
+    function ensureAnomalyRiskTrendChart() {
+        if (anomalyRiskTrendChart) return anomalyRiskTrendChart;
+        var canvas = document.getElementById("chartAnomalyRiskTrend");
+        if (!canvas || !window.Chart) return null;
+
+        var theme = getChartThemeColors();
+        anomalyRiskTrendChart = new Chart(canvas, {
+            type: "line",
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: "Risk Score",
+                        data: [],
+                        borderColor: "rgba(22, 163, 74, 1)",
+                        backgroundColor: "rgba(22, 163, 74, 0.16)",
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 0,
+                        borderWidth: 2,
+                    },
+                    {
+                        label: "Anomaly Count",
+                        data: [],
+                        yAxisID: "y2",
+                        borderColor: "rgba(2, 132, 199, 1)",
+                        backgroundColor: "rgba(2, 132, 199, 0.12)",
+                        fill: false,
+                        tension: 0.25,
+                        pointRadius: 0,
+                        borderDash: [6, 4],
+                        borderWidth: 2,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: {
+                        position: "top",
+                        labels: {
+                            usePointStyle: true,
+                            color: theme.textColor,
+                            font: { family: "Space Grotesk", size: 11 },
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        ticks: { color: theme.textColor, maxTicksLimit: 8 },
+                        grid: { color: theme.gridColor },
+                    },
+                    y: {
+                        min: 0,
+                        max: 100,
+                        ticks: { color: theme.textColor },
+                        grid: { color: theme.gridColor },
+                        title: { display: true, text: "Risk", color: theme.textColor },
+                    },
+                    y2: {
+                        position: "right",
+                        beginAtZero: true,
+                        ticks: { color: theme.textColor },
+                        grid: { drawOnChartArea: false, color: "rgba(0,0,0,0)" },
+                        title: { display: true, text: "Anomalies", color: theme.textColor },
+                    },
+                },
+            },
+        });
+        return anomalyRiskTrendChart;
+    }
+
+    function ensureAnomalyDetectorTrendChart() {
+        if (anomalyDetectorTrendChart) return anomalyDetectorTrendChart;
+        var canvas = document.getElementById("chartAnomalyDetectorTrend");
+        if (!canvas || !window.Chart) return null;
+
+        var theme = getChartThemeColors();
+        anomalyDetectorTrendChart = new Chart(canvas, {
+            type: "line",
+            data: {
+                labels: [],
+                datasets: [],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: {
+                        position: "bottom",
+                        labels: {
+                            usePointStyle: true,
+                            boxWidth: 8,
+                            color: theme.textColor,
+                            font: { family: "Space Grotesk", size: 11 },
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        ticks: { color: theme.textColor, maxTicksLimit: 8 },
+                        grid: { color: theme.gridColor },
+                    },
+                    y: {
+                        min: 0,
+                        max: 100,
+                        ticks: { color: theme.textColor },
+                        grid: { color: theme.gridColor },
+                        title: { display: true, text: "Detector Score", color: theme.textColor },
+                    },
+                },
+            },
+        });
+        return anomalyDetectorTrendChart;
+    }
+
+    function renderAnomalyRiskTrend(snapshot) {
+        var chart = ensureAnomalyRiskTrendChart();
+        if (!chart) return;
+
+        var points = snapshot && Array.isArray(snapshot.risk_trend) ? snapshot.risk_trend.slice(-240) : [];
+        if (points.length === 0 && snapshot && snapshot.generated_at) {
+            points = [{
+                timestamp: snapshot.generated_at,
+                risk_score: snapshot.risk_score || 0,
+                total_anomalies: snapshot.total_anomalies || 0,
+            }];
+        }
+
+        points.sort(function (a, b) {
+            return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+        });
+
+        var labels = points.map(function (p) { return trendTimeLabel(p.timestamp); });
+        var riskData = points.map(function (p) { return normalizeTrendScore(p.risk_score); });
+        var anomalyCounts = points.map(function (p) {
+            var v = Number(p.total_anomalies || 0);
+            if (!isFinite(v) || v < 0) return 0;
+            return Math.round(v);
+        });
+
+        if (labels.length === 0) {
+            labels = ["-"];
+            riskData = [0];
+            anomalyCounts = [0];
+        }
+
+        var tone = anomalyStatusColors(snapshot && snapshot.status);
+        chart.data.labels = labels;
+        chart.data.datasets[0].data = riskData;
+        chart.data.datasets[0].borderColor = tone.line;
+        chart.data.datasets[0].backgroundColor = tone.fill;
+        chart.data.datasets[1].data = anomalyCounts;
+
+        var maxAnomaly = 0;
+        anomalyCounts.forEach(function (v) {
+            if (v > maxAnomaly) maxAnomaly = v;
+        });
+        chart.options.scales.y2.suggestedMax = Math.max(3, maxAnomaly + 1);
+        chart.update("none");
+    }
+
+    function renderAnomalyDetectorTrend(snapshot) {
+        var chart = ensureAnomalyDetectorTrendChart();
+        if (!chart) return;
+
+        var trends = snapshot && Array.isArray(snapshot.detector_trends) ? snapshot.detector_trends.slice(0, 6) : [];
+        if (trends.length === 0 && snapshot && Array.isArray(snapshot.anomalies)) {
+            trends = snapshot.anomalies.slice(0, 6).map(function (item) {
+                return {
+                    type: item.type,
+                    label: String(item.title || item.type || "detector").replace(/_/g, " "),
+                    points: [{ timestamp: snapshot.generated_at, score: item.score || 0 }],
+                };
+            });
+        }
+
+        var labelSet = {};
+        var labelKeys = [];
+        trends.forEach(function (trend) {
+            var points = Array.isArray(trend.points) ? trend.points : [];
+            points.forEach(function (point) {
+                var key = String(point.timestamp || "");
+                if (!key || labelSet[key]) return;
+                labelSet[key] = true;
+                labelKeys.push(key);
+            });
+        });
+
+        labelKeys.sort(function (a, b) {
+            return new Date(a).getTime() - new Date(b).getTime();
+        });
+        if (labelKeys.length > 120) {
+            labelKeys = labelKeys.slice(labelKeys.length - 120);
+        }
+        if (labelKeys.length === 0 && snapshot && snapshot.generated_at) {
+            labelKeys = [String(snapshot.generated_at)];
+        }
+
+        var datasets = trends.map(function (trend, index) {
+            var points = Array.isArray(trend.points) ? trend.points : [];
+            var scoresByTimestamp = {};
+            points.forEach(function (point) {
+                var key = String(point.timestamp || "");
+                if (!key) return;
+                scoresByTimestamp[key] = normalizeTrendScore(point.score);
+            });
+
+            var color = detectorTrendColor(index);
+            return {
+                label: detectorTrendLabel(trend.label || trend.type || ("detector_" + (index + 1))),
+                data: labelKeys.map(function (key) {
+                    if (Object.prototype.hasOwnProperty.call(scoresByTimestamp, key)) {
+                        return scoresByTimestamp[key];
+                    }
+                    return 0;
+                }),
+                borderColor: color.line,
+                backgroundColor: color.fill,
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.25,
+                fill: false,
+            };
+        });
+
+        if (datasets.length === 0) {
+            chart.data.labels = ["-"];
+            chart.data.datasets = [{
+                label: "Detector scores",
+                data: [0],
+                borderColor: "rgba(148, 163, 184, 1)",
+                backgroundColor: "rgba(148, 163, 184, 0.2)",
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.25,
+                fill: false,
+            }];
+            chart.update("none");
+            return;
+        }
+
+        chart.data.labels = labelKeys.map(function (ts) { return trendTimeLabel(ts); });
+        chart.data.datasets = datasets;
+        chart.update("none");
+    }
+
+    function detectorTrendColor(index) {
+        var palette = [
+            { line: "rgba(37, 99, 235, 1)", fill: "rgba(37, 99, 235, 0.18)" },
+            { line: "rgba(234, 88, 12, 1)", fill: "rgba(234, 88, 12, 0.18)" },
+            { line: "rgba(20, 184, 166, 1)", fill: "rgba(20, 184, 166, 0.18)" },
+            { line: "rgba(219, 39, 119, 1)", fill: "rgba(219, 39, 119, 0.18)" },
+            { line: "rgba(14, 165, 233, 1)", fill: "rgba(14, 165, 233, 0.18)" },
+            { line: "rgba(245, 158, 11, 1)", fill: "rgba(245, 158, 11, 0.18)" },
+        ];
+        return palette[index % palette.length];
+    }
+
+    function anomalyStatusColors(status) {
+        var s = String(status || "normal").toLowerCase();
+        if (s === "critical") return { line: "rgba(220, 38, 38, 1)", fill: "rgba(220, 38, 38, 0.18)" };
+        if (s === "high" || s === "elevated") return { line: "rgba(234, 88, 12, 1)", fill: "rgba(234, 88, 12, 0.18)" };
+        if (s === "learning") return { line: "rgba(100, 116, 139, 1)", fill: "rgba(100, 116, 139, 0.18)" };
+        return { line: "rgba(22, 163, 74, 1)", fill: "rgba(22, 163, 74, 0.16)" };
+    }
+
+    function detectorTrendLabel(label) {
+        return String(label || "detector")
+            .replace(/_/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+
+    function normalizeTrendScore(value) {
+        var num = Number(value);
+        if (!isFinite(num)) return 0;
+        if (num < 0) return 0;
+        if (num > 100) return 100;
+        return Math.round(num);
+    }
+
+    function trendTimeLabel(ts) {
+        if (!ts) return "-";
+        var d = new Date(ts);
+        if (isNaN(d.getTime())) return "-";
+        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     }
 
     function formatAnomalyMetric(value) {

@@ -168,15 +168,46 @@ type TrafficAnomaly struct {
 	Evidence      map[string]interface{} `json:"evidence,omitempty"`
 }
 
+// TrafficAnomalyRiskPoint is a historical risk snapshot for trend charts.
+type TrafficAnomalyRiskPoint struct {
+	Timestamp      time.Time `json:"timestamp"`
+	RiskScore      int       `json:"risk_score"`
+	Status         string    `json:"status"`
+	TotalAnomalies int       `json:"total_anomalies"`
+	SampleSize     int       `json:"sample_size"`
+}
+
+// TrafficAnomalyDetectorPoint is a detector-specific score point in time.
+type TrafficAnomalyDetectorPoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	Score     int       `json:"score"`
+	Severity  string    `json:"severity"`
+}
+
+// TrafficAnomalyDetectorTrend is a detector score history series.
+type TrafficAnomalyDetectorTrend struct {
+	Type           string                       `json:"type"`
+	Label          string                       `json:"label"`
+	LatestScore    int                          `json:"latest_score"`
+	LatestSeverity string                       `json:"latest_severity"`
+	Points         []TrafficAnomalyDetectorPoint `json:"points"`
+}
+
 // TrafficAnomalySnapshot is the aggregated anomaly report consumed by the UI.
 type TrafficAnomalySnapshot struct {
 	GeneratedAt    time.Time        `json:"generated_at"`
 	WindowMinutes  int              `json:"window_minutes"`
 	SampleSize     int              `json:"sample_size"`
+	HistoryReady   bool             `json:"history_ready"`
+	HistorySamples int              `json:"history_samples"`
+	HistoryRequiredSamples int      `json:"history_required_samples"`
+	LearningMessage string          `json:"learning_message,omitempty"`
 	RiskScore      int              `json:"risk_score"`
 	Status         string           `json:"status"`
 	TotalAnomalies int              `json:"total_anomalies"`
 	Anomalies      []TrafficAnomaly `json:"anomalies"`
+	RiskTrend      []TrafficAnomalyRiskPoint    `json:"risk_trend,omitempty"`
+	DetectorTrends []TrafficAnomalyDetectorTrend `json:"detector_trends,omitempty"`
 }
 
 // BlockedIP represents a manually blocked IP address.
