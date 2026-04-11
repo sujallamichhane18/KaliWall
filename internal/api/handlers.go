@@ -491,7 +491,9 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	now := time.Now()
-	windowStart := now.Add(-time.Duration(windowMinutes) * time.Minute)
+	windowDuration := time.Duration(windowMinutes) * time.Minute
+	windowStart := now.Add(-windowDuration)
+	prevWindowStart := windowStart.Add(-windowDuration)
 
 	entries := h.logger.RecentEntries(limit)
 	conns := h.fw.ActiveConnections()
@@ -500,7 +502,17 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	windowTotal := 0
 	windowBlocked := 0
 	windowSuspicious := 0
+	prevTotal := 0
+	prevBlocked := 0
+	prevSuspicious := 0
 	sourceWindow := make(map[string]int)
+	windowProtocolCounts := make(map[string]int)
+	prevProtocolCounts := make(map[string]int)
+	sourcePorts := make(map[string]map[string]struct{})
+	sourceTargets := make(map[string]map[string]struct{})
+	sourceTotal := make(map[string]int)
+	sourceBlocked := make(map[string]int)
+	sourceSuspicious := make(map[string]int)
 
 	firstSeen := time.Time{}
 	lastSeen := time.Time{}
@@ -515,21 +527,63 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 
 		minuteTotals[ts.Unix()/60]++
+
+		if ts.Before(prevWindowStart) {
+			continue
+		}
+
+		isBlocked := isBlockingAction(entry.Action)
+		isSuspicious := isSuspiciousDetail(entry.Detail)
+		proto := normalizeTrafficProtocol(entry.Protocol)
+		src := normalizeTrafficIP(entry.SrcIP)
+		dst := normalizeTrafficIP(entry.DstIP)
+
 		if ts.Before(windowStart) {
+			prevTotal++
+			if isBlocked {
+				prevBlocked++
+			}
+			if isSuspicious {
+				prevSuspicious++
+			}
+			if proto != "" {
+				prevProtocolCounts[proto]++
+			}
 			continue
 		}
 
 		windowTotal++
-		if isBlockingAction(entry.Action) {
+		if isBlocked {
 			windowBlocked++
 		}
-		if isSuspiciousDetail(entry.Detail) {
+		if isSuspicious {
 			windowSuspicious++
 		}
+		if proto != "" {
+			windowProtocolCounts[proto]++
+		}
 
-		src := strings.TrimSpace(entry.SrcIP)
-		if src != "" && src != "-" && src != "0.0.0.0" && src != "::" {
+		if src != "" {
 			sourceWindow[src]++
+			sourceTotal[src]++
+			if isBlocked {
+				sourceBlocked[src]++
+			}
+			if isSuspicious {
+				sourceSuspicious[src]++
+			}
+			if dst != "" {
+				if _, ok := sourceTargets[src]; !ok {
+					sourceTargets[src] = make(map[string]struct{})
+				}
+				sourceTargets[src][dst] = struct{}{}
+			}
+			if dstPort := parseDestinationPortFromDetail(entry.Detail); dstPort != "" {
+				if _, ok := sourcePorts[src]; !ok {
+					sourcePorts[src] = make(map[string]struct{})
+				}
+				sourcePorts[src][dstPort] = struct{}{}
+			}
 		}
 	}
 
@@ -632,9 +686,35 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
+	if prevTotal >= 20 && windowTotal >= 45 {
+		growth := float64(windowTotal) / float64(prevTotal)
+		if growth >= 1.8 && (windowTotal-prevTotal) >= 25 {
+			severity := "warning"
+			if growth >= 2.6 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"window_growth",
+				severity,
+				int(35+(growth-1.0)*24),
+				"Traffic Window Growth",
+				fmt.Sprintf("Recent %d-minute traffic volume increased %.1fx versus the previous window (%d -> %d events).", windowMinutes, growth, prevTotal, windowTotal),
+				windowTotal,
+				float64(prevTotal),
+				float64(windowTotal),
+				map[string]interface{}{
+					"window_total":        windowTotal,
+					"previous_window_total": prevTotal,
+					"growth_factor":       growth,
+					"window_minutes":      windowMinutes,
+				},
+			)
+		}
+	}
+
 	if windowTotal >= 30 {
 		blockedRatio := float64(windowBlocked) / float64(windowTotal)
-		if blockedRatio >= 0.58 {
+		if blockedRatio >= 0.56 {
 			severity := "warning"
 			if blockedRatio >= 0.75 {
 				severity = "critical"
@@ -652,6 +732,34 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 					"window_blocked": windowBlocked,
 					"window_total":   windowTotal,
 					"window_minutes": windowMinutes,
+				},
+			)
+		}
+	}
+
+	if prevTotal >= 20 && windowTotal >= 30 {
+		prevBlockedRatio := float64(prevBlocked) / float64(prevTotal)
+		blockedRatio := float64(windowBlocked) / float64(windowTotal)
+		delta := blockedRatio - prevBlockedRatio
+		if blockedRatio >= 0.45 && delta >= 0.18 && windowBlocked >= 18 {
+			severity := "warning"
+			if blockedRatio >= 0.65 || delta >= 0.30 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"blocked_ratio_escalation",
+				severity,
+				int(42+blockedRatio*70+delta*110),
+				"Blocked Ratio Escalation",
+				fmt.Sprintf("Blocked ratio rose from %.1f%% to %.1f%% across consecutive %d-minute windows.", prevBlockedRatio*100, blockedRatio*100, windowMinutes),
+				windowTotal,
+				prevBlockedRatio,
+				blockedRatio,
+				map[string]interface{}{
+					"previous_blocked_ratio": prevBlockedRatio,
+					"current_blocked_ratio":  blockedRatio,
+					"ratio_delta":            delta,
+					"window_minutes":         windowMinutes,
 				},
 			)
 		}
@@ -718,6 +826,181 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
+	if windowTotal >= 60 && len(windowProtocolCounts) > 0 {
+		topProto := ""
+		topCount := 0
+		for proto, count := range windowProtocolCounts {
+			if count > topCount {
+				topProto = proto
+				topCount = count
+			}
+		}
+		if topProto != "" {
+			share := float64(topCount) / float64(windowTotal)
+			prevShare := 0.0
+			if prevTotal > 0 {
+				prevShare = float64(prevProtocolCounts[topProto]) / float64(prevTotal)
+			}
+			if share >= 0.72 && (prevTotal < 30 || prevShare <= 0.50 || (share-prevShare) >= 0.20) {
+				severity := "warning"
+				if share >= 0.86 || (share-prevShare) >= 0.34 {
+					severity = "critical"
+				}
+				appendAnomaly(
+					"protocol_dominance",
+					severity,
+					int(36 + share*74 + (share-prevShare)*38),
+					"Protocol Dominance Shift",
+					fmt.Sprintf("%s now represents %.1f%% of recent traffic (%d/%d), indicating a potential flood or focused abuse pattern.", topProto, share*100, topCount, windowTotal),
+					topCount,
+					prevShare,
+					share,
+					map[string]interface{}{
+						"protocol":         topProto,
+						"current_share":    share,
+						"previous_share":   prevShare,
+						"current_events":   topCount,
+						"window_minutes":   windowMinutes,
+					},
+				)
+			}
+		}
+	}
+
+	type scanCandidate struct {
+		SourceIP      string
+		UniquePorts   int
+		UniqueTargets int
+		Events        int
+	}
+	bestScan := scanCandidate{}
+	bestScanWeight := 0
+	for src, portsSet := range sourcePorts {
+		portCount := len(portsSet)
+		targetCount := len(sourceTargets[src])
+		events := sourceTotal[src]
+		if events < 16 || portCount < 10 {
+			continue
+		}
+		if targetCount < 6 && portCount < 14 {
+			continue
+		}
+		weight := portCount*3 + targetCount*2 + events/2
+		if weight > bestScanWeight {
+			bestScanWeight = weight
+			bestScan = scanCandidate{SourceIP: src, UniquePorts: portCount, UniqueTargets: targetCount, Events: events}
+		}
+	}
+	if bestScan.SourceIP != "" {
+		severity := "warning"
+		if bestScan.UniquePorts >= 20 || bestScan.UniqueTargets >= 14 {
+			severity = "critical"
+		}
+		appendAnomaly(
+			"source_port_scan",
+			severity,
+			int(40 + float64(bestScan.UniquePorts)*2.2 + float64(bestScan.UniqueTargets)*1.7),
+			"Distributed Port Scan Behavior",
+			fmt.Sprintf("Source %s touched %d destination ports across %d targets within %d observed events.", bestScan.SourceIP, bestScan.UniquePorts, bestScan.UniqueTargets, bestScan.Events),
+			bestScan.Events,
+			8,
+			float64(bestScan.UniquePorts),
+			map[string]interface{}{
+				"source_ip":            bestScan.SourceIP,
+				"unique_dst_ports":     bestScan.UniquePorts,
+				"unique_dst_targets":   bestScan.UniqueTargets,
+				"source_event_count":   bestScan.Events,
+				"window_minutes":       windowMinutes,
+			},
+		)
+	}
+
+	type offenderCandidate struct {
+		SourceIP    string
+		Total       int
+		Blocked     int
+		Suspicious  int
+	}
+	bestOffender := offenderCandidate{}
+	bestOffenderWeight := 0
+	for src, total := range sourceTotal {
+		if total < 18 {
+			continue
+		}
+		blockedHits := sourceBlocked[src]
+		suspiciousHits := sourceSuspicious[src]
+		if blockedHits < 12 {
+			continue
+		}
+		riskHits := blockedHits + suspiciousHits
+		ratio := float64(riskHits) / float64(total)
+		if ratio < 0.72 {
+			continue
+		}
+		weight := blockedHits*3 + suspiciousHits*2 + total/2
+		if weight > bestOffenderWeight {
+			bestOffenderWeight = weight
+			bestOffender = offenderCandidate{SourceIP: src, Total: total, Blocked: blockedHits, Suspicious: suspiciousHits}
+		}
+	}
+	if bestOffender.SourceIP != "" {
+		riskRatio := float64(bestOffender.Blocked+bestOffender.Suspicious) / float64(bestOffender.Total)
+		severity := "warning"
+		if riskRatio >= 0.88 || bestOffender.Blocked >= 24 {
+			severity = "critical"
+		}
+		appendAnomaly(
+			"repeat_offender",
+			severity,
+			int(38+riskRatio*85+float64(bestOffender.Blocked)*1.3),
+			"Repeat Offender Source",
+			fmt.Sprintf("Source %s generated %d high-risk events (%d blocked, %d suspicious) out of %d total events.", bestOffender.SourceIP, bestOffender.Blocked+bestOffender.Suspicious, bestOffender.Blocked, bestOffender.Suspicious, bestOffender.Total),
+			bestOffender.Total,
+			0.5,
+			riskRatio,
+			map[string]interface{}{
+				"source_ip":          bestOffender.SourceIP,
+				"total_events":       bestOffender.Total,
+				"blocked_events":     bestOffender.Blocked,
+				"suspicious_events":  bestOffender.Suspicious,
+				"risk_ratio":         riskRatio,
+				"window_minutes":     windowMinutes,
+			},
+		)
+	}
+
+	halfOpen := 0
+	for _, c := range conns {
+		state := strings.ToUpper(strings.TrimSpace(c.State))
+		if state == "SYN_SENT" || state == "SYN_RECV" {
+			halfOpen++
+		}
+	}
+	if len(conns) >= 70 && halfOpen >= 24 {
+		halfOpenRatio := float64(halfOpen) / float64(len(conns))
+		if halfOpenRatio >= 0.32 {
+			severity := "warning"
+			if halfOpenRatio >= 0.48 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"half_open_connection_pressure",
+				severity,
+				int(35 + halfOpenRatio*95),
+				"Half-open Connection Pressure",
+				fmt.Sprintf("%d of %d active connections are in SYN handshake states, consistent with connection-flood behavior.", halfOpen, len(conns)),
+				halfOpen,
+				0.2,
+				halfOpenRatio,
+				map[string]interface{}{
+					"half_open_connections": halfOpen,
+					"active_connections":    len(conns),
+					"half_open_ratio":       halfOpenRatio,
+				},
+			)
+		}
+	}
+
 	if maxFanout.Ports >= 12 {
 		severity := "warning"
 		if maxFanout.Ports >= 20 {
@@ -746,25 +1029,31 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 
 	riskScore := 0
 	if len(anomalies) > 0 {
-		totalScore := 0
+		weightedTotal := 0.0
 		maxScore := 0
 		for _, a := range anomalies {
-			totalScore += a.Score
+			severityWeight := 1.0
+			if a.Severity == "critical" {
+				severityWeight = 1.34
+			} else if a.Severity == "warning" {
+				severityWeight = 1.08
+			}
+			weightedTotal += float64(a.Score) * severityWeight
 			if a.Score > maxScore {
 				maxScore = a.Score
 			}
 		}
-		avg := float64(totalScore) / float64(len(anomalies))
-		riskScore = clampInt(int(math.Round(avg*0.65+float64(maxScore)*0.35+float64(len(anomalies)-1)*4)), 0, 100)
+		avgWeighted := weightedTotal / float64(len(anomalies))
+		riskScore = clampInt(int(math.Round(avgWeighted*0.62+float64(maxScore)*0.38+float64(len(anomalies)-1)*3.5)), 0, 100)
 	}
 
 	status := "normal"
 	switch {
-	case riskScore >= 80:
+	case riskScore >= 78:
 		status = "critical"
-	case riskScore >= 60:
+	case riskScore >= 56:
 		status = "high"
-	case riskScore >= 35:
+	case riskScore >= 32:
 		status = "elevated"
 	}
 
@@ -777,6 +1066,55 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		TotalAnomalies: len(anomalies),
 		Anomalies:      anomalies,
 	}
+}
+
+func normalizeTrafficIP(ip string) string {
+	clean := strings.TrimSpace(ip)
+	if clean == "" || clean == "-" || clean == "0.0.0.0" || clean == "::" || clean == "::1" || clean == "127.0.0.1" {
+		return ""
+	}
+	return clean
+}
+
+func normalizeTrafficProtocol(proto string) string {
+	p := strings.ToUpper(strings.TrimSpace(proto))
+	if p == "" || p == "-" {
+		return ""
+	}
+	return p
+}
+
+func parseDestinationPortFromDetail(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	lower := strings.ToLower(detail)
+	markers := []string{"dst_port=", "dpt=", "dstport=", "destination_port=", "port="}
+
+	for _, marker := range markers {
+		idx := strings.Index(lower, marker)
+		if idx < 0 {
+			continue
+		}
+		start := idx + len(marker)
+		end := start
+		for end < len(lower) {
+			ch := lower[end]
+			if ch < '0' || ch > '9' {
+				break
+			}
+			end++
+		}
+		if end <= start {
+			continue
+		}
+		candidate := lower[start:end]
+		if v, err := strconv.Atoi(candidate); err == nil && v >= 1 && v <= 65535 {
+			return strconv.Itoa(v)
+		}
+	}
+
+	return ""
 }
 
 func isBlockingAction(action string) bool {

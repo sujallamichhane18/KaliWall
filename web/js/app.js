@@ -173,6 +173,7 @@
                 loadSysInfo();
                 loadAIApiLiveStatus();
                 loadDPIStatus();
+                loadTrafficAnomalies();
                 loadTrafficVisibility();
                 loadDashboardLogs();
                 loadDashboardConnections();
@@ -194,6 +195,7 @@
                 break;
             case "logs":
                 loadLogs();
+                loadTrafficAnomalies();
                 break;
             case "settings":
                 loadSettings();
@@ -337,6 +339,7 @@
             loadStats();
             loadSysInfo();
             loadDPIStatus();
+            loadTrafficAnomalies();
             loadTrafficVisibility();
             loadDashboardLogs();
             loadDashboardConnections();
@@ -1985,7 +1988,122 @@
     async function loadLogs() {
         // Refresh logs data from backend and keep live stream attached.
         await refreshLogsFromBackend();
+        await loadTrafficAnomalies();
         startLogStream(false);
+    }
+
+    async function loadTrafficAnomalies(options) {
+        options = options || {};
+        var windowMinutes = Number(options.windowMinutes || 15);
+        if (!isFinite(windowMinutes) || windowMinutes < 1) windowMinutes = 15;
+        if (windowMinutes > 120) windowMinutes = 120;
+
+        var limit = Number(options.limit || 1800);
+        if (!isFinite(limit) || limit < 100) limit = 1800;
+        if (limit > 5000) limit = 5000;
+
+        var res = await apiFetch("/traffic/anomalies?limit=" + encodeURIComponent(String(limit)) + "&window_minutes=" + encodeURIComponent(String(windowMinutes)));
+        if (!res.success || !res.data) {
+            applyTrafficAnomalySnapshot(null, windowMinutes, res.message || "Anomaly service unavailable");
+            return;
+        }
+
+        applyTrafficAnomalySnapshot(res.data, windowMinutes, "");
+    }
+
+    function applyTrafficAnomalySnapshot(snapshot, fallbackWindowMinutes, errorMessage) {
+        var riskBadge = document.getElementById("anomalyRiskBadge");
+        var generatedAt = document.getElementById("anomalyGeneratedAt");
+        var tableBody = document.querySelector("#trafficAnomalyTable tbody");
+        var logsBadge = document.getElementById("logsAnomalyCount");
+        var socRisk = document.getElementById("socAnomalyRisk");
+
+        if (!snapshot) {
+            if (riskBadge) {
+                riskBadge.className = "badge badge-reject";
+                riskBadge.textContent = "Risk: unavailable";
+                riskBadge.title = errorMessage || "Anomaly analysis unavailable";
+            }
+            if (generatedAt) {
+                generatedAt.className = "badge badge-reject";
+                generatedAt.textContent = "Updated: failed";
+                generatedAt.title = errorMessage || "Anomaly analysis unavailable";
+            }
+            if (logsBadge) {
+                logsBadge.className = "badge badge-disabled";
+                logsBadge.textContent = "0 anomalies";
+            }
+            if (socRisk) {
+                socRisk.textContent = "UNAVAILABLE (0)";
+            }
+            if (tableBody) {
+                tableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#ef4444;padding:20px">' + escapeHtml(errorMessage || "Anomaly analysis unavailable") + '</td></tr>';
+            }
+            return;
+        }
+
+        var status = String(snapshot.status || "normal").toLowerCase();
+        var riskScore = Number(snapshot.risk_score || 0);
+        if (!isFinite(riskScore)) riskScore = 0;
+        riskScore = Math.max(0, Math.min(100, Math.round(riskScore)));
+
+        var totalAnomalies = Number(snapshot.total_anomalies || 0);
+        if (!isFinite(totalAnomalies) || totalAnomalies < 0) totalAnomalies = 0;
+
+        if (riskBadge) {
+            var riskClass = status === "critical" ? "badge-drop" : status === "high" ? "badge-reject" : status === "elevated" ? "badge-reject" : "badge-disabled";
+            riskBadge.className = "badge " + riskClass;
+            riskBadge.textContent = "Risk: " + status + " (" + riskScore + ")";
+        }
+
+        if (generatedAt) {
+            generatedAt.className = "badge badge-disabled";
+            generatedAt.textContent = "Updated: " + formatTime(snapshot.generated_at);
+        }
+
+        if (logsBadge) {
+            logsBadge.className = totalAnomalies > 0 ? "badge badge-reject" : "badge badge-disabled";
+            logsBadge.textContent = totalAnomalies + " anomalies";
+        }
+
+        if (socRisk) {
+            socRisk.textContent = String(status || "normal").toUpperCase() + " (" + riskScore + ")";
+        }
+
+        if (!tableBody) return;
+        tableBody.innerHTML = "";
+
+        var rows = Array.isArray(snapshot.anomalies) ? snapshot.anomalies : [];
+        if (rows.length === 0) {
+            var windowLabel = Number(snapshot.window_minutes || fallbackWindowMinutes || 15);
+            tableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#6b7280;padding:20px">No high-risk anomalies detected in the last ' + escapeHtml(String(windowLabel)) + ' minutes</td></tr>';
+            return;
+        }
+
+        rows.slice(0, 12).forEach(function (item) {
+            var sev = String(item.severity || "info").toLowerCase();
+            if (sev === "high") sev = "warning";
+            if (sev === "medium" || sev === "low") sev = "info";
+
+            var tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td>" + severityBadge(sev) + "</td>" +
+                "<td>" + escapeHtml(String(item.title || item.type || "anomaly").replace(/_/g, " ")) + "</td>" +
+                "<td>" + escapeHtml(item.summary || "-") + "</td>" +
+                "<td><strong>" + escapeHtml(String(item.score || 0)) + "</strong></td>" +
+                "<td>" + escapeHtml(formatAnomalyMetric(item.current_value)) + "</td>" +
+                "<td>" + escapeHtml(formatAnomalyMetric(item.baseline_value)) + "</td>";
+            tableBody.appendChild(tr);
+        });
+    }
+
+    function formatAnomalyMetric(value) {
+        if (value === null || value === undefined || value === "") return "-";
+        var num = Number(value);
+        if (!isFinite(num)) return String(value);
+        if (Math.abs(num) >= 100) return Math.round(num).toString();
+        if (Math.abs(num) >= 10) return num.toFixed(1);
+        return num.toFixed(2);
     }
 
     async function exportLogs(format) {
@@ -2913,6 +3031,7 @@
         const activePage = document.querySelector(".nav-item.active").dataset.page;
         if (activePage === "logs") {
             refreshLogsFromBackend();
+            loadTrafficAnomalies();
             toast("Logs refreshed", "success");
             return;
         }
@@ -2923,8 +3042,16 @@
     document.getElementById("btnRefreshConn").addEventListener("click", () => loadConnections());
     document.getElementById("btnRefreshLogs").addEventListener("click", () => {
         refreshLogsFromBackend();
+        loadTrafficAnomalies();
         toast("Logs refreshed", "success");
     });
+    var btnRefreshAnomalies = document.getElementById("btnRefreshAnomalies");
+    if (btnRefreshAnomalies) {
+        btnRefreshAnomalies.addEventListener("click", function () {
+            loadTrafficAnomalies();
+            toast("Anomaly analysis refreshed", "success");
+        });
+    }
     document.getElementById("aiModalClose").addEventListener("click", closeAIExplanationModal);
     document.getElementById("btnAIModalClose").addEventListener("click", closeAIExplanationModal);
     document.getElementById("aiExplanationModal").addEventListener("click", function (e) {

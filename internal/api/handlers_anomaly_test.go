@@ -76,3 +76,32 @@ func TestBuildTrafficAnomalySnapshotNoAnomalyForLowVolume(t *testing.T) {
 		t.Fatalf("expected normal status, got %q", snapshot.Status)
 	}
 }
+
+func TestBuildTrafficAnomalySnapshotDetectsSourcePortScan(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	for i := 0; i < 78; i++ {
+		dstPort := 1000 + (i % 26)
+		h.logger.Log("BLOCK", "203.0.113.250", "10.0.0.80", "tcp", fmt.Sprintf("scan probe dst_port=%d suspicious payload", dstPort))
+	}
+	for i := 0; i < 24; i++ {
+		h.logger.Log("ALLOW", fmt.Sprintf("198.51.100.%d", i+1), "10.0.0.20", "tcp", "normal web traffic")
+	}
+
+	snapshot := h.buildTrafficAnomalySnapshot(600, 15)
+	if snapshot.TotalAnomalies == 0 {
+		t.Fatalf("expected anomalies, got none")
+	}
+
+	found := false
+	for _, a := range snapshot.Anomalies {
+		if a.Type == "source_port_scan" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected source_port_scan anomaly, got %#v", snapshot.Anomalies)
+	}
+}
