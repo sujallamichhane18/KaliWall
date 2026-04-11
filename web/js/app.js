@@ -54,6 +54,12 @@
     var anomalyRiskTrendChart = null;
     var anomalyDetectorTrendChart = null;
     var dpiAlertRows = [];
+    var threatIntelConfigured = false;
+    var threatIntelConfigCheckedAt = 0;
+    var blockedIPSet = {};
+    var blockedIPSetCheckedAt = 0;
+    const THREAT_CONFIG_TTL_MS = 15000;
+    const BLOCKED_IP_CACHE_TTL_MS = 10000;
     var dpiLastPacketsSample = { count: 0, ts: 0 };
     var aiProviderState = {
         provider: "openrouter",
@@ -451,7 +457,7 @@
 
         if (threatRes.success) {
             const t = threatRes.data || {};
-            setText("socTiFreshness", t.configured ? "configured" : "not configured");
+            setText("socTiFreshness", t.configured ? "configured" : "feed-only");
         }
     }
 
@@ -3098,7 +3104,9 @@
         const data = await res.json();
         if (data.success) {
             toast("IP unblocked", "success");
+            blockedIPSetCheckedAt = 0;
             loadBlocked();
+            loadConnections();
         } else {
             toast(data.message || "Failed to unblock IP", "error");
         }
@@ -3107,6 +3115,7 @@
     // ---------- Threat Intelligence ----------
 
     async function loadThreats() {
+        var configured = await refreshThreatAPIConfiguration(false);
         const res = await apiFetch("/threat/cache");
         if (!res.success) return;
         const data = res.data || [];
@@ -3124,7 +3133,11 @@
         const tbody = document.querySelector("#threatCacheTable tbody");
         tbody.innerHTML = "";
         if (data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#9ca3af;padding:20px">No cached threat data. Configure a VirusTotal API key in Settings and scan IPs from Connections.</td></tr>';
+            if (configured) {
+                tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#9ca3af;padding:20px">No cached threat data yet. Scan IPs from Connections to populate live verdicts.</td></tr>';
+            } else {
+                tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#9ca3af;padding:20px">Threat API key is optional. KaliWall is running in feed-only mode (IPsum/local blocklists).</td></tr>';
+            }
             return;
         }
         data.forEach(function (entry) {
@@ -3158,7 +3171,9 @@
         const data = await res.json();
         if (data.success) {
             toast("IP blocked", "success");
+            blockedIPSetCheckedAt = 0;
             loadThreats();
+            loadConnections();
         } else {
             toast(data.message || "Failed to block IP", "error");
         }
@@ -3618,7 +3633,9 @@
         if (data.success) {
             toast("IP blocked", "success");
             document.getElementById("blockIPModal").classList.remove("open");
+            blockedIPSetCheckedAt = 0;
             loadBlocked();
+            loadConnections();
         } else {
             toast(data.message || "Failed to block IP", "error");
         }
@@ -3690,18 +3707,71 @@
 
     // ---------- Settings & Threat Intelligence ----------
 
+    async function refreshThreatAPIConfiguration(force) {
+        var now = Date.now();
+        if (!force && threatIntelConfigCheckedAt > 0 && (now - threatIntelConfigCheckedAt) < THREAT_CONFIG_TTL_MS) {
+            return threatIntelConfigured;
+        }
+
+        var res = await apiFetch("/threat/apikey");
+        threatIntelConfigCheckedAt = now;
+        if (res.success && res.data) {
+            threatIntelConfigured = !!res.data.configured;
+        }
+        return threatIntelConfigured;
+    }
+
+    async function refreshBlockedIPSet(force) {
+        var now = Date.now();
+        if (!force && blockedIPSetCheckedAt > 0 && (now - blockedIPSetCheckedAt) < BLOCKED_IP_CACHE_TTL_MS) {
+            return blockedIPSet;
+        }
+
+        var next = {};
+        var res = await apiFetch("/blocked");
+        if (res.success && Array.isArray(res.data)) {
+            res.data.forEach(function (entry) {
+                var ip = String((entry && entry.ip) || "").trim();
+                if (ip) {
+                    next[ip] = true;
+                }
+            });
+        }
+        blockedIPSet = next;
+        blockedIPSetCheckedAt = now;
+        return blockedIPSet;
+    }
+
+    function refreshFirewallStateAfterEngineSwitch() {
+        loadFirewallEngineSettings();
+        loadStats();
+        loadSysInfo();
+        loadTrafficVisibility();
+
+        var active = document.querySelector(".nav-item.active");
+        var page = active ? String(active.dataset.page || "") : "";
+        if (page === "connections") loadConnections();
+        if (page === "blocked") loadBlocked();
+        if (page === "threats") loadThreats();
+        if (page === "logs") loadLogs();
+    }
+
     async function loadSettings() {
         var res = await apiFetch("/threat/apikey");
         if (!res.success) return;
+
+        threatIntelConfigured = !!(res.data && res.data.configured);
+        threatIntelConfigCheckedAt = Date.now();
+
         var badge = document.getElementById("apiKeyBadge");
         var removeBtn = document.getElementById("btnRemoveApiKey");
-        if (res.data.configured) {
+        if (threatIntelConfigured) {
             badge.className = "badge badge-enabled";
             badge.innerHTML = '<i class="fa-solid fa-check"></i> API key configured (' + res.data.cache_entries + ' cached IPs)';
             removeBtn.style.display = "";
         } else {
             badge.className = "badge badge-disabled";
-            badge.textContent = "Not configured";
+            badge.innerHTML = '<i class="fa-solid fa-shield"></i> Optional (feed-only mode)';
             removeBtn.style.display = "none";
         }
 
@@ -3719,6 +3789,7 @@
         select.innerHTML = "";
         var current = res.data.current_engine || "memory";
         var engines = res.data.available_engines || [];
+        setText("sysEngine", current);
         if (engines.indexOf("memory") === -1) engines.push("memory");
         engines.forEach(function (name) {
             var opt = document.createElement("option");
@@ -3733,7 +3804,7 @@
             status.textContent = "Live mode: " + current;
         } else {
             status.className = "badge badge-disabled";
-            status.textContent = "Memory mode";
+            status.textContent = "Memory mode: " + current;
         }
 
         if (res.data.last_error) {
@@ -3771,7 +3842,7 @@
                 badge.innerHTML = '<i class="fa-solid fa-check"></i> ' + providerLabel + ' key configured';
             } else {
                 badge.className = "badge badge-disabled";
-                badge.textContent = providerLabel + " key not configured";
+                badge.textContent = providerLabel + " optional";
             }
         }
         if (pageBadge) {
@@ -3779,8 +3850,8 @@
                 pageBadge.className = "badge badge-enabled";
                 pageBadge.innerHTML = '<i class="fa-solid fa-check"></i> ' + providerLabel + ' key is configured';
             } else {
-                pageBadge.className = "badge badge-reject";
-                pageBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> ' + providerLabel + ' key not configured (set it in Settings)';
+                pageBadge.className = "badge badge-disabled";
+                pageBadge.innerHTML = '<i class="fa-solid fa-circle-info"></i> ' + providerLabel + ' key is optional';
             }
         }
     }
@@ -3863,8 +3934,8 @@
         var d = res.data || {};
         if (!d.configured) {
             badge.className = "badge badge-disabled";
-            badge.textContent = "AI API: key missing";
-            badge.title = d.message || (prettyAIProviderName(d.provider || aiProviderState.provider) + " key is not configured");
+            badge.textContent = "AI API: optional";
+            badge.title = d.message || (prettyAIProviderName(d.provider || aiProviderState.provider) + " key is optional");
             return;
         }
 
@@ -3997,8 +4068,7 @@
             return;
         }
         toast("Firewall switched to memory mode", "success");
-        loadFirewallEngineSettings();
-        loadStats();
+        refreshFirewallStateAfterEngineSwitch();
     }
 
     async function restartFirewallFromTopbar() {
@@ -4031,8 +4101,7 @@
             return;
         }
         toast("Firewall restarted on " + target, "success");
-        loadFirewallEngineSettings();
-        loadStats();
+        refreshFirewallStateAfterEngineSwitch();
     }
 
     document.getElementById("btnSaveFirewallEngine").addEventListener("click", async function () {
@@ -4047,9 +4116,7 @@
         var data = await res.json();
         if (data.success) {
             toast("Firewall engine switched to " + engine, "success");
-            loadFirewallEngineSettings();
-            loadStats();
-            loadTrafficVisibility();
+            refreshFirewallStateAfterEngineSwitch();
         } else {
             toast(data.message || "Failed to switch engine", "error");
         }
@@ -4067,6 +4134,7 @@
         if (data.success) {
             toast("API key saved", "success");
             document.getElementById("vtApiKey").value = "";
+            threatIntelConfigCheckedAt = 0;
             loadSettings();
         } else {
             toast(data.message || "Failed to save key", "error");
@@ -4134,7 +4202,11 @@
         if (!confirm("Remove the VirusTotal API key?")) return;
         await fetch(API + "/threat/apikey", { method: "DELETE" });
         toast("API key removed", "success");
+        threatCache = {};
+        threatIntelConfigCheckedAt = 0;
         loadSettings();
+        loadThreats();
+        loadConnections();
     });
 
     document.getElementById("btnClearCache").addEventListener("click", async function () {
@@ -4147,10 +4219,40 @@
 
     async function checkThreatForConnections() {
         var cells = document.querySelectorAll("#connectionsTable .threat-cell");
+        if (!cells || cells.length === 0) return;
+
+        var configured = await refreshThreatAPIConfiguration(false);
+        if (!configured) {
+            var blockedMap = await refreshBlockedIPSet(false);
+            for (var k = 0; k < cells.length; k++) {
+                var feedOnlyIP = String(cells[k].getAttribute("data-ip") || "").trim();
+                if (!feedOnlyIP) {
+                    cells[k].innerHTML = '<span class="badge badge-disabled">-</span>';
+                    continue;
+                }
+                if (blockedMap[feedOnlyIP]) {
+                    cells[k].innerHTML = '<span class="badge badge-drop"><i class="fa-solid fa-ban"></i> Blocked</span>';
+                } else if (isLocalOrPrivateIP(feedOnlyIP)) {
+                    cells[k].innerHTML = '<span class="badge badge-disabled"><i class="fa-solid fa-house-signal"></i> Local</span>';
+                } else {
+                    cells[k].innerHTML = '<span class="badge badge-disabled"><i class="fa-solid fa-shield"></i> Feed-only</span>';
+                }
+            }
+            return;
+        }
+
         var checked = {};
         for (var i = 0; i < cells.length; i++) {
-            var ip = cells[i].getAttribute("data-ip");
-            if (!ip || ip === "0.0.0.0" || ip === "127.0.0.1" || ip === "::1" || ip === "*" || ip === "") continue;
+            var ip = String(cells[i].getAttribute("data-ip") || "").trim();
+            if (!ip || ip === "0.0.0.0" || ip === "127.0.0.1" || ip === "::1" || ip === "*" || ip === "") {
+                cells[i].innerHTML = '<span class="badge badge-disabled">-</span>';
+                continue;
+            }
+            if (isLocalOrPrivateIP(ip)) {
+                threatCache[ip] = { threat_level: "internal" };
+                cells[i].innerHTML = threatBadge(threatCache[ip]);
+                continue;
+            }
             if (checked[ip]) {
                 // Apply cached result
                 if (threatCache[ip]) cells[i].innerHTML = threatBadge(threatCache[ip]);
@@ -4163,10 +4265,9 @@
             }
             // Async lookup — fire and forget to avoid blocking
             (function(cell, ipAddr) {
-                fetch(API + "/threat/check/" + encodeURIComponent(ipAddr))
-                    .then(function(r) { return r.json(); })
+                apiFetch("/threat/check/" + encodeURIComponent(ipAddr))
                     .then(function(res) {
-                        if (res.data) {
+                        if (res && res.success && res.data) {
                             threatCache[ipAddr] = res.data;
                             // Update all cells with this IP
                             document.querySelectorAll('#connectionsTable .threat-cell[data-ip="' + ipAddr + '"]').forEach(function(c) {
@@ -4177,6 +4278,21 @@
                     .catch(function() {});
             })(cells[i], ip);
         }
+    }
+
+    function isLocalOrPrivateIP(ip) {
+        var raw = String(ip || "").trim().toLowerCase();
+        if (!raw || raw === "0.0.0.0" || raw === "*" || raw === "127.0.0.1" || raw === "::1") return true;
+        if (raw.indexOf("10.") === 0 || raw.indexOf("192.168.") === 0 || raw.indexOf("169.254.") === 0) return true;
+        if (raw.indexOf("172.") === 0) {
+            var p = raw.split(".");
+            if (p.length > 1) {
+                var second = parseInt(p[1], 10);
+                if (second >= 16 && second <= 31) return true;
+            }
+        }
+        if (raw.indexOf("fc") === 0 || raw.indexOf("fd") === 0 || raw.indexOf("fe80:") === 0) return true;
+        return false;
     }
 
     function threatBadge(verdict) {

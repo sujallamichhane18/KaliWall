@@ -84,6 +84,18 @@ func New(l *logger.TrafficLogger, db *database.Store) *Engine {
 
 	e.ensureDefaultRules()
 
+	if db != nil {
+		if savedEngine, ok := db.GetSetting("firewall_engine"); ok {
+			savedEngine = strings.TrimSpace(strings.ToLower(savedEngine))
+			if savedEngine != "" && savedEngine != e.backend {
+				if err := e.SwitchEngine(savedEngine); err != nil {
+					e.lastError = err.Error()
+					fmt.Printf("[!] Saved firewall backend %q could not be restored: %v\n", savedEngine, err)
+				}
+			}
+		}
+	}
+
 	if e.liveMode {
 		e.syncLiveConfig()
 	}
@@ -268,17 +280,28 @@ func (e *Engine) EngineInfo() models.FirewallEngineInfo {
 // SwitchEngine changes the active backend and re-syncs rules/blocks.
 func (e *Engine) SwitchEngine(name string) error {
 	name = strings.ToLower(strings.TrimSpace(name))
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.root {
-		return fmt.Errorf("switching backend requires root")
+	if name == "" {
+		name = engineMemory
 	}
-	if name == "" || name == engineMemory {
+
+	e.mu.Lock()
+	if name == engineMemory {
 		e.backend = engineMemory
 		e.liveMode = false
 		e.lastError = ""
+		e.mu.Unlock()
+		if e.db != nil {
+			e.db.SetSetting("firewall_engine", engineMemory)
+		}
+		e.logger.Log("CONFIG", "-", "-", "-", "Firewall backend switched to memory")
 		return nil
 	}
+
+	if !e.root {
+		e.mu.Unlock()
+		return fmt.Errorf("switching backend requires root")
+	}
+
 	ok := false
 	for _, a := range e.available {
 		if a == name {
@@ -287,11 +310,18 @@ func (e *Engine) SwitchEngine(name string) error {
 		}
 	}
 	if !ok {
+		e.mu.Unlock()
 		return fmt.Errorf("backend %s is not available", name)
 	}
+
 	e.backend = name
 	e.liveMode = true
 	e.lastError = ""
+	e.mu.Unlock()
+
+	if e.db != nil {
+		e.db.SetSetting("firewall_engine", name)
+	}
 	go e.syncLiveConfig()
 	e.logger.Log("CONFIG", "-", "-", "-", fmt.Sprintf("Firewall backend switched to %s", name))
 	return nil
@@ -609,19 +639,35 @@ func (e *Engine) BlockIP(ip, reason string) (models.BlockedIP, error) {
 			return models.BlockedIP{}, fmt.Errorf("invalid IP: %s", ip)
 		}
 	}
+	if e.db == nil {
+		return models.BlockedIP{}, fmt.Errorf("database unavailable")
+	}
 
-	entry := e.db.AddBlockedIP(ip, reason)
+	entry, added := e.db.AddBlockedIP(ip, reason)
+	if !added {
+		return entry, nil
+	}
 
 	if e.liveMode {
-		if err := e.syncLiveConfig(); err != nil {
-			e.logger.Log("ERROR", ip, "-", "-", fmt.Sprintf("%s IP block apply failed: %v", e.backend, err))
+		e.mu.RLock()
+		backend := e.backend
+		e.mu.RUnlock()
+
+		if err := e.applyIPBlockBackend(backend, ip); err != nil {
+			// Fallback to full sync when incremental apply fails due backend drift.
+			if syncErr := e.syncLiveConfig(); syncErr != nil {
+				e.logger.Log("ERROR", ip, "-", "-", fmt.Sprintf("%s IP block apply failed: %v", backend, syncErr))
+			}
 		}
 	}
 
 	e.logger.Log("BLOCK", ip, "-", "-", fmt.Sprintf("IP blocked: %s (%s)", ip, reason))
+	e.mu.RLock()
+	backend := e.backend
+	e.mu.RUnlock()
 	e.logger.EmitFirewallEvent(models.FirewallEvent{
 		EventType: "blocked_packet",
-		Backend:   e.backend,
+		Backend:   backend,
 		Action:    "BLOCK",
 		SrcIP:     ip,
 		Detail:    fmt.Sprintf("IP blocked: %s (%s)", ip, reason),

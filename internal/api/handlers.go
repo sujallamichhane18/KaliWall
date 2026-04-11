@@ -2374,6 +2374,10 @@ func (h *handlers) handleThreatCheck(w http.ResponseWriter, r *http.Request) {
 
 	verdict, err := h.threat.CheckIP(ip)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no api key configured") {
+			respond(w, http.StatusOK, models.APIResponse{Success: true, Data: verdict})
+			return
+		}
 		respond(w, http.StatusOK, models.APIResponse{
 			Success: true,
 			Message: err.Error(),

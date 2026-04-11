@@ -102,14 +102,15 @@ func (s *Store) flush() error {
 // ---------- Blocked IPs ----------
 
 // AddBlockedIP adds an IP to the blocklist.
-func (s *Store) AddBlockedIP(ip, reason string) models.BlockedIP {
+// It returns the entry and whether the IP was newly added.
+func (s *Store) AddBlockedIP(ip, reason string) (models.BlockedIP, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Check if already blocked
 	for _, b := range s.data.BlockedIPs {
 		if b.IP == ip {
-			return b
+			return b, false
 		}
 	}
 
@@ -120,7 +121,7 @@ func (s *Store) AddBlockedIP(ip, reason string) models.BlockedIP {
 	}
 	s.data.BlockedIPs = append(s.data.BlockedIPs, entry)
 	s.flush()
-	return entry
+	return entry, true
 }
 
 // RemoveBlockedIP removes an IP from the blocklist.

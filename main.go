@@ -157,9 +157,17 @@ func main() {
 						if fw.IsIPBlocked(matchedIP) {
 							continue
 						}
-						if _, err := fw.BlockIP(matchedIP, "Auto-blocked by malicious IP feed match"); err != nil {
-							trafficLogger.Log("ERROR", matchedIP, "-", "THREAT", fmt.Sprintf("malicious feed auto-block failed: %v", err))
+						direction := classifyFeedMatchDirection(entry.SrcIP, entry.DstIP, matchedIP)
+						reason := "Auto-blocked by malicious IP feed match"
+						if direction != "" {
+							reason += " (" + direction + ")"
 						}
+
+						if _, err := fw.BlockIP(matchedIP, reason); err != nil {
+							trafficLogger.Log("ERROR", matchedIP, "-", "THREAT", fmt.Sprintf("malicious feed auto-block failed: %v", err))
+							continue
+						}
+						trafficLogger.Log("BLOCK", entry.SrcIP, entry.DstIP, entry.Protocol, fmt.Sprintf("Malicious feed auto-block enforced for %s (%s)", matchedIP, direction))
 					}
 				}
 			}()
@@ -471,6 +479,22 @@ func extractMatchedFeedIP(detail string) string {
 		return ""
 	}
 	return candidate
+}
+
+func classifyFeedMatchDirection(srcIP, dstIP, matchedIP string) string {
+	src := strings.TrimSpace(srcIP)
+	dst := strings.TrimSpace(dstIP)
+	matched := strings.TrimSpace(matchedIP)
+	if matched == "" {
+		return "connection"
+	}
+	if strings.EqualFold(matched, src) {
+		return "inbound/source"
+	}
+	if strings.EqualFold(matched, dst) {
+		return "outbound/destination"
+	}
+	return "connection"
 }
 
 func defaultCaptureInterface() string {
