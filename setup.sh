@@ -145,6 +145,16 @@ echo -e "${GREEN}[+] Data directories created${NC}"
 # 7. Install systemd service (optional)
 install_service() {
     echo -e "${YELLOW}[*] Installing systemd service...${NC}"
+
+    local WEB_INSTALL_ROOT="/usr/local/share/kaliwall"
+    local WEB_INSTALL_DIR="${WEB_INSTALL_ROOT}/web"
+
+    echo -e "${YELLOW}[*] Installing web assets to ${WEB_INSTALL_DIR}...${NC}"
+    run_as_root mkdir -p "${WEB_INSTALL_ROOT}"
+    run_as_root rm -rf "${WEB_INSTALL_DIR}"
+    run_as_root mkdir -p "${WEB_INSTALL_DIR}"
+    run_as_root cp -a "${SCRIPT_DIR}/web/." "${WEB_INSTALL_DIR}/"
+
     cat > /tmp/kaliwall.service <<EOF
 [Unit]
 Description=KaliWall Firewall
@@ -154,6 +164,7 @@ After=network.target
 Type=simple
 WorkingDirectory=${SCRIPT_DIR}
 ExecStart=${SCRIPT_DIR}/kaliwall
+Environment=KALIWALL_WEB_DIR=${WEB_INSTALL_DIR}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

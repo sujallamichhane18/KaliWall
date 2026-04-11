@@ -20,6 +20,9 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Keep web UI path explicit so startup remains stable even if cwd handling changes.
+export KALIWALL_WEB_DIR="${KALIWALL_WEB_DIR:-${SCRIPT_DIR}/web}"
+
 PID_FILE="kaliwall.pid"
 LOG_FILE="logs/kaliwall-daemon.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))

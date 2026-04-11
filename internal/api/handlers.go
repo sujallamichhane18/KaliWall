@@ -9,6 +9,9 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -189,12 +192,120 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/ai/status", h.handleAIStatus)
 	mux.HandleFunc("/api/v1/ai/explain", h.handleAIExplain)
 	mux.HandleFunc("/api/v1/ai/suggest-rule", h.handleAISuggestRule)
+	mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/web/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+	})
 
-	// Serve web UI from the "web" directory
-	fs := http.FileServer(http.Dir("web"))
-	mux.Handle("/", fs)
+	// Serve web UI with a resilient resolver so the daemon can run from any working directory.
+	webDir := resolveWebDir()
+	if webDir == "" {
+		log.Printf("Web UI assets not found. Set KALIWALL_WEB_DIR or place a 'web' folder near the executable")
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("KaliWall web assets not found. Set KALIWALL_WEB_DIR to the web directory."))
+		})
+		return withRecovery(mux)
+	}
+
+	log.Printf("Web UI assets: %s", webDir)
+	fileServer := http.FileServer(http.Dir(webDir))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
+			return
+		}
+
+		cleanedURLPath := path.Clean("/" + r.URL.Path)
+		requested := strings.TrimPrefix(cleanedURLPath, "/")
+		if requested == "" {
+			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
+			return
+		}
+
+		if stat, err := os.Stat(filepath.Join(webDir, filepath.FromSlash(requested))); err == nil {
+			if stat.IsDir() {
+				index := filepath.Join(webDir, filepath.FromSlash(requested), "index.html")
+				if _, err := os.Stat(index); err == nil {
+					fileServer.ServeHTTP(w, r)
+					return
+				}
+			} else {
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		// Fallback to index.html for client-side routes without a file extension.
+		if !strings.Contains(path.Base(cleanedURLPath), ".") {
+			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
+			return
+		}
+
+		fileServer.ServeHTTP(w, r)
+	})
 
 	return withRecovery(mux)
+}
+
+func resolveWebDir() string {
+	candidates := make([]string, 0, 8)
+
+	if envPath := strings.TrimSpace(os.Getenv("KALIWALL_WEB_DIR")); envPath != "" {
+		candidates = append(candidates, envPath)
+	}
+
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "web"))
+	}
+
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "web"),
+			filepath.Join(exeDir, "..", "web"),
+			filepath.Join(exeDir, "..", "share", "kaliwall", "web"),
+		)
+	}
+
+	candidates = append(candidates,
+		"/usr/local/share/kaliwall/web",
+		"/usr/share/kaliwall/web",
+	)
+
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			abs = candidate
+		}
+		if _, ok := seen[abs]; ok {
+			continue
+		}
+		seen[abs] = struct{}{}
+
+		indexPath := filepath.Join(abs, "index.html")
+		if info, err := os.Stat(indexPath); err == nil && !info.IsDir() {
+			return abs
+		}
+	}
+
+	return ""
 }
 
 func (h *handlers) handleDPIControl(w http.ResponseWriter, r *http.Request) {
