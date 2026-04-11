@@ -490,13 +490,31 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		windowMinutes = 15
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
+	snapshot := models.TrafficAnomalySnapshot{
+		GeneratedAt:    now,
+		WindowMinutes:  windowMinutes,
+		SampleSize:     0,
+		RiskScore:      0,
+		Status:         "normal",
+		TotalAnomalies: 0,
+		Anomalies:      []models.TrafficAnomaly{},
+	}
+
+	if h == nil || h.logger == nil || h.fw == nil {
+		return snapshot
+	}
+
 	windowDuration := time.Duration(windowMinutes) * time.Minute
 	windowStart := now.Add(-windowDuration)
 	prevWindowStart := windowStart.Add(-windowDuration)
 
 	entries := h.logger.RecentEntries(limit)
 	conns := h.fw.ActiveConnections()
+	snapshot.SampleSize = len(entries)
+	if len(entries) == 0 {
+		return snapshot
+	}
 
 	minuteTotals := make(map[int64]int)
 	windowTotal := 0
@@ -506,6 +524,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	prevBlocked := 0
 	prevSuspicious := 0
 	sourceWindow := make(map[string]int)
+	prevSourceWindow := make(map[string]int)
 	windowProtocolCounts := make(map[string]int)
 	prevProtocolCounts := make(map[string]int)
 	sourcePorts := make(map[string]map[string]struct{})
@@ -513,6 +532,8 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	sourceTotal := make(map[string]int)
 	sourceBlocked := make(map[string]int)
 	sourceSuspicious := make(map[string]int)
+	destinationWindow := make(map[string]int)
+	destinationRiskWindow := make(map[string]int)
 
 	firstSeen := time.Time{}
 	lastSeen := time.Time{}
@@ -548,6 +569,9 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			}
 			if proto != "" {
 				prevProtocolCounts[proto]++
+			}
+			if src != "" {
+				prevSourceWindow[src]++
 			}
 			continue
 		}
@@ -585,6 +609,13 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 				sourcePorts[src][dstPort] = struct{}{}
 			}
 		}
+
+		if dst != "" {
+			destinationWindow[dst]++
+			if isBlocked || isSuspicious {
+				destinationRiskWindow[dst]++
+			}
+		}
 	}
 
 	type fanoutStat struct {
@@ -615,20 +646,41 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	currentMinuteCount := minuteTotals[currentBucket]
 	historyCounts := make([]int, 0, len(minuteTotals))
 	for bucket, count := range minuteTotals {
-		if bucket == currentBucket {
+		if bucket == currentBucket || count <= 0 {
 			continue
 		}
 		historyCounts = append(historyCounts, count)
 	}
 	meanPerMin, stdPerMin := intSeriesStats(historyCounts)
+	zScore := 0.0
+	if meanPerMin > 0 {
+		if stdPerMin > 0 {
+			zScore = (float64(currentMinuteCount) - meanPerMin) / stdPerMin
+		} else {
+			zScore = (float64(currentMinuteCount) - meanPerMin) / math.Max(1, meanPerMin*0.4)
+		}
+		if zScore < 0 {
+			zScore = 0
+		}
+	}
+	burstRatio := 0.0
+	if meanPerMin > 0 {
+		burstRatio = float64(currentMinuteCount) / (meanPerMin + 1)
+	} else if currentMinuteCount > 0 {
+		burstRatio = float64(currentMinuteCount)
+	}
 
-	anomalies := make([]models.TrafficAnomaly, 0, 6)
+	anomalies := make([]models.TrafficAnomaly, 0, 14)
 	idx := 1
 	appendAnomaly := func(kind string, severity string, score int, title string, summary string, sampleCount int, baseline float64, current float64, evidence map[string]interface{}) {
+		sev := strings.ToLower(strings.TrimSpace(severity))
+		if sev != "critical" && sev != "warning" {
+			sev = "warning"
+		}
 		anomalies = append(anomalies, models.TrafficAnomaly{
 			ID:            fmt.Sprintf("%s-%d", kind, idx),
 			Type:          kind,
-			Severity:      severity,
+			Severity:      sev,
 			Score:         clampInt(score, 1, 100),
 			Title:         title,
 			Summary:       summary,
@@ -642,61 +694,45 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		idx++
 	}
 
-	if currentMinuteCount >= 18 {
-		if meanPerMin > 0 {
-			threshold := meanPerMin + 2*math.Max(stdPerMin, 3)
-			if float64(currentMinuteCount) > threshold {
-				severity := "warning"
-				if float64(currentMinuteCount) > threshold*1.35 {
-					severity = "critical"
-				}
-				score := int(40 + (float64(currentMinuteCount)-threshold)*2.5)
-				appendAnomaly(
-					"traffic_spike",
-					severity,
-					score,
-					"Traffic Spike Detected",
-					fmt.Sprintf("Current minute traffic (%d events) is significantly above historical baseline (%.1f/min).", currentMinuteCount, meanPerMin),
-					currentMinuteCount,
-					meanPerMin,
-					float64(currentMinuteCount),
-					map[string]interface{}{
-						"current_minute_events": currentMinuteCount,
-						"baseline_avg_per_min": meanPerMin,
-						"baseline_stddev":      stdPerMin,
-						"window_minutes":       windowMinutes,
-					},
-				)
+	if currentMinuteCount >= 16 {
+		if (meanPerMin > 0 && zScore >= 2.4) || (burstRatio >= 2.2 && currentMinuteCount >= 24) {
+			severity := "warning"
+			if zScore >= 4.0 || burstRatio >= 3.4 {
+				severity = "critical"
 			}
-		} else if currentMinuteCount >= 40 {
+			score := int(34 + zScore*14 + math.Max(0, burstRatio-1.0)*10)
 			appendAnomaly(
 				"traffic_spike",
-				"warning",
-				60,
+				severity,
+				score,
 				"Traffic Spike Detected",
-				fmt.Sprintf("Current minute traffic is elevated (%d events) with no stable baseline yet.", currentMinuteCount),
+				fmt.Sprintf("Current minute traffic (%d events) exceeds baseline (%.1f/min, z=%.2f).", currentMinuteCount, meanPerMin, zScore),
 				currentMinuteCount,
-				0,
+				meanPerMin,
 				float64(currentMinuteCount),
 				map[string]interface{}{
 					"current_minute_events": currentMinuteCount,
+					"baseline_avg_per_min": meanPerMin,
+					"baseline_stddev":      stdPerMin,
+					"z_score":              zScore,
+					"burst_ratio":          burstRatio,
 					"window_minutes":       windowMinutes,
 				},
 			)
 		}
 	}
 
-	if prevTotal >= 20 && windowTotal >= 45 {
+	if prevTotal >= 20 && windowTotal >= 36 {
 		growth := float64(windowTotal) / float64(prevTotal)
-		if growth >= 1.8 && (windowTotal-prevTotal) >= 25 {
+		if growth >= 1.55 && (windowTotal-prevTotal) >= 18 {
 			severity := "warning"
-			if growth >= 2.6 {
+			if growth >= 2.35 {
 				severity = "critical"
 			}
 			appendAnomaly(
 				"window_growth",
 				severity,
-				int(35+(growth-1.0)*24),
+				int(30+(growth-1.0)*30),
 				"Traffic Window Growth",
 				fmt.Sprintf("Recent %d-minute traffic volume increased %.1fx versus the previous window (%d -> %d events).", windowMinutes, growth, prevTotal, windowTotal),
 				windowTotal,
@@ -712,17 +748,17 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if windowTotal >= 30 {
+	if windowTotal >= 24 {
 		blockedRatio := float64(windowBlocked) / float64(windowTotal)
-		if blockedRatio >= 0.56 {
+		if blockedRatio >= 0.46 && windowBlocked >= 12 {
 			severity := "warning"
-			if blockedRatio >= 0.75 {
+			if blockedRatio >= 0.68 {
 				severity = "critical"
 			}
 			appendAnomaly(
 				"blocked_ratio_spike",
 				severity,
-				int(blockedRatio*110),
+				int(32 + blockedRatio*95 + float64(windowBlocked)/4),
 				"Blocked Ratio Surge",
 				fmt.Sprintf("%d of %d recent events were blocked/rejected (%.1f%%).", windowBlocked, windowTotal, blockedRatio*100),
 				windowTotal,
@@ -737,19 +773,19 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if prevTotal >= 20 && windowTotal >= 30 {
+	if prevTotal >= 20 && windowTotal >= 24 {
 		prevBlockedRatio := float64(prevBlocked) / float64(prevTotal)
 		blockedRatio := float64(windowBlocked) / float64(windowTotal)
 		delta := blockedRatio - prevBlockedRatio
-		if blockedRatio >= 0.45 && delta >= 0.18 && windowBlocked >= 18 {
+		if blockedRatio >= 0.38 && delta >= 0.14 && windowBlocked >= 10 {
 			severity := "warning"
-			if blockedRatio >= 0.65 || delta >= 0.30 {
+			if blockedRatio >= 0.58 || delta >= 0.26 {
 				severity = "critical"
 			}
 			appendAnomaly(
 				"blocked_ratio_escalation",
 				severity,
-				int(42+blockedRatio*70+delta*110),
+				int(34 + blockedRatio*72 + delta*120),
 				"Blocked Ratio Escalation",
 				fmt.Sprintf("Blocked ratio rose from %.1f%% to %.1f%% across consecutive %d-minute windows.", prevBlockedRatio*100, blockedRatio*100, windowMinutes),
 				windowTotal,
@@ -765,7 +801,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if windowTotal >= 30 && len(sourceWindow) > 0 {
+	if windowTotal >= 26 && len(sourceWindow) > 0 {
 		topSource := ""
 		topHits := 0
 		for src, hits := range sourceWindow {
@@ -774,26 +810,31 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 				topHits = hits
 			}
 		}
-		if topHits >= 12 {
+		if topHits >= 10 {
 			share := float64(topHits) / float64(windowTotal)
-			if share >= 0.34 {
+			prevShare := 0.0
+			if prevTotal > 0 {
+				prevShare = float64(prevSourceWindow[topSource]) / float64(prevTotal)
+			}
+			if share >= 0.30 && (prevTotal < 20 || (share-prevShare) >= 0.12 || share >= 0.42) {
 				severity := "warning"
-				if share >= 0.5 {
+				if share >= 0.52 {
 					severity = "critical"
 				}
 				appendAnomaly(
 					"source_concentration",
 					severity,
-					int(share*120)+topHits/2,
+					int(30+share*96+float64(topHits)/1.8),
 					"Single Source Concentration",
 					fmt.Sprintf("Source %s accounts for %.1f%% of recent traffic (%d/%d events).", topSource, share*100, topHits, windowTotal),
 					topHits,
-					0.2,
+					prevShare,
 					share,
 					map[string]interface{}{
 						"source_ip":      topSource,
 						"source_hits":    topHits,
 						"window_total":   windowTotal,
+						"previous_share": prevShare,
 						"window_minutes": windowMinutes,
 					},
 				)
@@ -801,17 +842,17 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if windowTotal >= 30 && windowSuspicious >= 10 {
+	if windowTotal >= 24 && windowSuspicious >= 8 {
 		suspiciousRatio := float64(windowSuspicious) / float64(windowTotal)
-		if suspiciousRatio >= 0.25 {
+		if suspiciousRatio >= 0.22 {
 			severity := "warning"
-			if suspiciousRatio >= 0.4 {
+			if suspiciousRatio >= 0.35 {
 				severity = "critical"
 			}
 			appendAnomaly(
 				"suspicious_payload_burst",
 				severity,
-				int(45 + suspiciousRatio*80),
+				int(34 + suspiciousRatio*92),
 				"Suspicious Payload Burst",
 				fmt.Sprintf("%d events in the analysis window include suspicious markers (%.1f%%).", windowSuspicious, suspiciousRatio*100),
 				windowSuspicious,
@@ -826,7 +867,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if windowTotal >= 60 && len(windowProtocolCounts) > 0 {
+	if windowTotal >= 50 && len(windowProtocolCounts) > 0 {
 		topProto := ""
 		topCount := 0
 		for proto, count := range windowProtocolCounts {
@@ -841,15 +882,16 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			if prevTotal > 0 {
 				prevShare = float64(prevProtocolCounts[topProto]) / float64(prevTotal)
 			}
-			if share >= 0.72 && (prevTotal < 30 || prevShare <= 0.50 || (share-prevShare) >= 0.20) {
+			entropy, normalizedEntropy := protocolEntropy(windowProtocolCounts)
+			if share >= 0.66 && (prevTotal < 30 || prevShare <= 0.48 || (share-prevShare) >= 0.14 || normalizedEntropy <= 0.54) {
 				severity := "warning"
-				if share >= 0.86 || (share-prevShare) >= 0.34 {
+				if share >= 0.82 || (share-prevShare) >= 0.30 {
 					severity = "critical"
 				}
 				appendAnomaly(
 					"protocol_dominance",
 					severity,
-					int(36 + share*74 + (share-prevShare)*38),
+					int(34 + share*70 + (share-prevShare)*48 + (1-normalizedEntropy)*20),
 					"Protocol Dominance Shift",
 					fmt.Sprintf("%s now represents %.1f%% of recent traffic (%d/%d), indicating a potential flood or focused abuse pattern.", topProto, share*100, topCount, windowTotal),
 					topCount,
@@ -860,7 +902,33 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 						"current_share":    share,
 						"previous_share":   prevShare,
 						"current_events":   topCount,
+						"entropy":          entropy,
+						"normalized_entropy": normalizedEntropy,
 						"window_minutes":   windowMinutes,
+					},
+				)
+			}
+
+			if len(windowProtocolCounts) >= 2 && normalizedEntropy <= 0.50 && share >= 0.68 {
+				severity := "warning"
+				if normalizedEntropy <= 0.34 || share >= 0.82 {
+					severity = "critical"
+				}
+				appendAnomaly(
+					"protocol_entropy_collapse",
+					severity,
+					int(30 + (1-normalizedEntropy)*88 + share*24),
+					"Protocol Entropy Collapse",
+					fmt.Sprintf("Protocol mix diversity collapsed (entropy %.2f, normalized %.2f) with %s at %.1f%% share.", entropy, normalizedEntropy, topProto, share*100),
+					topCount,
+					1,
+					normalizedEntropy,
+					map[string]interface{}{
+						"protocol":            topProto,
+						"dominant_share":      share,
+						"entropy":             entropy,
+						"normalized_entropy":  normalizedEntropy,
+						"window_minutes":      windowMinutes,
 					},
 				)
 			}
@@ -879,13 +947,13 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		portCount := len(portsSet)
 		targetCount := len(sourceTargets[src])
 		events := sourceTotal[src]
-		if events < 16 || portCount < 10 {
+		if events < 14 || portCount < 8 {
 			continue
 		}
-		if targetCount < 6 && portCount < 14 {
+		if targetCount < 5 && portCount < 12 {
 			continue
 		}
-		weight := portCount*3 + targetCount*2 + events/2
+		weight := portCount*3 + targetCount*2 + events/2 + sourceBlocked[src]
 		if weight > bestScanWeight {
 			bestScanWeight = weight
 			bestScan = scanCandidate{SourceIP: src, UniquePorts: portCount, UniqueTargets: targetCount, Events: events}
@@ -893,13 +961,13 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 	if bestScan.SourceIP != "" {
 		severity := "warning"
-		if bestScan.UniquePorts >= 20 || bestScan.UniqueTargets >= 14 {
+		if bestScan.UniquePorts >= 18 || bestScan.UniqueTargets >= 12 {
 			severity = "critical"
 		}
 		appendAnomaly(
 			"source_port_scan",
 			severity,
-			int(40 + float64(bestScan.UniquePorts)*2.2 + float64(bestScan.UniqueTargets)*1.7),
+			int(34 + float64(bestScan.UniquePorts)*2.4 + float64(bestScan.UniqueTargets)*1.8),
 			"Distributed Port Scan Behavior",
 			fmt.Sprintf("Source %s touched %d destination ports across %d targets within %d observed events.", bestScan.SourceIP, bestScan.UniquePorts, bestScan.UniqueTargets, bestScan.Events),
 			bestScan.Events,
@@ -915,6 +983,57 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 	}
 
+	type sweepCandidate struct {
+		SourceIP       string
+		UniqueTargets  int
+		Events         int
+		RiskHits       int
+		TargetPerEvent float64
+	}
+	bestSweep := sweepCandidate{}
+	bestSweepWeight := 0
+	for src, targetsSet := range sourceTargets {
+		targetCount := len(targetsSet)
+		events := sourceTotal[src]
+		riskHits := sourceBlocked[src] + sourceSuspicious[src]
+		if events < 16 || targetCount < 10 {
+			continue
+		}
+		targetRatio := safeRatio(float64(targetCount), float64(events))
+		if targetRatio < 0.34 && targetCount < 14 {
+			continue
+		}
+		weight := targetCount*3 + riskHits*2 + events/2
+		if weight > bestSweepWeight {
+			bestSweepWeight = weight
+			bestSweep = sweepCandidate{SourceIP: src, UniqueTargets: targetCount, Events: events, RiskHits: riskHits, TargetPerEvent: targetRatio}
+		}
+	}
+	if bestSweep.SourceIP != "" {
+		severity := "warning"
+		if bestSweep.UniqueTargets >= 22 || bestSweep.TargetPerEvent >= 0.75 {
+			severity = "critical"
+		}
+		appendAnomaly(
+			"source_target_sweep",
+			severity,
+			int(32 + float64(bestSweep.UniqueTargets)*2.1 + float64(bestSweep.RiskHits)*1.4),
+			"Source Target Sweep",
+			fmt.Sprintf("Source %s contacted %d unique destinations across %d events (risk hits: %d).", bestSweep.SourceIP, bestSweep.UniqueTargets, bestSweep.Events, bestSweep.RiskHits),
+			bestSweep.Events,
+			0.25,
+			bestSweep.TargetPerEvent,
+			map[string]interface{}{
+				"source_ip":            bestSweep.SourceIP,
+				"unique_destinations":  bestSweep.UniqueTargets,
+				"source_event_count":   bestSweep.Events,
+				"risk_hits":            bestSweep.RiskHits,
+				"target_per_event":     bestSweep.TargetPerEvent,
+				"window_minutes":       windowMinutes,
+			},
+		)
+	}
+
 	type offenderCandidate struct {
 		SourceIP    string
 		Total       int
@@ -924,17 +1043,17 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	bestOffender := offenderCandidate{}
 	bestOffenderWeight := 0
 	for src, total := range sourceTotal {
-		if total < 18 {
+		if total < 14 {
 			continue
 		}
 		blockedHits := sourceBlocked[src]
 		suspiciousHits := sourceSuspicious[src]
-		if blockedHits < 12 {
+		if blockedHits < 8 {
 			continue
 		}
 		riskHits := blockedHits + suspiciousHits
 		ratio := float64(riskHits) / float64(total)
-		if ratio < 0.72 {
+		if ratio < 0.62 {
 			continue
 		}
 		weight := blockedHits*3 + suspiciousHits*2 + total/2
@@ -946,13 +1065,13 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	if bestOffender.SourceIP != "" {
 		riskRatio := float64(bestOffender.Blocked+bestOffender.Suspicious) / float64(bestOffender.Total)
 		severity := "warning"
-		if riskRatio >= 0.88 || bestOffender.Blocked >= 24 {
+		if riskRatio >= 0.84 || bestOffender.Blocked >= 18 {
 			severity = "critical"
 		}
 		appendAnomaly(
 			"repeat_offender",
 			severity,
-			int(38+riskRatio*85+float64(bestOffender.Blocked)*1.3),
+			int(34 + riskRatio*86 + float64(bestOffender.Blocked)*1.5),
 			"Repeat Offender Source",
 			fmt.Sprintf("Source %s generated %d high-risk events (%d blocked, %d suspicious) out of %d total events.", bestOffender.SourceIP, bestOffender.Blocked+bestOffender.Suspicious, bestOffender.Blocked, bestOffender.Suspicious, bestOffender.Total),
 			bestOffender.Total,
@@ -969,6 +1088,50 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 	}
 
+	windowRiskHits := windowBlocked + windowSuspicious
+	if windowTotal >= 30 && len(destinationWindow) > 0 {
+		topDst := ""
+		topHits := 0
+		for dst, hits := range destinationWindow {
+			if hits > topHits {
+				topDst = dst
+				topHits = hits
+			}
+		}
+		if topDst != "" && topHits >= 12 {
+			riskHits := destinationRiskWindow[topDst]
+			share := safeRatio(float64(topHits), float64(windowTotal))
+			riskShare := 0.0
+			if windowRiskHits > 0 {
+				riskShare = safeRatio(float64(riskHits), float64(windowRiskHits))
+			}
+			if share >= 0.36 || (riskHits >= 8 && riskShare >= 0.45) {
+				severity := "warning"
+				if share >= 0.54 || riskShare >= 0.72 {
+					severity = "critical"
+				}
+				appendAnomaly(
+					"destination_hotspot",
+					severity,
+					int(30 + share*86 + riskShare*44),
+					"Destination Hotspot Pressure",
+					fmt.Sprintf("Destination %s accounted for %d/%d events (%.1f%%), with %d high-risk hits.", topDst, topHits, windowTotal, share*100, riskHits),
+					topHits,
+					0.2,
+					share,
+					map[string]interface{}{
+						"destination_ip":      topDst,
+						"destination_hits":    topHits,
+						"destination_share":   share,
+						"risk_hits":           riskHits,
+						"risk_share":          riskShare,
+						"window_minutes":      windowMinutes,
+					},
+				)
+			}
+		}
+	}
+
 	halfOpen := 0
 	for _, c := range conns {
 		state := strings.ToUpper(strings.TrimSpace(c.State))
@@ -976,17 +1139,17 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			halfOpen++
 		}
 	}
-	if len(conns) >= 70 && halfOpen >= 24 {
+	if len(conns) >= 28 && halfOpen >= 10 {
 		halfOpenRatio := float64(halfOpen) / float64(len(conns))
-		if halfOpenRatio >= 0.32 {
+		if halfOpenRatio >= 0.28 {
 			severity := "warning"
-			if halfOpenRatio >= 0.48 {
+			if halfOpenRatio >= 0.45 {
 				severity = "critical"
 			}
 			appendAnomaly(
 				"half_open_connection_pressure",
 				severity,
-				int(35 + halfOpenRatio*95),
+				int(30 + halfOpenRatio*100),
 				"Half-open Connection Pressure",
 				fmt.Sprintf("%d of %d active connections are in SYN handshake states, consistent with connection-flood behavior.", halfOpen, len(conns)),
 				halfOpen,
@@ -1001,15 +1164,15 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if maxFanout.Ports >= 12 {
+	if maxFanout.Ports >= 10 {
 		severity := "warning"
-		if maxFanout.Ports >= 20 {
+		if maxFanout.Ports >= 18 {
 			severity = "critical"
 		}
 		appendAnomaly(
 			"port_fanout",
 			severity,
-			int(40+float64(maxFanout.Ports)*2.4),
+			int(34 + float64(maxFanout.Ports)*2.6),
 			"Port Fanout Pattern",
 			fmt.Sprintf("Remote %s is connected across %d local ports, suggesting broad probing behavior.", maxFanout.IP, maxFanout.Ports),
 			maxFanout.Ports,
@@ -1026,46 +1189,145 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	sort.SliceStable(anomalies, func(i, j int) bool {
 		return anomalies[i].Score > anomalies[j].Score
 	})
-
-	riskScore := 0
-	if len(anomalies) > 0 {
-		weightedTotal := 0.0
-		maxScore := 0
-		for _, a := range anomalies {
-			severityWeight := 1.0
-			if a.Severity == "critical" {
-				severityWeight = 1.34
-			} else if a.Severity == "warning" {
-				severityWeight = 1.08
-			}
-			weightedTotal += float64(a.Score) * severityWeight
-			if a.Score > maxScore {
-				maxScore = a.Score
-			}
-		}
-		avgWeighted := weightedTotal / float64(len(anomalies))
-		riskScore = clampInt(int(math.Round(avgWeighted*0.62+float64(maxScore)*0.38+float64(len(anomalies)-1)*3.5)), 0, 100)
+	if len(anomalies) > 14 {
+		anomalies = anomalies[:14]
 	}
+
+	riskScore := calculateAnomalyRiskScore(anomalies, windowTotal, windowBlocked, windowSuspicious, currentMinuteCount, meanPerMin, stdPerMin)
 
 	status := "normal"
 	switch {
-	case riskScore >= 78:
+	case riskScore >= 82:
 		status = "critical"
-	case riskScore >= 56:
+	case riskScore >= 60:
 		status = "high"
-	case riskScore >= 32:
+	case riskScore >= 35:
 		status = "elevated"
 	}
 
-	return models.TrafficAnomalySnapshot{
-		GeneratedAt:    now,
-		WindowMinutes:  windowMinutes,
-		SampleSize:     len(entries),
-		RiskScore:      riskScore,
-		Status:         status,
-		TotalAnomalies: len(anomalies),
-		Anomalies:      anomalies,
+	snapshot.RiskScore = riskScore
+	snapshot.Status = status
+	snapshot.TotalAnomalies = len(anomalies)
+	snapshot.Anomalies = anomalies
+	return snapshot
+}
+
+func calculateAnomalyRiskScore(anomalies []models.TrafficAnomaly, windowTotal int, windowBlocked int, windowSuspicious int, currentMinuteCount int, meanPerMin float64, stdPerMin float64) int {
+	if len(anomalies) == 0 {
+		base := 0.0
+		if windowTotal > 0 {
+			blockedRatio := safeRatio(float64(windowBlocked), float64(windowTotal))
+			suspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
+			base += blockedRatio*18 + suspiciousRatio*12
+		}
+		if meanPerMin > 0 {
+			threshold := meanPerMin + math.Max(stdPerMin*1.8, 2.5)
+			if float64(currentMinuteCount) > threshold {
+				base += math.Min(12, (float64(currentMinuteCount)-threshold)*0.9)
+			}
+		}
+		return clampInt(int(math.Round(base)), 0, 100)
 	}
+
+	criticalCount := 0
+	warningCount := 0
+	weightedTotal := 0.0
+	maxScore := 0
+	for _, a := range anomalies {
+		w := 1.0
+		if a.Severity == "critical" {
+			criticalCount++
+			w = 1.35
+		} else if a.Severity == "warning" {
+			warningCount++
+			w = 1.12
+		}
+		weightedTotal += float64(a.Score) * w
+		if a.Score > maxScore {
+			maxScore = a.Score
+		}
+	}
+	weightedAvg := weightedTotal / float64(len(anomalies))
+	topMean := meanTopAnomalyScores(anomalies, 3)
+
+	severityPressure := float64(criticalCount*15 + warningCount*8 + len(anomalies)*3)
+	behaviorPressure := 0.0
+	if windowTotal > 0 {
+		blockedRatio := safeRatio(float64(windowBlocked), float64(windowTotal))
+		suspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
+		behaviorPressure = blockedRatio*28 + suspiciousRatio*20
+	}
+	volatilityPressure := 0.0
+	if meanPerMin > 0 {
+		threshold := meanPerMin + math.Max(stdPerMin*1.8, 2.5)
+		if float64(currentMinuteCount) > threshold {
+			volatilityPressure = math.Min(14, (float64(currentMinuteCount)-threshold)*0.9)
+		}
+	}
+
+	composite := weightedAvg*0.36 + float64(maxScore)*0.30 + topMean*0.18 + severityPressure*0.22 + behaviorPressure + volatilityPressure
+	if len(anomalies) >= 5 {
+		composite += 6
+	}
+	if criticalCount >= 2 {
+		composite += 7
+	}
+
+	return clampInt(int(math.Round(composite)), 0, 100)
+}
+
+func meanTopAnomalyScores(anomalies []models.TrafficAnomaly, topN int) float64 {
+	if len(anomalies) == 0 || topN <= 0 {
+		return 0
+	}
+	if topN > len(anomalies) {
+		topN = len(anomalies)
+	}
+	total := 0
+	for i := 0; i < topN; i++ {
+		total += anomalies[i].Score
+	}
+	return float64(total) / float64(topN)
+}
+
+func protocolEntropy(protocolCounts map[string]int) (float64, float64) {
+	if len(protocolCounts) == 0 {
+		return 0, 0
+	}
+	total := 0
+	for _, c := range protocolCounts {
+		total += c
+	}
+	if total <= 0 {
+		return 0, 0
+	}
+	entropy := 0.0
+	for _, c := range protocolCounts {
+		if c <= 0 {
+			continue
+		}
+		p := float64(c) / float64(total)
+		entropy -= p * math.Log2(p)
+	}
+	maxEntropy := math.Log2(float64(len(protocolCounts)))
+	if maxEntropy <= 0 {
+		return entropy, 1
+	}
+	normalized := entropy / maxEntropy
+	if normalized < 0 {
+		normalized = 0
+	}
+	if normalized > 1 {
+		normalized = 1
+	}
+	return entropy, normalized
+}
+
+func safeRatio(numerator float64, denominator float64) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return numerator / denominator
 }
 
 func normalizeTrafficIP(ip string) string {
@@ -1114,6 +1376,34 @@ func parseDestinationPortFromDetail(detail string) string {
 		}
 	}
 
+	// Support netmon connection details: "... -> 203.0.113.10:443 (...)" or with unicode arrow.
+	arrowMarkers := []string{"->", "→"}
+	for _, marker := range arrowMarkers {
+		idx := strings.LastIndex(detail, marker)
+		if idx < 0 {
+			continue
+		}
+		tail := strings.TrimSpace(detail[idx+len(marker):])
+		if tail == "" {
+			continue
+		}
+		token := tail
+		if cut := strings.IndexAny(token, " \t("); cut >= 0 {
+			token = token[:cut]
+		}
+		if token == "" {
+			continue
+		}
+		colon := strings.LastIndex(token, ":")
+		if colon < 0 || colon+1 >= len(token) {
+			continue
+		}
+		candidate := strings.TrimSpace(token[colon+1:])
+		if v, err := strconv.Atoi(candidate); err == nil && v >= 1 && v <= 65535 {
+			return strconv.Itoa(v)
+		}
+	}
+
 	return ""
 }
 
@@ -1127,7 +1417,10 @@ func isSuspiciousDetail(detail string) bool {
 	if d == "" {
 		return false
 	}
-	keywords := []string{"suspicious", "malicious", "malware", "exploit", "attack", "bruteforce", "scan", "dns tunneling", "c2", "exfil", "payload"}
+	keywords := []string{
+		"suspicious", "malicious", "malware", "exploit", "attack", "bruteforce", "scan", "dns tunneling", "c2", "command-and-control", "exfil", "payload",
+		"sql injection", "sqli", "xss", "rce", "botnet", "beacon", "flood", "port sweep", "malicious ip feed match",
+	}
 	for _, kw := range keywords {
 		if strings.Contains(d, kw) {
 			return true

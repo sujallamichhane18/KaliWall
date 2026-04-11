@@ -105,3 +105,57 @@ func TestBuildTrafficAnomalySnapshotDetectsSourcePortScan(t *testing.T) {
 		t.Fatalf("expected source_port_scan anomaly, got %#v", snapshot.Anomalies)
 	}
 }
+
+func TestBuildTrafficAnomalySnapshotDetectsSourceTargetSweep(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	for i := 0; i < 70; i++ {
+		dst := fmt.Sprintf("10.0.1.%d", (i%35)+1)
+		h.logger.Log("BLOCK", "203.0.113.77", dst, "tcp", "scanner sweep dst_port=443 suspicious payload")
+	}
+	for i := 0; i < 22; i++ {
+		h.logger.Log("ALLOW", fmt.Sprintf("198.51.100.%d", i+1), "10.0.0.30", "udp", "dns lookup")
+	}
+
+	snapshot := h.buildTrafficAnomalySnapshot(700, 15)
+	if snapshot.TotalAnomalies == 0 {
+		t.Fatalf("expected anomalies, got none")
+	}
+
+	found := false
+	for _, a := range snapshot.Anomalies {
+		if a.Type == "source_target_sweep" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected source_target_sweep anomaly, got %#v", snapshot.Anomalies)
+	}
+}
+
+func TestBuildTrafficAnomalySnapshotRiskScoreBoundedAndElevated(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	for i := 0; i < 220; i++ {
+		dst := fmt.Sprintf("10.2.%d.%d", i%12, (i%40)+1)
+		dstPort := 1000 + (i % 55)
+		h.logger.Log("BLOCK", "203.0.113.240", dst, "tcp", fmt.Sprintf("aggressive scan probe dst_port=%d suspicious payload", dstPort))
+	}
+	for i := 0; i < 40; i++ {
+		h.logger.Log("ALLOW", fmt.Sprintf("198.51.100.%d", i+1), "10.0.0.11", "udp", "normal dns lookup")
+	}
+
+	snapshot := h.buildTrafficAnomalySnapshot(1200, 15)
+	if snapshot.RiskScore < 0 || snapshot.RiskScore > 100 {
+		t.Fatalf("expected risk score to be clamped within 0..100, got %d", snapshot.RiskScore)
+	}
+	if snapshot.RiskScore < 55 {
+		t.Fatalf("expected elevated/high risk score for sustained attack pattern, got %d", snapshot.RiskScore)
+	}
+	if snapshot.Status == "normal" {
+		t.Fatalf("expected non-normal status under attack load, got %q", snapshot.Status)
+	}
+}
