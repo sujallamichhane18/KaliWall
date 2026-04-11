@@ -2753,3 +2753,37 @@ body::after {
         margin-bottom: 12px;
     }
 }
+
+/* ---------- Professional Motion Tuning ---------- */
+.status-dot,
+.soc-live i,
+.live-indicator .live-dot,
+body::after,
+.threat-line,
+.page {
+    animation: none;
+}
+
+.btn-refresh:hover {
+    transform: none;
+}
+
+.threat-line {
+    opacity: 0.45;
+    stroke-width: 1.2;
+}
+
+.log-new {
+    animation: highlightLog 0.9s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
