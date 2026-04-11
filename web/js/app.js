@@ -121,7 +121,6 @@
         threats: "Threat Intelligence",
         websites: "Website Blocking",
         logs: "Traffic Logs",
-        "ai-explain": "AI Explain",
         settings: "Settings",
     };
 
@@ -191,9 +190,6 @@
                 break;
             case "logs":
                 loadLogs();
-                break;
-            case "ai-explain":
-                loadAIApiKeySettings();
                 break;
             case "settings":
                 loadSettings();
@@ -2383,9 +2379,15 @@
 
     // ---------- Website Blocking ----------
 
+    var websiteRowsCache = [];
+
     async function loadWebsites() {
         const res = await apiFetch("/websites");
-        if (!res.success) return;
+        if (!res.success) {
+            websiteRowsCache = [];
+            renderWebsiteRows();
+            return;
+        }
         const eventRes = await apiFetch("/proxy/blocked-events?limit=2000");
         const blockedDomains = [];
         if (eventRes && eventRes.success && Array.isArray(eventRes.data)) {
@@ -2395,28 +2397,99 @@
                 blockedDomains.push(d);
             });
         }
+
+        websiteRowsCache = (res.data || []).map(function (entry) {
+            const domain = String(entry.domain || "").toLowerCase().trim();
+            let hitCount = 0;
+            blockedDomains.forEach(function (blockedDomain) {
+                if (!domain) return;
+                if (blockedDomain === domain || blockedDomain.endsWith("." + domain)) {
+                    hitCount++;
+                }
+            });
+            return {
+                entry: entry,
+                domain: domain,
+                reason: String(entry.reason || "-").trim() || "-",
+                createdAt: entry.created_at || "",
+                enabled: entry.enabled !== false,
+                hitCount: hitCount,
+            };
+        });
+
+        renderWebsiteRows();
+    }
+
+    function renderWebsiteRows() {
         const tbody = document.querySelector("#websitesTable tbody");
+        const totalBadge = document.getElementById("websitesTotalBadge");
+        const hitsBadge = document.getElementById("websitesHitsBadge");
+        if (!tbody) return;
+
+        const searchInput = document.getElementById("websiteSearchInput");
+        const sortSelect = document.getElementById("websiteSortSelect");
+        const query = String(searchInput && searchInput.value ? searchInput.value : "").toLowerCase().trim();
+        const sortBy = String(sortSelect && sortSelect.value ? sortSelect.value : "recent").toLowerCase();
+
+        const allRows = websiteRowsCache.slice();
+        if (totalBadge) {
+            totalBadge.className = allRows.length > 0 ? "badge badge-drop" : "badge badge-disabled";
+            totalBadge.textContent = allRows.length + " blocked";
+        }
+
+        let rows = allRows;
+        if (query) {
+            rows = rows.filter(function (row) {
+                return row.domain.includes(query) || row.reason.toLowerCase().includes(query);
+            });
+        }
+
+        switch (sortBy) {
+            case "hits":
+                rows.sort(function (a, b) {
+                    if (b.hitCount !== a.hitCount) return b.hitCount - a.hitCount;
+                    return a.domain.localeCompare(b.domain);
+                });
+                break;
+            case "domain":
+                rows.sort(function (a, b) {
+                    return a.domain.localeCompare(b.domain);
+                });
+                break;
+            default:
+                rows.sort(function (a, b) {
+                    return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+                });
+                break;
+        }
+
+        const totalHits = rows.reduce(function (acc, row) {
+            return acc + row.hitCount;
+        }, 0);
+        if (hitsBadge) {
+            hitsBadge.className = totalHits > 0 ? "badge badge-reject" : "badge badge-disabled";
+            hitsBadge.textContent = totalHits + " hits";
+        }
+
         tbody.innerHTML = "";
-        if (!res.data || res.data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#9ca3af;padding:20px">No blocked websites</td></tr>';
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#9ca3af;padding:20px">No blocked websites match your filter</td></tr>';
             return;
         }
-        res.data.forEach(function (entry) {
-            const domain = (entry.domain || "").toLowerCase();
-            const hitCount = blockedDomains.reduce(function (acc, blockedDomain) {
-                if (blockedDomain === domain || blockedDomain.endsWith("." + domain)) {
-                    return acc + 1;
-                }
-                return acc;
-            }, 0);
-            const reason = (entry.reason || "-") + (hitCount > 0 ? (" | Block hits: " + hitCount) : " | Block hits: 0");
+
+        rows.forEach(function (row) {
+            const status = row.enabled
+                ? '<span class="badge badge-drop"><i class="fa-solid fa-ban"></i> Active</span>'
+                : '<span class="badge badge-disabled">Inactive</span>';
             const tr = document.createElement("tr");
             tr.innerHTML =
-                "<td><strong>" + escapeHtml(entry.domain) + "</strong></td>" +
-                "<td>" + escapeHtml(reason) + "</td>" +
-                "<td>" + formatTime(entry.created_at) + "</td>" +
+                "<td><strong>" + escapeHtml(row.entry.domain || row.domain) + "</strong></td>" +
+                "<td>" + status + "</td>" +
+                "<td><span class=\"badge " + (row.hitCount > 0 ? "badge-reject" : "badge-disabled") + "\">" + row.hitCount + "</span></td>" +
+                "<td>" + escapeHtml(row.reason) + "</td>" +
+                "<td>" + formatTime(row.createdAt) + "</td>" +
                 '<td class="action-cell">' +
-                    '<button class="btn btn-sm btn-secondary" onclick="KaliWall.unblockWebsite(\'' + escapeHtml(entry.domain) + '\')"><i class="fa-solid fa-unlock"></i> Unblock</button>' +
+                    '<button class="btn btn-sm btn-secondary" onclick="KaliWall.unblockWebsite(\'' + escapeHtml(row.entry.domain || row.domain) + '\')"><i class="fa-solid fa-unlock"></i> Unblock</button>' +
                 "</td>";
             tbody.appendChild(tr);
         });
@@ -2757,10 +2830,41 @@
 
     // ---------- Block Website Modal ----------
 
-    document.getElementById("btnBlockWebsite").addEventListener("click", function () {
-        document.getElementById("blockWebsiteForm").reset();
-        document.getElementById("blockWebsiteModal").classList.add("open");
-    });
+    var websiteSearchDebounce = null;
+    var btnRefreshWebsites = document.getElementById("btnRefreshWebsites");
+    if (btnRefreshWebsites) {
+        btnRefreshWebsites.addEventListener("click", function () {
+            loadWebsites();
+            toast("Website blocks refreshed", "success");
+        });
+    }
+
+    var websiteSearchInput = document.getElementById("websiteSearchInput");
+    if (websiteSearchInput) {
+        websiteSearchInput.addEventListener("input", function () {
+            if (websiteSearchDebounce) clearTimeout(websiteSearchDebounce);
+            websiteSearchDebounce = setTimeout(function () {
+                renderWebsiteRows();
+            }, 120);
+        });
+    }
+
+    var websiteSortSelect = document.getElementById("websiteSortSelect");
+    if (websiteSortSelect) {
+        websiteSortSelect.addEventListener("change", function () {
+            renderWebsiteRows();
+        });
+    }
+
+    var btnBlockWebsite = document.getElementById("btnBlockWebsite");
+    if (btnBlockWebsite) {
+        btnBlockWebsite.addEventListener("click", function () {
+            var websiteForm = document.getElementById("blockWebsiteForm");
+            if (websiteForm) websiteForm.reset();
+            var websiteModal = document.getElementById("blockWebsiteModal");
+            if (websiteModal) websiteModal.classList.add("open");
+        });
+    }
 
     document.getElementById("blockWebsiteForm").addEventListener("submit", async function (e) {
         e.preventDefault();
@@ -3025,39 +3129,48 @@
         });
     }
 
-    document.getElementById("btnGenerateAIExplanation").addEventListener("click", async function () {
-        var input = document.getElementById("aiExplainInput");
-        var result = document.getElementById("aiExplainResult");
-        if (!input || !result) return;
-        var packetData = input.value.trim();
-        if (!packetData) {
-            toast("Enter packet metadata first", "error");
-            return;
-        }
-        result.textContent = "Generating explanation...";
-        try {
-            var explanation = await requestAIExplanation(packetData);
-            result.textContent = explanation;
-        } catch (err) {
-            result.textContent = "Failed to generate explanation.";
-            toast((err && err.message) || "AI explanation failed", "error");
-        }
-    });
+    var btnGenerateAIExplanation = document.getElementById("btnGenerateAIExplanation");
+    if (btnGenerateAIExplanation) {
+        btnGenerateAIExplanation.addEventListener("click", async function () {
+            var input = document.getElementById("aiExplainInput");
+            var result = document.getElementById("aiExplainResult");
+            if (!input || !result) return;
+            var packetData = input.value.trim();
+            if (!packetData) {
+                toast("Enter packet metadata first", "error");
+                return;
+            }
+            result.textContent = "Generating explanation...";
+            try {
+                var explanation = await requestAIExplanation(packetData);
+                result.textContent = explanation;
+            } catch (err) {
+                result.textContent = "Failed to generate explanation.";
+                toast((err && err.message) || "AI explanation failed", "error");
+            }
+        });
+    }
 
-    document.getElementById("btnGenerateAIRuleDecision").addEventListener("click", async function () {
-        var input = document.getElementById("aiExplainInput");
-        if (!input) return;
-        var packetData = input.value.trim();
-        if (!packetData) {
-            toast("Enter packet metadata first", "error");
-            return;
-        }
-        await suggestRuleDecision(packetData);
-    });
+    var btnGenerateAIRuleDecision = document.getElementById("btnGenerateAIRuleDecision");
+    if (btnGenerateAIRuleDecision) {
+        btnGenerateAIRuleDecision.addEventListener("click", async function () {
+            var input = document.getElementById("aiExplainInput");
+            if (!input) return;
+            var packetData = input.value.trim();
+            if (!packetData) {
+                toast("Enter packet metadata first", "error");
+                return;
+            }
+            await suggestRuleDecision(packetData);
+        });
+    }
 
-    document.getElementById("btnGenerateAIRuleFromTraffic").addEventListener("click", async function () {
-        await suggestRuleDecisionFromTraffic();
-    });
+    var btnGenerateAIRuleFromTraffic = document.getElementById("btnGenerateAIRuleFromTraffic");
+    if (btnGenerateAIRuleFromTraffic) {
+        btnGenerateAIRuleFromTraffic.addEventListener("click", async function () {
+            await suggestRuleDecisionFromTraffic();
+        });
+    }
 
     var btnAutoRuleFromTraffic = document.getElementById("btnAutoRuleFromTraffic");
     if (btnAutoRuleFromTraffic) {
@@ -3066,12 +3179,15 @@
         });
     }
 
-    document.getElementById("btnClearAIExplanation").addEventListener("click", function () {
-        var input = document.getElementById("aiExplainInput");
-        var result = document.getElementById("aiExplainResult");
-        if (input) input.value = "";
-        if (result) result.textContent = "No explanation generated yet.";
-    });
+    var btnClearAIExplanation = document.getElementById("btnClearAIExplanation");
+    if (btnClearAIExplanation) {
+        btnClearAIExplanation.addEventListener("click", function () {
+            var input = document.getElementById("aiExplainInput");
+            var result = document.getElementById("aiExplainResult");
+            if (input) input.value = "";
+            if (result) result.textContent = "No explanation generated yet.";
+        });
+    }
 
     async function stopFirewallFromTopbar() {
         if (!confirm("Switch firewall to memory mode (stop live backend)?")) return;

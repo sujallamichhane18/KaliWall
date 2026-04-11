@@ -47,9 +47,6 @@
         <a href="#" class="nav-item" data-page="logs">
             <i class="fa-solid fa-file-lines"></i><span>Traffic Logs</span>
         </a>
-        <a href="#" class="nav-item" data-page="ai-explain">
-            <i class="fa-solid fa-robot"></i><span>AI Explain</span>
-        </a>
         <a href="#" class="nav-item" data-page="settings">
             <i class="fa-solid fa-gear"></i><span>Settings</span>
         </a>
@@ -892,46 +889,6 @@
                             <tr><td colspan="6" style="text-align:center;color:#9ca3af;padding:20px">No anomaly analysis generated yet</td></tr>
                         </tbody>
                     </table>
-                </div>
-            </div>
-        </section>
-
-        <!-- ===== AI EXPLAIN PAGE ===== -->
-        <section class="page" id="page-ai-explain">
-            <div class="page-toolbar">
-                <h2>AI Packet Explainer</h2>
-            </div>
-            <div class="card settings-card ai-control-shell">
-                <div class="card-header">
-                    <i class="fa-solid fa-wand-magic-sparkles"></i>
-                    <h3>Generate Concise Explanation</h3>
-                </div>
-                <div class="card-body" style="padding:20px">
-                    <p class="settings-desc">Paste blocked packet metadata and generate a short one-line explanation using your selected AI provider (OpenRouter, OpenAI, Anthropic, or Grok).</p>
-                    <div class="api-key-status" style="margin-bottom:12px">
-                        <span class="badge badge-disabled" id="aiExplainConfiguredBadge">Checking API key...</span>
-                    </div>
-                    <div class="ai-provider-matrix" id="aiProviderMatrixExplain"></div>
-                    <div class="form-group">
-                        <label for="aiProviderSelectExplain">AI Provider</label>
-                        <select id="aiProviderSelectExplain"></select>
-                    </div>
-                    <div class="form-group">
-                        <label for="aiExplainInput">Packet Metadata</label>
-                        <textarea id="aiExplainInput" class="ai-explain-textarea" placeholder="Example: Blocked IP: 103.21.244.1 Reason: suspicious DNS tunneling behavior"></textarea>
-                    </div>
-                    <div class="toolbar-actions" style="margin-top:12px">
-                        <button class="btn btn-primary" id="btnGenerateAIExplanation"><i class="fa-solid fa-robot"></i> Generate</button>
-                        <button class="btn btn-secondary" id="btnGenerateAIRuleDecision"><i class="fa-solid fa-gavel"></i> AI Rule Decision</button>
-                        <button class="btn btn-secondary" id="btnGenerateAIRuleFromTraffic"><i class="fa-solid fa-network-wired"></i> Rule From Live Traffic</button>
-                        <button class="btn btn-secondary" id="btnClearAIExplanation"><i class="fa-solid fa-eraser"></i> Clear</button>
-                    </div>
-                    <div class="card" style="margin-top:16px;margin-bottom:0;">
-                        <div class="card-header"><i class="fa-solid fa-comment-dots"></i><h3>AI Result</h3></div>
-                        <div class="card-body" style="padding:16px">
-                            <p id="aiExplainResult" class="ai-explain-result">No explanation generated yet.</p>
-                        </div>
-                    </div>
                 </div>
             </div>
         </section>

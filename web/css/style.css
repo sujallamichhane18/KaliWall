@@ -3017,3 +3017,51 @@ body::after {
     gap: 8px;
     flex-wrap: wrap;
 }
+
+#page-websites .page-toolbar .toolbar-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+#page-websites #websiteSearchInput {
+    min-width: 260px;
+    flex: 1 1 260px;
+}
+
+#page-websites #websiteSortSelect {
+    min-width: 160px;
+}
+
+#websitesTable {
+    min-width: 860px;
+}
+
+@media (max-width: 900px) {
+    #page-websites .page-toolbar .toolbar-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+        gap: 8px;
+    }
+
+    #page-websites #websiteSearchInput,
+    #page-websites #websiteSortSelect {
+        grid-column: 1 / -1;
+        min-width: 0;
+        width: 100%;
+    }
+
+    #page-websites .page-toolbar .toolbar-actions .btn {
+        width: 100%;
+        justify-content: center;
+    }
+}
+
+@media (max-width: 640px) {
+    #page-websites .page-toolbar .toolbar-actions {
+        grid-template-columns: 1fr;
+    }
+}
