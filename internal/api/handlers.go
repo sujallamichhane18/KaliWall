@@ -504,6 +504,11 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	minHistorySamples := 80
+	minHistoryDurationMinutes := windowMinutes * 2
+	if minHistoryDurationMinutes < 20 {
+		minHistoryDurationMinutes = 20
+	}
+	minHistoryFastTrackSamples := minHistorySamples + 10
 
 	now := time.Now().UTC()
 	snapshot := models.TrafficAnomalySnapshot{
@@ -529,15 +534,48 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 
 	entries := h.logger.RecentEntries(limit)
 	conns := h.fw.ActiveConnections()
+	if len(entries) == 0 {
+		snapshot.SampleSize = 0
+		snapshot.HistorySamples = 0
+		snapshot.Status = "learning"
+		snapshot.LearningMessage = fmt.Sprintf("UEBA baseline learning: 0/%d samples, 0/%d min coverage", minHistorySamples, minHistoryDurationMinutes)
+		return snapshot
+	}
+
+	firstSeen := entries[0].Timestamp
+	lastSeen := entries[0].Timestamp
+	historyMinuteBuckets := make(map[int64]struct{}, len(entries))
+	for _, entry := range entries {
+		ts := entry.Timestamp
+		if ts.Before(firstSeen) {
+			firstSeen = ts
+		}
+		if ts.After(lastSeen) {
+			lastSeen = ts
+		}
+		historyMinuteBuckets[ts.Unix()/60] = struct{}{}
+	}
+
+	historyCoverageMinutes := int(math.Ceil(lastSeen.Sub(firstSeen).Minutes()))
+	if historyCoverageMinutes < len(historyMinuteBuckets) {
+		historyCoverageMinutes = len(historyMinuteBuckets)
+	}
+	if historyCoverageMinutes < 1 {
+		historyCoverageMinutes = 1
+	}
+
 	snapshot.SampleSize = len(entries)
 	snapshot.HistorySamples = len(entries)
-	snapshot.HistoryReady = len(entries) >= minHistorySamples
+	historyReadyBySamples := len(entries) >= minHistorySamples
+	historyReadyByTime := historyCoverageMinutes >= minHistoryDurationMinutes
+	historyReadyFastTrack := len(entries) >= minHistoryFastTrackSamples
+	snapshot.HistoryReady = historyReadyBySamples && (historyReadyByTime || historyReadyFastTrack)
 	if !snapshot.HistoryReady {
 		snapshot.Status = "learning"
-		snapshot.LearningMessage = fmt.Sprintf("Collecting traffic history (%d/%d samples) before anomaly scoring", len(entries), minHistorySamples)
-	}
-	if len(entries) == 0 {
-		return snapshot
+		snapshot.LearningMessage = fmt.Sprintf(
+			"UEBA baseline learning: %d/%d samples, %d/%d min coverage before anomaly marking",
+			len(entries), minHistorySamples, historyCoverageMinutes, minHistoryDurationMinutes,
+		)
 	}
 	if !snapshot.HistoryReady {
 		return snapshot
@@ -562,29 +600,36 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	destinationWindow := make(map[string]int)
 	destinationRiskWindow := make(map[string]int)
 
-	firstSeen := time.Time{}
-	lastSeen := time.Time{}
+	historicalSourceTotals := make(map[string]int)
+	historicalSourceRisk := make(map[string]int)
+	historicalHourTotals := make(map[int]int)
+	historicalTotal := 0
+	windowHourCounts := make(map[int]int)
 
 	for _, entry := range entries {
 		ts := entry.Timestamp
-		if firstSeen.IsZero() || ts.Before(firstSeen) {
-			firstSeen = ts
-		}
-		if lastSeen.IsZero() || ts.After(lastSeen) {
-			lastSeen = ts
-		}
-
 		minuteTotals[ts.Unix()/60]++
-
-		if ts.Before(prevWindowStart) {
-			continue
-		}
 
 		isBlocked := isBlockingAction(entry.Action)
 		isSuspicious := isSuspiciousDetail(entry.Detail)
 		proto := normalizeTrafficProtocol(entry.Protocol)
 		src := normalizeTrafficIP(entry.SrcIP)
 		dst := normalizeTrafficIP(entry.DstIP)
+
+		if ts.Before(windowStart) {
+			historicalTotal++
+			historicalHourTotals[ts.UTC().Hour()]++
+			if src != "" {
+				historicalSourceTotals[src]++
+				if isBlocked || isSuspicious {
+					historicalSourceRisk[src]++
+				}
+			}
+		}
+
+		if ts.Before(prevWindowStart) {
+			continue
+		}
 
 		if ts.Before(windowStart) {
 			prevTotal++
@@ -604,6 +649,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 
 		windowTotal++
+		windowHourCounts[ts.UTC().Hour()]++
 		if isBlocked {
 			windowBlocked++
 		}
@@ -1115,6 +1161,155 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 	}
 
+	if windowTotal >= 20 && historicalTotal >= 50 && len(sourceWindow) > 0 {
+		type entityShiftCandidate struct {
+			SourceIP       string
+			CurrentHits    int
+			HistoricalHits int
+			CurrentShare   float64
+			BaselineShare  float64
+			RiskHits       int
+		}
+
+		bestShift := entityShiftCandidate{}
+		bestShiftWeight := 0
+		bestNew := entityShiftCandidate{}
+		bestNewWeight := 0
+
+		for src, currentHits := range sourceWindow {
+			historicalHits := historicalSourceTotals[src]
+			currentShare := safeRatio(float64(currentHits), float64(windowTotal))
+			riskHits := sourceBlocked[src] + sourceSuspicious[src]
+
+			if historicalHits >= 5 {
+				baselineShare := safeRatio(float64(historicalHits), float64(historicalTotal))
+				shareDelta := currentShare - baselineShare
+				if currentHits >= 7 && shareDelta >= 0.06 && currentShare >= baselineShare*2.7+0.04 {
+					weight := int(shareDelta*1000) + riskHits*4 + currentHits
+					if weight > bestShiftWeight {
+						bestShiftWeight = weight
+						bestShift = entityShiftCandidate{
+							SourceIP:       src,
+							CurrentHits:    currentHits,
+							HistoricalHits: historicalHits,
+							CurrentShare:   currentShare,
+							BaselineShare:  baselineShare,
+							RiskHits:       riskHits,
+						}
+					}
+				}
+				continue
+			}
+
+			if historicalHits == 0 && currentHits >= 10 && riskHits >= 5 {
+				weight := currentHits*2 + riskHits*5
+				if weight > bestNewWeight {
+					bestNewWeight = weight
+					bestNew = entityShiftCandidate{
+						SourceIP:       src,
+						CurrentHits:    currentHits,
+						HistoricalHits: 0,
+						CurrentShare:   currentShare,
+						BaselineShare:  0,
+						RiskHits:       riskHits,
+					}
+				}
+			}
+		}
+
+		if bestShift.SourceIP != "" {
+			severity := "warning"
+			if bestShift.CurrentShare >= bestShift.BaselineShare*4.5 || bestShift.RiskHits >= 10 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"entity_behavior_shift",
+				severity,
+				int(32 + (bestShift.CurrentShare-bestShift.BaselineShare)*180 + float64(bestShift.RiskHits)*2.2),
+				"UEBA Entity Behavior Shift",
+				fmt.Sprintf("Entity %s shifted from %.1f%% historical share to %.1f%% in the current window (%d events).", bestShift.SourceIP, bestShift.BaselineShare*100, bestShift.CurrentShare*100, bestShift.CurrentHits),
+				bestShift.CurrentHits,
+				bestShift.BaselineShare,
+				bestShift.CurrentShare,
+				map[string]interface{}{
+					"entity_ip":             bestShift.SourceIP,
+					"current_events":        bestShift.CurrentHits,
+					"historical_events":     bestShift.HistoricalHits,
+					"current_share":         bestShift.CurrentShare,
+					"historical_share":      bestShift.BaselineShare,
+					"risk_hits":             bestShift.RiskHits,
+					"historical_total_events": historicalTotal,
+					"window_minutes":        windowMinutes,
+				},
+			)
+		}
+
+		if bestNew.SourceIP != "" {
+			severity := "warning"
+			if bestNew.RiskHits >= 10 || bestNew.CurrentHits >= 20 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"new_entity_risk_surge",
+				severity,
+				int(30 + bestNew.CurrentShare*120 + float64(bestNew.RiskHits)*2.4),
+				"UEBA New Entity Risk Surge",
+				fmt.Sprintf("Previously unseen entity %s generated %d events (%d risk hits) in the current window.", bestNew.SourceIP, bestNew.CurrentHits, bestNew.RiskHits),
+				bestNew.CurrentHits,
+				0,
+				bestNew.CurrentShare,
+				map[string]interface{}{
+					"entity_ip":             bestNew.SourceIP,
+					"current_events":        bestNew.CurrentHits,
+					"risk_hits":             bestNew.RiskHits,
+					"current_share":         bestNew.CurrentShare,
+					"historical_total_events": historicalTotal,
+					"window_minutes":        windowMinutes,
+				},
+			)
+		}
+	}
+
+	if windowTotal >= 20 && historicalTotal >= 64 && len(windowHourCounts) > 0 {
+		dominantHour := -1
+		dominantHourHits := 0
+		for hour, hits := range windowHourCounts {
+			if hits > dominantHourHits {
+				dominantHour = hour
+				dominantHourHits = hits
+			}
+		}
+
+		if dominantHour >= 0 && dominantHourHits >= 8 {
+			baselineShare := safeRatio(float64(historicalHourTotals[dominantHour]), float64(historicalTotal))
+			currentShare := safeRatio(float64(dominantHourHits), float64(windowTotal))
+			if (baselineShare <= 0.10 && currentShare >= 0.30) || (baselineShare > 0 && currentShare >= baselineShare*2.5 && (currentShare-baselineShare) >= 0.12) {
+				severity := "warning"
+				if currentShare >= 0.50 || baselineShare <= 0.025 {
+					severity = "critical"
+				}
+				appendAnomaly(
+					"off_hours_entity_activity",
+					severity,
+					int(30 + currentShare*96 + (currentShare-baselineShare)*62),
+					"UEBA Temporal Activity Drift",
+					fmt.Sprintf("Activity in hour bucket %s rose to %.1f%% (baseline %.1f%%), indicating unusual temporal behavior.", formatHourBucket(dominantHour), currentShare*100, baselineShare*100),
+					dominantHourHits,
+					baselineShare,
+					currentShare,
+					map[string]interface{}{
+						"hour_bucket":           formatHourBucket(dominantHour),
+						"hour_events":           dominantHourHits,
+						"current_share":         currentShare,
+						"historical_share":      baselineShare,
+						"historical_total_events": historicalTotal,
+						"window_minutes":        windowMinutes,
+					},
+				)
+			}
+		}
+	}
+
 	windowRiskHits := windowBlocked + windowSuspicious
 	if windowTotal >= 30 && len(destinationWindow) > 0 {
 		topDst := ""
@@ -1348,6 +1543,13 @@ func protocolEntropy(protocolCounts map[string]int) (float64, float64) {
 		normalized = 1
 	}
 	return entropy, normalized
+}
+
+func formatHourBucket(hour int) string {
+	if hour < 0 || hour > 23 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%02d:00-%02d:59", hour, hour)
 }
 
 func safeRatio(numerator float64, denominator float64) float64 {

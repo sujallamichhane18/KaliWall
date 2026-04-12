@@ -90,6 +90,39 @@ func TestBuildTrafficAnomalySnapshotLearningModeForLowVolume(t *testing.T) {
 	}
 }
 
+func TestBuildTrafficAnomalySnapshotRequiresTimeCoverageAtSampleThreshold(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	for i := 0; i < 80; i++ {
+		action := "ALLOW"
+		detail := "normal traffic"
+		if i%10 == 0 {
+			action = "BLOCK"
+			detail = "suspicious payload"
+		}
+		src := fmt.Sprintf("203.0.113.%d", (i%6)+10)
+		h.logger.Log(action, src, "10.0.0.10", "tcp", detail)
+	}
+
+	snapshot := h.buildTrafficAnomalySnapshot(400, 15)
+	if snapshot.HistorySamples != 80 {
+		t.Fatalf("expected history sample count 80, got %d", snapshot.HistorySamples)
+	}
+	if snapshot.HistoryReady {
+		t.Fatalf("expected history_ready=false at pure sample threshold without enough time coverage")
+	}
+	if snapshot.Status != "learning" {
+		t.Fatalf("expected learning status before time baseline is mature, got %q", snapshot.Status)
+	}
+	if snapshot.TotalAnomalies != 0 {
+		t.Fatalf("expected no anomalies while baseline is still learning, got %d", snapshot.TotalAnomalies)
+	}
+	if snapshot.LearningMessage == "" {
+		t.Fatalf("expected learning message to explain sample/time readiness")
+	}
+}
+
 func TestBuildTrafficAnomalySnapshotDetectsSourcePortScan(t *testing.T) {
 	h, cleanup := newAnomalyTestHandlers(t)
 	defer cleanup()
@@ -220,5 +253,25 @@ func TestAnomalyTrendHistoryIncludesRiskAndDetectors(t *testing.T) {
 	}
 	if !hasPoints {
 		t.Fatalf("expected detector trend points in returned series")
+	}
+}
+
+func TestFormatHourBucket(t *testing.T) {
+	cases := []struct {
+		hour int
+		want string
+	}{
+		{hour: 0, want: "00:00-00:59"},
+		{hour: 9, want: "09:00-09:59"},
+		{hour: 23, want: "23:00-23:59"},
+		{hour: -1, want: "unknown"},
+		{hour: 24, want: "unknown"},
+	}
+
+	for _, tc := range cases {
+		got := formatHourBucket(tc.hour)
+		if got != tc.want {
+			t.Fatalf("formatHourBucket(%d) = %q, want %q", tc.hour, got, tc.want)
+		}
 	}
 }
