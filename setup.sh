@@ -18,7 +18,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${GREEN}=======================================${NC}"
-echo -e "${GREEN}  KaliWall ❤️ Firewall Setup${NC}"
+echo -e "${GREEN}  KaliWall  Firewall Setup${NC}"
 echo -e "${GREEN}=======================================${NC}"
 
 run_as_root() {

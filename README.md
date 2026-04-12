@@ -63,7 +63,7 @@
 | Capability | Details |
 |---|---|
 | **Rule Lifecycle** | Create · Update · Validate · Analyze · Toggle · Delete |
-| **Backends** | `iptables` · `nftables` · `ufw` · Memory fallback |
+| **Backends** | `iptables` · `nftables` · `ufw` · `disabled` |
 | **Runtime Switch** | Hot-swap backend via API or dashboard |
 | **Stateful Rules** | Connection-state matching: `NEW` · `ESTABLISHED` · `RELATED` · `INVALID` |
 | **Safe Defaults** | Automatic rule seeding on first run |

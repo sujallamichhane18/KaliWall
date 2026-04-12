@@ -56,6 +56,39 @@ is_running_pid() {
     kill -0 "$pid" 2>/dev/null
 }
 
+stop_pid_graceful() {
+    local pid="$1"
+    local label="${2:-process}"
+
+    if [[ -z "$pid" ]]; then
+        return 1
+    fi
+    if ! is_running_pid "$pid"; then
+        return 1
+    fi
+
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 25); do
+        if ! is_running_pid "$pid"; then
+            echo -e "${GREEN}[+] Stopped ${label} (PID: ${pid})${NC}"
+            return 0
+        fi
+        sleep 0.2
+    done
+
+    kill -9 "$pid" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+        if ! is_running_pid "$pid"; then
+            echo -e "${GREEN}[+] Force-stopped ${label} (PID: ${pid})${NC}"
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo -e "${YELLOW}[!] Failed to stop ${label} (PID: ${pid})${NC}"
+    return 1
+}
+
 rotate_log_if_needed() {
     if [[ -f "$LOG_FILE" ]]; then
         local size
@@ -102,23 +135,44 @@ case "${1:-}" in
         echo -e "${YELLOW}[!] Stop:   ./start.sh --stop${NC}"
         ;;
     --stop)
-        if [[ ! -f "$PID_FILE" ]]; then
-            echo -e "${YELLOW}[!] No PID file found (${PID_FILE})${NC}"
-            exit 1
-        fi
-        DAEMON_PID=$(cat "$PID_FILE" 2>/dev/null || true)
-        if [[ -z "${DAEMON_PID}" ]]; then
-            echo -e "${YELLOW}[!] PID file is empty${NC}"
+        stopped_any=0
+
+        if [[ -f "$PID_FILE" ]]; then
+            DAEMON_PID=$(cat "$PID_FILE" 2>/dev/null || true)
+            if [[ -n "${DAEMON_PID}" ]] && stop_pid_graceful "$DAEMON_PID" "daemon"; then
+                stopped_any=1
+            else
+                echo -e "${YELLOW}[!] PID file process not running or could not be stopped${NC}"
+            fi
             rm -f "$PID_FILE"
-            exit 1
-        fi
-        if is_running_pid "$DAEMON_PID"; then
-            kill "$DAEMON_PID"
-            rm -f "$PID_FILE"
-            echo -e "${GREEN}[+] KaliWall stopped (PID: ${DAEMON_PID})${NC}"
         else
-            rm -f "$PID_FILE"
-            echo -e "${YELLOW}[!] Process not running; cleaned stale PID file${NC}"
+            echo -e "${YELLOW}[!] No PID file found (${PID_FILE}); checking running processes...${NC}"
+        fi
+
+        if command -v pgrep >/dev/null 2>&1; then
+            mapfile -t EXTRA_PIDS < <(pgrep -f "${SCRIPT_DIR}/kaliwall" 2>/dev/null || true)
+            for pid in "${EXTRA_PIDS[@]:-}"; do
+                [[ -z "$pid" || "$pid" == "$$" ]] && continue
+                if stop_pid_graceful "$pid" "kaliwall process"; then
+                    stopped_any=1
+                fi
+            done
+        fi
+
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet kaliwall; then
+            echo -e "${YELLOW}[!] kaliwall systemd service is active; stopping it...${NC}"
+            if systemctl stop kaliwall >/dev/null 2>&1 || sudo systemctl stop kaliwall >/dev/null 2>&1; then
+                echo -e "${GREEN}[+] kaliwall systemd service stopped${NC}"
+                stopped_any=1
+            else
+                echo -e "${YELLOW}[!] Unable to stop systemd service automatically${NC}"
+            fi
+        fi
+
+        if [[ "$stopped_any" -eq 1 ]]; then
+            echo -e "${GREEN}[+] KaliWall stop sequence completed${NC}"
+        else
+            echo -e "${YELLOW}[!] No running KaliWall process found${NC}"
         fi
         ;;
     --status)

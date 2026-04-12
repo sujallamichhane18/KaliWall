@@ -4,6 +4,7 @@ import (
     "context"
     "fmt"
     "log"
+    "net"
     "runtime"
     "sort"
     "strings"
@@ -39,6 +40,14 @@ type Config struct {
     MaxTrackedIPs     int
     DetectionLogEvery int
     EmitEventLogs     bool
+
+    // Threat indicator hooks used by DPI for feed-based enforcement.
+    MaliciousIPMatcher     func(string) bool
+    MaliciousDomainMatcher func(string) bool
+    IsIPBlocked            func(string) bool
+    IsWebsiteBlocked       func(string) bool
+    BlockIP                func(string, string) error
+    BlockWebsite           func(string, string) error
 }
 
 // Stats is a lightweight REST-friendly view for protocol detections.
@@ -76,6 +85,7 @@ type Stats struct {
     DetectionEvents   uint64 `json:"detection_events"`
     DetectionLogEvery int    `json:"detection_log_every"`
     MaxTrackedIPs     int    `json:"max_tracked_ips"`
+    PacketLogs        uint64 `json:"packet_logs"`
     ActiveFlows       uint64 `json:"active_flows"`
     FlowEvicted       uint64 `json:"flow_evicted"`
     FlowExpired       uint64 `json:"flow_expired"`
@@ -114,6 +124,7 @@ type Engine struct {
     tcpPackets  atomic.Uint64
     udpPackets  atomic.Uint64
     icmpPackets atomic.Uint64
+    packetLogged    atomic.Uint64
     queueDrops      atomic.Uint64
     detectionEvents atomic.Uint64
 
@@ -285,7 +296,7 @@ func (e *Engine) Status() pipeline.Status {
         ReasmErrors:  0,
         Allowed:      0,
         Blocked:      0,
-        Logged:       e.httpDetected.Load() + e.dnsDetected.Load() + e.tlsDetected.Load(),
+        Logged:       e.packetLogged.Load(),
         RateLimited:  0,
     }
 }
@@ -340,6 +351,7 @@ func (e *Engine) DetailedStats() Stats {
         DetectionEvents:   e.detectionEvents.Load(),
         DetectionLogEvery: e.detectionLogEvery(),
         MaxTrackedIPs:     e.maxTrackedIPs(),
+        PacketLogs:        e.packetLogged.Load(),
         ActiveFlows:       uint64(flowStats.ActiveFlows),
         FlowEvicted:       flowStats.EvictedFlows,
         FlowExpired:       flowStats.ExpiredFlows,
@@ -435,6 +447,7 @@ func (e *Engine) processPacket(pkt gopacket.Packet) {
         return
     }
 
+    e.logPacketBrief(decoded)
     e.recordL3(decoded)
     e.tracker.ObserveDecoded(decoded)
 
@@ -484,6 +497,8 @@ func (e *Engine) recordL3(decoded *types.DecodedPacket) {
 }
 
 func (e *Engine) record(result types.InspectResult) {
+	e.enforceIndicatorBlocks(result)
+
     seen := false
 
     if result.HTTPMethod != "" {
@@ -601,6 +616,42 @@ func (e *Engine) emitEventLogs() bool {
     return e.cfg.EmitEventLogs
 }
 
+func (e *Engine) maliciousIPMatcher() func(string) bool {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.MaliciousIPMatcher
+}
+
+func (e *Engine) maliciousDomainMatcher() func(string) bool {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.MaliciousDomainMatcher
+}
+
+func (e *Engine) isIPBlocked() func(string) bool {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.IsIPBlocked
+}
+
+func (e *Engine) isWebsiteBlocked() func(string) bool {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.IsWebsiteBlocked
+}
+
+func (e *Engine) ipBlocker() func(string, string) error {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.BlockIP
+}
+
+func (e *Engine) websiteBlocker() func(string, string) error {
+    e.cfgMu.RLock()
+    defer e.cfgMu.RUnlock()
+    return e.cfg.BlockWebsite
+}
+
 func (e *Engine) shouldEmitSampledDetectionLog() bool {
     every := e.detectionLogEvery()
     n := e.detectionEvents.Add(1)
@@ -608,6 +659,129 @@ func (e *Engine) shouldEmitSampledDetectionLog() bool {
         return true
     }
     return n%uint64(every) == 0
+}
+
+func (e *Engine) logPacketBrief(decoded *types.DecodedPacket) {
+    if decoded == nil || e.logger == nil {
+        return
+    }
+    proto := strings.ToLower(strings.TrimSpace(decoded.Tuple.Protocol))
+    if proto == "" {
+        proto = "ip"
+    }
+    detail := fmt.Sprintf(
+        "dpi:packet src=%s:%d dst=%s:%d proto=%s bytes=%d",
+        strings.TrimSpace(decoded.Tuple.SrcIP),
+        decoded.Tuple.SrcPort,
+        strings.TrimSpace(decoded.Tuple.DstIP),
+        decoded.Tuple.DstPort,
+        proto,
+        len(decoded.Payload),
+    )
+    if decoded.DNSQuery != "" {
+        detail += " dns=" + strings.TrimSpace(decoded.DNSQuery)
+    }
+    e.logger.Log("LOG", decoded.Tuple.SrcIP, decoded.Tuple.DstIP, proto, briefText(detail, 180))
+    e.packetLogged.Add(1)
+}
+
+func (e *Engine) enforceIndicatorBlocks(result types.InspectResult) {
+    ipMatcher := e.maliciousIPMatcher()
+    domainMatcher := e.maliciousDomainMatcher()
+    if ipMatcher == nil && domainMatcher == nil {
+        return
+    }
+
+    if ipMatcher != nil {
+        seenIPs := make(map[string]struct{}, 2)
+        for _, candidate := range []string{strings.TrimSpace(result.Tuple.SrcIP), strings.TrimSpace(result.Tuple.DstIP)} {
+            if candidate == "" || net.ParseIP(candidate) == nil {
+                continue
+            }
+            if _, exists := seenIPs[candidate]; exists {
+                continue
+            }
+            seenIPs[candidate] = struct{}{}
+            if ipMatcher(candidate) {
+                e.maybeBlockIPIndicator(candidate, result)
+            }
+        }
+    }
+
+    if domainMatcher != nil {
+        seenDomains := make(map[string]struct{}, 3)
+        for _, raw := range []string{result.DNSDomain, result.TLSSNI, result.HTTPHost} {
+            domain := normalizeIndicatorDomain(raw)
+            if domain == "" {
+                continue
+            }
+            if _, exists := seenDomains[domain]; exists {
+                continue
+            }
+            seenDomains[domain] = struct{}{}
+            if domainMatcher(domain) {
+                e.maybeBlockDomainIndicator(domain, result)
+            }
+        }
+    }
+}
+
+func (e *Engine) maybeBlockIPIndicator(ip string, result types.InspectResult) {
+    if ip == "" {
+        return
+    }
+    if isBlocked := e.isIPBlocked(); isBlocked != nil && isBlocked(ip) {
+        return
+    }
+    blocker := e.ipBlocker()
+    if blocker == nil {
+        return
+    }
+    if err := blocker(ip, "DPI malicious IP indicator match"); err != nil {
+        if e.logger != nil {
+            e.logger.Log("ERROR", result.Tuple.SrcIP, result.Tuple.DstIP, "dpi", briefText("dpi:failed to auto-block malicious ip "+ip+": "+err.Error(), 180))
+        }
+        return
+    }
+    if e.logger != nil {
+        e.logger.Log("BLOCK", result.Tuple.SrcIP, result.Tuple.DstIP, "dpi", briefText("dpi:auto-blocked malicious ip indicator "+ip, 180))
+    }
+}
+
+func (e *Engine) maybeBlockDomainIndicator(domain string, result types.InspectResult) {
+    if domain == "" {
+        return
+    }
+    if isBlocked := e.isWebsiteBlocked(); isBlocked != nil && isBlocked(domain) {
+        return
+    }
+    blocker := e.websiteBlocker()
+    if blocker == nil {
+        return
+    }
+    if err := blocker(domain, "DPI malicious domain indicator match"); err != nil {
+        if e.logger != nil {
+            e.logger.Log("ERROR", result.Tuple.SrcIP, result.Tuple.DstIP, "dpi", briefText("dpi:failed to auto-block malicious domain "+domain+": "+err.Error(), 180))
+        }
+        return
+    }
+    if e.logger != nil {
+        e.logger.Log("BLOCK", result.Tuple.SrcIP, result.Tuple.DstIP, "dpi", briefText("dpi:auto-blocked malicious domain indicator "+domain, 180))
+    }
+}
+
+func normalizeIndicatorDomain(raw string) string {
+    domain := strings.TrimSpace(strings.ToLower(raw))
+    domain = strings.TrimPrefix(domain, "*.")
+    domain = strings.TrimPrefix(domain, "http://")
+    domain = strings.TrimPrefix(domain, "https://")
+    if idx := strings.IndexAny(domain, "/?#"); idx >= 0 {
+        domain = domain[:idx]
+    }
+    if idx := strings.IndexByte(domain, ':'); idx >= 0 {
+        domain = domain[:idx]
+    }
+    return strings.TrimSuffix(domain, ".")
 }
 
 func briefText(s string, maxLen int) string {

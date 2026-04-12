@@ -93,7 +93,7 @@ func (tl *TrafficLogger) Log(action, srcIP, dstIP, protocol, detail string) {
 
 	// Lightweight bridge for kernel blocked packet events into structured event stream.
 	if strings.EqualFold(action, "BLOCK") && strings.Contains(strings.ToLower(detail), "kernel:") {
-		backend := "memory"
+		backend := "disabled"
 		if tl.backendProvider != nil {
 			backend = tl.backendProvider()
 		}

@@ -400,7 +400,7 @@
         document.getElementById("sysKernel").textContent = d.kernel || "--";
         document.getElementById("sysUptime").textContent = d.uptime || "--";
         document.getElementById("sysLoad").textContent = d.load_average || "--";
-        document.getElementById("sysEngine").textContent = d.firewall_engine || "memory";
+        document.getElementById("sysEngine").textContent = d.firewall_engine || "disabled";
 
         // CPU gauge
         var cpuPct = d.cpu_usage_percent || 0;
@@ -442,7 +442,7 @@
 
         if (statsRes.success) {
             const s = statsRes.data || {};
-            setText("socFwState", (s.engine_live_mode ? "LIVE" : "MEMORY") + " / " + (s.firewall_engine || "memory").toUpperCase());
+            setText("socFwState", (s.engine_live_mode ? "LIVE" : "OFF") + " / " + (s.firewall_engine || "disabled").toUpperCase());
             const packetsRate = Math.max(0, Math.floor(((s.net_rx_bytes || 0) + (s.net_tx_bytes || 0)) / 1024));
             setText("socPacketsRate", packetsRate);
         }
@@ -3914,10 +3914,10 @@
         if (!select || !status) return;
 
         select.innerHTML = "";
-        var current = res.data.current_engine || "memory";
+        var current = res.data.current_engine || "disabled";
         var engines = res.data.available_engines || [];
         setText("sysEngine", current);
-        if (engines.indexOf("memory") === -1) engines.push("memory");
+        if (engines.indexOf("disabled") === -1) engines.push("disabled");
         engines.forEach(function (name) {
             var opt = document.createElement("option");
             opt.value = name;
@@ -3931,7 +3931,7 @@
             status.textContent = "Live mode: " + current;
         } else {
             status.className = "badge badge-disabled";
-            status.textContent = "Memory mode: " + current;
+            status.textContent = "Firewall OFF: " + current;
         }
 
         if (res.data.last_error) {
@@ -4183,23 +4183,23 @@
     }
 
     async function stopFirewallFromTopbar() {
-        if (!(await appConfirm("Switch firewall to memory mode (stop live backend)?", {
-            title: "Stop Live Firewall",
-            confirmText: "Switch",
+        if (!(await appConfirm("Disable firewall backend from GUI?", {
+            title: "Shutdown Firewall",
+            confirmText: "Disable",
             cancelText: "Cancel",
             confirmClass: "btn btn-danger",
         }))) return;
         var res = await fetch(API + "/firewall/engine", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ engine: "memory" }),
+            body: JSON.stringify({ engine: "disabled" }),
         });
         var data = await res.json();
         if (!data.success) {
             toast(data.message || "Failed to stop firewall", "error");
             return;
         }
-        toast("Firewall switched to memory mode", "success");
+        toast("Firewall backend disabled", "success");
         refreshFirewallStateAfterEngineSwitch();
     }
 
@@ -4210,15 +4210,15 @@
             return;
         }
         var engines = (info.data && info.data.available_engines) || [];
-        var target = "memory";
+        var target = "";
         for (var i = 0; i < engines.length; i++) {
             var name = String(engines[i] || "").toLowerCase();
-            if (name && name !== "memory") {
+            if (name && name !== "disabled" && name !== "memory") {
                 target = name;
                 break;
             }
         }
-        if (target === "memory") {
+        if (!target) {
             toast("No live backend available to restart", "error");
             return;
         }

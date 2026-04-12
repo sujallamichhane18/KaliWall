@@ -1,6 +1,6 @@
-// Package firewall manages iptables/nftables rule application and in-memory rule storage.
-// On Linux with root privileges it executes real iptables commands.
-// Otherwise it operates in demo mode with in-memory rules only.
+// Package firewall manages iptables/nftables rule application and rule storage.
+// On Linux with root privileges it executes real packet-filter commands.
+// Otherwise it operates with backend disabled (no live enforcement).
 package firewall
 
 import (
@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	engineMemory   = "memory"
+	engineDisabled = "disabled"
 	engineIPTables = "iptables"
 	engineUFW      = "ufw"
 	engineNFTables = "nftables"
@@ -62,7 +62,7 @@ type dnsCacheEntry struct {
 
 // New creates a new firewall engine and detects whether live iptables mode is available.
 func New(l *logger.TrafficLogger, db *database.Store) *Engine {
-	e := &Engine{rules: make([]models.Rule, 0), logger: l, db: db, backend: engineMemory, dnsCache: make(map[string]dnsCacheEntry)}
+	e := &Engine{rules: make([]models.Rule, 0), logger: l, db: db, backend: engineDisabled, dnsCache: make(map[string]dnsCacheEntry)}
 	if path, err := exec.LookPath("nslookup"); err == nil {
 		e.nslookup = path
 	}
@@ -109,16 +109,16 @@ func (e *Engine) detectMode() {
 	e.available = detectAvailableBackends()
 
 	if !e.root {
-		e.backend = engineMemory
+		e.backend = engineDisabled
 		e.liveMode = false
-		fmt.Println("[!] Not running as root — firewall backends in memory mode")
+		fmt.Println("[!] Not running as root — firewall backend disabled")
 		return
 	}
 
 	if len(e.available) == 0 {
-		e.backend = engineMemory
+		e.backend = engineDisabled
 		e.liveMode = false
-		fmt.Println("[!] No firewall backend detected — rules stored in-memory only")
+		fmt.Println("[!] No firewall backend detected — firewall backend disabled")
 		return
 	}
 
@@ -280,20 +280,23 @@ func (e *Engine) EngineInfo() models.FirewallEngineInfo {
 // SwitchEngine changes the active backend and re-syncs rules/blocks.
 func (e *Engine) SwitchEngine(name string) error {
 	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "memory" {
+		name = engineDisabled
+	}
 	if name == "" {
-		name = engineMemory
+		name = engineDisabled
 	}
 
 	e.mu.Lock()
-	if name == engineMemory {
-		e.backend = engineMemory
+	if name == engineDisabled {
+		e.backend = engineDisabled
 		e.liveMode = false
 		e.lastError = ""
 		e.mu.Unlock()
 		if e.db != nil {
-			e.db.SetSetting("firewall_engine", engineMemory)
+			e.db.SetSetting("firewall_engine", engineDisabled)
 		}
-		e.logger.Log("CONFIG", "-", "-", "-", "Firewall backend switched to memory")
+		e.logger.Log("CONFIG", "-", "-", "-", "Firewall backend disabled")
 		return nil
 	}
 
@@ -717,14 +720,10 @@ func (e *Engine) IsIPBlocked(ip string) bool {
 
 // BlockWebsite blocks a domain via iptables string matching.
 func (e *Engine) BlockWebsite(domain, reason string) (models.WebsiteBlock, error) {
+	domain = normalizeWebsiteDomain(domain)
 	if domain == "" {
 		return models.WebsiteBlock{}, fmt.Errorf("domain cannot be empty")
 	}
-	// Sanitize domain
-	domain = strings.TrimSpace(strings.ToLower(domain))
-	domain = strings.TrimPrefix(domain, "http://")
-	domain = strings.TrimPrefix(domain, "https://")
-	domain = strings.TrimRight(domain, "/")
 
 	entry := e.db.AddWebsiteBlock(domain, reason)
 
@@ -747,7 +746,7 @@ func (e *Engine) BlockWebsite(domain, reason string) (models.WebsiteBlock, error
 
 // UnblockWebsite removes a website block.
 func (e *Engine) UnblockWebsite(domain string) error {
-	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain = normalizeWebsiteDomain(domain)
 	if !e.db.RemoveWebsiteBlock(domain) {
 		return fmt.Errorf("website %s not in blocklist", domain)
 	}
@@ -774,6 +773,44 @@ func (e *Engine) ListWebsiteBlocks() []models.WebsiteBlock {
 	return e.db.ListWebsiteBlocks()
 }
 
+// IsWebsiteBlocked checks whether a domain is already in blocked website list.
+func (e *Engine) IsWebsiteBlocked(domain string) bool {
+	if e.db == nil {
+		return false
+	}
+	domain = normalizeWebsiteDomain(domain)
+	if domain == "" {
+		return false
+	}
+	for _, entry := range e.db.ListWebsiteBlocks() {
+		if !entry.Enabled {
+			continue
+		}
+		blocked := normalizeWebsiteDomain(entry.Domain)
+		if blocked == "" {
+			continue
+		}
+		if domain == blocked || strings.HasSuffix(domain, "."+blocked) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeWebsiteDomain(raw string) string {
+	domain := strings.TrimSpace(strings.ToLower(raw))
+	domain = strings.TrimPrefix(domain, "*.")
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "https://")
+	if idx := strings.IndexAny(domain, "/?#"); idx >= 0 {
+		domain = domain[:idx]
+	}
+	if idx := strings.IndexByte(domain, ':'); idx >= 0 {
+		domain = domain[:idx]
+	}
+	return strings.TrimSuffix(domain, ".")
+}
+
 // FirewallLogs returns backend-native rule/log state output for visibility.
 func (e *Engine) FirewallLogs(limit int) []string {
 	if limit <= 0 {
@@ -784,7 +821,7 @@ func (e *Engine) FirewallLogs(limit int) []string {
 	live := e.liveMode
 	e.mu.RUnlock()
 	if !live {
-		return []string{"firewall engine is in memory mode"}
+		return []string{"firewall backend is disabled"}
 	}
 
 	var cmd *exec.Cmd
@@ -1134,7 +1171,7 @@ func (e *Engine) syncLiveConfig() error {
 	backend := e.backend
 	e.mu.RUnlock()
 
-	if !e.liveMode || backend == engineMemory {
+	if !e.liveMode || backend == engineDisabled {
 		return nil
 	}
 	if err := e.flushBackend(backend); err != nil {

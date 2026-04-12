@@ -113,6 +113,8 @@ func main() {
 	var maliciousIPFeed *threatintel.MaliciousIPFeed
 	var maliciousFeedCancel context.CancelFunc
 	var maliciousFeedSubID uint64
+	var domainBlocklist *proxy.DomainBlocklist
+	var maliciousDomainFeedCancel context.CancelFunc
 	if path := strings.TrimSpace(*maliciousIPsPath); path != "" {
 		feed, err := threatintel.NewMaliciousIPFeed(path)
 		if err != nil {
@@ -174,6 +176,25 @@ func main() {
 		}
 	}
 
+	if path := strings.TrimSpace(*maliciousDomainsPath); path != "" {
+		if err := ensureMaliciousDomainsFile(path); err != nil {
+			log.Printf("Malicious domain feed disabled (%s): %v", path, err)
+		} else {
+			bl, err := proxy.NewDomainBlocklist(path)
+			if err != nil {
+				log.Printf("Malicious domain feed disabled (%s): %v", path, err)
+			} else {
+				domainBlocklist = bl
+				trafficLogger.Log("CONFIG", "-", "-", "THREAT", fmt.Sprintf("malicious domain feed loaded: %d indicators from %s", domainBlocklist.Count(), path))
+				fmt.Printf("[+] Malicious domain feed loaded: %s (%d indicators)\n", path, domainBlocklist.Count())
+
+				var domainFeedCtx context.Context
+				domainFeedCtx, maliciousDomainFeedCancel = context.WithCancel(context.Background())
+				startMaliciousDomainFeedAutoReload(domainFeedCtx, domainBlocklist, *proxyReloadInterval, trafficLogger)
+			}
+		}
+	}
+
 	// Initialize threat intelligence service (VirusTotal)
 	ti := threatintel.New()
 	// Restore API key from database
@@ -219,7 +240,7 @@ func main() {
 	if !*dpiLite {
 		fmt.Printf("[!] --dpi-lite=false ignored: KaliWall now runs lite DPI engine only\n")
 	}
-	liteEngine := lite.New(lite.Config{
+	liteCfg := lite.Config{
 		Interface:   resolvedIface,
 		Promiscuous: *dpiPromisc,
 		BPF:         *dpiBPF,
@@ -229,7 +250,24 @@ func main() {
 		MaxTrackedIPs:     *dpiMaxTrackedIPs,
 		DetectionLogEvery: *dpiLogEvery,
 		EmitEventLogs:     *dpiEmitLogs,
-	}, trafficLogger)
+		IsIPBlocked:       fw.IsIPBlocked,
+		IsWebsiteBlocked:  fw.IsWebsiteBlocked,
+		BlockIP: func(ip, reason string) error {
+			_, err := fw.BlockIP(ip, reason)
+			return err
+		},
+		BlockWebsite: func(domain, reason string) error {
+			_, err := fw.BlockWebsite(domain, reason)
+			return err
+		},
+	}
+	if maliciousIPFeed != nil {
+		liteCfg.MaliciousIPMatcher = maliciousIPFeed.IsMaliciousIP
+	}
+	if domainBlocklist != nil {
+		liteCfg.MaliciousDomainMatcher = domainBlocklist.IsBlocked
+	}
+	liteEngine := lite.New(liteCfg, trafficLogger)
 	dpiProvider.Set(liteEngine)
 	fmt.Printf("[+] DPI mode: lightweight IDS/DPI (L3 + L7)\n")
 	if !*dpiEnable {
@@ -243,14 +281,9 @@ func main() {
 
 	// Initialize REST API and web server
 	var httpProxy *proxy.FirewallProxy
-	var proxyCancel context.CancelFunc
 	if *httpProxyEnable {
-		if err := ensureMaliciousDomainsFile(*maliciousDomainsPath); err != nil {
-			log.Fatalf("Failed to initialize malicious domain file: %v", err)
-		}
-		domainBlocklist, err := proxy.NewDomainBlocklist(*maliciousDomainsPath)
-		if err != nil {
-			log.Fatalf("Failed to load malicious domains: %v", err)
+		if domainBlocklist == nil {
+			log.Fatalf("Failed to load malicious domains: %s", strings.TrimSpace(*maliciousDomainsPath))
 		}
 		blockedEventLogger, err := proxy.NewBlockedEventLogger(*proxyBlockedLogPath)
 		if err != nil {
@@ -271,9 +304,6 @@ func main() {
 				log.Printf("Failed to sync website block %s into proxy list: %v", entry.Domain, err)
 			}
 		}
-		var proxyCtx context.Context
-		proxyCtx, proxyCancel = context.WithCancel(context.Background())
-		httpProxy.StartAutoReload(proxyCtx, *proxyReloadInterval)
 	}
 
 	// Initialize multi-provider AI service
@@ -326,6 +356,9 @@ func main() {
 		if maliciousIPFeed != nil {
 			fmt.Printf("[+] Malicious IPs:   %s (%d indicators)\n", *maliciousIPsPath, maliciousIPFeed.Count())
 		}
+		if domainBlocklist != nil {
+			fmt.Printf("[+] Malicious domains: %s (%d indicators)\n", *maliciousDomainsPath, domainBlocklist.Count())
+		}
 		fmt.Println("[+] Press Ctrl+C to stop the daemon.\n")
 
 		if err := http.ListenAndServe(listenAddr, handler); err != nil {
@@ -349,8 +382,8 @@ func main() {
 	if maliciousFeedCancel != nil {
 		maliciousFeedCancel()
 	}
-	if proxyCancel != nil {
-		proxyCancel()
+	if maliciousDomainFeedCancel != nil {
+		maliciousDomainFeedCancel()
 	}
 	liteEngine.Stop()
 	monitor.Stop()
@@ -452,6 +485,41 @@ func startMaliciousIPFeedAutoReload(ctx context.Context, feed *threatintel.Malic
 				lastErr = ""
 				if changed && tl != nil {
 					tl.Log("CONFIG", "-", "-", "THREAT", fmt.Sprintf("malicious IP feed reloaded: %d indicators", count))
+				}
+			}
+		}
+	}()
+}
+
+func startMaliciousDomainFeedAutoReload(ctx context.Context, blocklist *proxy.DomainBlocklist, interval time.Duration, tl *logger.TrafficLogger) {
+	if blocklist == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		lastErr := ""
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				changed, count, err := blocklist.ReloadIfChanged()
+				if err != nil {
+					errMsg := err.Error()
+					if tl != nil && errMsg != lastErr {
+						tl.Log("ERROR", "-", "-", "THREAT", fmt.Sprintf("malicious domain feed reload failed: %v", err))
+					}
+					lastErr = errMsg
+					continue
+				}
+				lastErr = ""
+				if changed && tl != nil {
+					tl.Log("CONFIG", "-", "-", "THREAT", fmt.Sprintf("malicious domain feed reloaded: %d indicators", count))
 				}
 			}
 		}

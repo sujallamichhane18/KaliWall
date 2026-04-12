@@ -69,7 +69,7 @@
         </button>
         <h1 class="page-title" id="pageTitle">Dashboard</h1>
         <div class="topbar-actions">
-            <button class="btn btn-sm btn-secondary topbar-mini-btn" id="btnFirewallStop" title="Switch firewall to memory mode">
+            <button class="btn btn-sm btn-secondary topbar-mini-btn" id="btnFirewallStop" title="Disable firewall backend">
                 <i class="fa-solid fa-circle-stop"></i> Stop
             </button>
             <button class="btn btn-sm btn-primary topbar-mini-btn" id="btnFirewallRestart" title="Restart firewall live backend">
@@ -220,7 +220,7 @@
             <div class="system-banner" id="systemBanner" data-dashboard-section="dashboard-system">
                 <div class="sys-item"><i class="fa-solid fa-clock"></i> Uptime: <span id="sysUptime">--</span></div>
                 <div class="sys-item"><i class="fa-solid fa-weight-hanging"></i> Load: <span id="sysLoad">--</span></div>
-                <div class="sys-item"><i class="fa-solid fa-fire"></i> Engine: <span id="sysEngine">memory</span></div>
+                <div class="sys-item"><i class="fa-solid fa-fire"></i> Engine: <span id="sysEngine">disabled</span></div>
                 <div class="sys-item"><i class="fa-solid fa-robot"></i> <span class="badge badge-disabled" id="aiApiLiveBadge">AI API: checking...</span></div>
                 <div class="sys-item"><i class="fa-solid fa-server"></i> <span id="sysHostname">--</span></div>
                 <div class="sys-item"><i class="fa-brands fa-linux"></i> <span id="sysKernel">--</span></div>
@@ -899,7 +899,7 @@
                     <h3>Firewall Engine</h3>
                 </div>
                 <div class="card-body" style="padding:20px">
-                    <p class="settings-desc">Select the active packet filtering engine. KaliWall can run with nftables, iptables, ufw, or in-memory mode.</p>
+                    <p class="settings-desc">Select the active packet filtering engine. KaliWall can run with nftables, iptables, ufw, or disabled mode.</p>
                     <div class="form-group">
                         <label for="firewallEngineSelect">Active Engine</label>
                         <div class="input-with-btn">
