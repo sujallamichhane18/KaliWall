@@ -2589,11 +2589,15 @@ func (h *handlers) handleThreatCheck(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "no api key configured") {
+			if autoBlockMsg != "" {
+				respond(w, http.StatusOK, models.APIResponse{Success: true, Message: autoBlockMsg, Data: verdict})
+				return
+			}
 			respond(w, http.StatusOK, models.APIResponse{Success: true, Data: verdict})
 			return
 		}
 		msg := err.Error()
-		if autoBlocked {
+		if autoBlockMsg != "" {
 			msg = msg + " | " + autoBlockMsg
 		}
 		respond(w, http.StatusOK, models.APIResponse{
@@ -2605,6 +2609,10 @@ func (h *handlers) handleThreatCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if autoBlocked {
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: autoBlockMsg, Data: verdict})
+		return
+	}
+	if autoBlockMsg != "" {
 		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: autoBlockMsg, Data: verdict})
 		return
 	}
@@ -2625,6 +2633,13 @@ func (h *handlers) enforceThreatAutoBlock(verdict threatintel.Verdict) (bool, st
 	}
 	if !shouldAggressivelyBlockThreat(verdict) {
 		return false, ""
+	}
+	if !h.fw.EngineInfo().LiveMode {
+		msg := fmt.Sprintf("Threat detected for %s, but firewall backend is not in live mode; block not enforced", ip)
+		if h.logger != nil {
+			h.logger.Log("LOG", ip, "-", "THREAT", "dpi:threat_block_unenforced:firewall_not_live")
+		}
+		return false, msg
 	}
 	if h.fw.IsIPBlocked(ip) {
 		return false, ""
@@ -2656,6 +2671,9 @@ func shouldAggressivelyBlockThreat(verdict threatintel.Verdict) bool {
 
 func (h *handlers) enforceAnomalyBlocking(snapshot models.TrafficAnomalySnapshot) {
 	if h == nil || h.fw == nil {
+		return
+	}
+	if !h.fw.EngineInfo().LiveMode {
 		return
 	}
 	if strings.ToLower(strings.TrimSpace(snapshot.Status)) != "critical" && snapshot.RiskScore < 68 {

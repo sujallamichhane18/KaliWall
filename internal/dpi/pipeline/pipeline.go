@@ -79,7 +79,7 @@ type Pipeline struct {
 	rateLimited  atomic.Uint64
 }
 
-func New(cfg Config, l *logger.TrafficLogger) (*Pipeline, error) {
+func New(cfg Config, l *logger.TrafficLogger, blocker action.IPBlocker) (*Pipeline, error) {
 	if cfg.Interface == "" {
 		return nil, fmt.Errorf("dpi interface is required")
 	}
@@ -114,7 +114,7 @@ func New(cfg Config, l *logger.TrafficLogger) (*Pipeline, error) {
 		reassembler: r,
 		inspector:   inspect.New(),
 		ruleEngine:  ruleEngine,
-		actions:     action.New(l),
+		actions:     action.New(l, blocker),
 		inputCh:     make(chan gopacket.Packet, 8192),
 	}, nil
 }
@@ -242,9 +242,12 @@ func (p *Pipeline) worker(ctx context.Context, id int) {
 
 			if p.tracker.IsRateLimited(decoded.Tuple.SrcIP) {
 				p.rateLimited.Add(1)
-				p.blocked.Add(1)
 				res := types.InspectResult{Timestamp: decoded.Timestamp, Tuple: decoded.Tuple, Protocol: decoded.Tuple.Protocol, Detections: []string{"rate_limit"}}
-				p.actions.Handle(res, rules.Decision{Action: types.ActionBlock, Type: "rate_limit", Reason: "source rate exceeded"})
+				if p.actions.Handle(res, rules.Decision{Action: types.ActionBlock, Type: "rate_limit", Reason: "source rate exceeded"}) {
+					p.blocked.Add(1)
+				} else {
+					p.logged.Add(1)
+				}
 				continue
 			}
 
@@ -262,13 +265,18 @@ func (p *Pipeline) worker(ctx context.Context, id int) {
 				decision := p.ruleEngine.Evaluate(result)
 				switch decision.Action {
 				case types.ActionBlock:
-					p.blocked.Add(1)
+					if p.actions.Handle(result, decision) {
+						p.blocked.Add(1)
+					} else {
+						p.logged.Add(1)
+					}
 				case types.ActionLog:
 					p.logged.Add(1)
+					p.actions.Handle(result, decision)
 				default:
 					p.allowed.Add(1)
+					p.actions.Handle(result, decision)
 				}
-				p.actions.Handle(result, decision)
 			}
 		}
 	}

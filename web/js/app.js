@@ -1577,7 +1577,9 @@
         if (!entry) return false;
         const action = String(entry.action || "").toLowerCase();
         const detail = String(entry.detail || "").toLowerCase();
-        if (action === "block" || action === "drop" || action === "reject") return true;
+        if (detail.indexOf("dpi:block:") === 0 && (action === "block" || action === "drop" || action === "reject")) return true;
+        if (detail.indexOf("dpi:block_unenforced:") === 0) return true;
+        if (detail.indexOf("dpi:threat_block_unenforced:") === 0) return true;
         return detail.indexOf("dpi:") === 0 && (
             detail.indexOf("malicious") >= 0 ||
             detail.indexOf("exploit") >= 0 ||
@@ -1591,6 +1593,7 @@
     function detectDPIAlertSeverity(entry) {
         const action = String(entry.action || "").toLowerCase();
         const detail = String(entry.detail || "").toLowerCase();
+        if (detail.indexOf("block_unenforced") >= 0 || detail.indexOf("threat_block_unenforced") >= 0) return "warning";
         if (action === "block" || action === "drop" || detail.indexOf("critical") >= 0) return "critical";
         if (action === "reject" || detail.indexOf("malicious") >= 0 || detail.indexOf("exploit") >= 0) return "warning";
         return "info";

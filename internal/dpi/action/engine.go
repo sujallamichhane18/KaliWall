@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 
 	"kaliwall/internal/dpi/rules"
@@ -12,16 +13,25 @@ import (
 	"kaliwall/internal/models"
 )
 
+// IPBlocker applies source/destination IP blocks through firewall backends.
+type IPBlocker interface {
+	BlockIP(ip, reason string) (models.BlockedIP, error)
+	IsIPBlocked(ip string) bool
+}
+
 // Engine handles final decision side effects.
 type Engine struct {
 	trafficLog *logger.TrafficLogger
+	blocker    IPBlocker
 }
 
-func New(trafficLog *logger.TrafficLogger) *Engine {
-	return &Engine{trafficLog: trafficLog}
+func New(trafficLog *logger.TrafficLogger, blocker IPBlocker) *Engine {
+	return &Engine{trafficLog: trafficLog, blocker: blocker}
 }
 
-func (e *Engine) Handle(result types.InspectResult, decision rules.Decision) {
+// Handle executes side effects for a DPI decision.
+// Returns true only when a BLOCK decision was actually enforced by firewall backend.
+func (e *Engine) Handle(result types.InspectResult, decision rules.Decision) bool {
 	e.emitVerificationLogs(result)
 
 	entry := map[string]interface{}{
@@ -46,22 +56,53 @@ func (e *Engine) Handle(result types.InspectResult, decision rules.Decision) {
 
 	switch decision.Action {
 	case types.ActionBlock:
-		log.Printf("DPI BLOCK %s", b)
+		targetIP, blockNote := selectBlockTargetIP(result.Tuple.SrcIP, result.Tuple.DstIP)
+		blocked, blockErr := e.enforceBlock(targetIP, detail)
+		if blocked {
+			detailWithTarget := appendDetail(detail, "blocked_ip="+targetIP)
+			log.Printf("DPI BLOCK %s", b)
+			if e.trafficLog != nil {
+				e.trafficLog.Log("BLOCK", result.Tuple.SrcIP, result.Tuple.DstIP, result.Tuple.Protocol, "dpi:block:"+detailWithTarget)
+				e.trafficLog.EmitFirewallEvent(models.FirewallEvent{
+					EventType: "blocked_packet",
+					Backend:   "dpi",
+					Action:    "BLOCK",
+					SrcIP:     result.Tuple.SrcIP,
+					DstIP:     result.Tuple.DstIP,
+					Protocol:  result.Tuple.Protocol,
+					SrcPort:   fmt.Sprintf("%d", result.Tuple.SrcPort),
+					DstPort:   fmt.Sprintf("%d", result.Tuple.DstPort),
+					Detail:    "dpi:" + detailWithTarget,
+					Severity:  "critical",
+				})
+			}
+			return true
+		}
+
+		unenforced := appendDetail(detail, "note="+blockNote)
+		if targetIP != "" {
+			unenforced = appendDetail(unenforced, "target_ip="+targetIP)
+		}
+		if blockErr != nil {
+			unenforced = appendDetail(unenforced, "error="+compactError(blockErr))
+		}
+		log.Printf("DPI BLOCK DECISION UNENFORCED %s", b)
 		if e.trafficLog != nil {
-			e.trafficLog.Log("BLOCK", result.Tuple.SrcIP, result.Tuple.DstIP, result.Tuple.Protocol, "dpi:block:"+detail)
+			e.trafficLog.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, result.Tuple.Protocol, "dpi:block_unenforced:"+unenforced)
 			e.trafficLog.EmitFirewallEvent(models.FirewallEvent{
-				EventType: "blocked_packet",
+				EventType: "dpi_decision",
 				Backend:   "dpi",
-				Action:    "BLOCK",
+				Action:    "LOG",
 				SrcIP:     result.Tuple.SrcIP,
 				DstIP:     result.Tuple.DstIP,
 				Protocol:  result.Tuple.Protocol,
 				SrcPort:   fmt.Sprintf("%d", result.Tuple.SrcPort),
 				DstPort:   fmt.Sprintf("%d", result.Tuple.DstPort),
-				Detail:    "dpi:" + detail,
-				Severity:  "critical",
+				Detail:    "dpi:block_unenforced:" + unenforced,
+				Severity:  "warning",
 			})
 		}
+		return false
 	case types.ActionLog:
 		log.Printf("DPI LOG %s", b)
 		if e.trafficLog != nil {
@@ -79,6 +120,7 @@ func (e *Engine) Handle(result types.InspectResult, decision rules.Decision) {
 				Severity:  "warning",
 			})
 		}
+		return false
 	default:
 		if e.trafficLog != nil {
 			e.trafficLog.Log("ALLOW", result.Tuple.SrcIP, result.Tuple.DstIP, result.Tuple.Protocol, "dpi:allow:"+detail)
@@ -95,6 +137,7 @@ func (e *Engine) Handle(result types.InspectResult, decision rules.Decision) {
 				Severity:  "info",
 			})
 		}
+		return false
 	}
 }
 
@@ -149,4 +192,92 @@ func fallback(v, d string) string {
 		return d
 	}
 	return v
+}
+
+func (e *Engine) enforceBlock(targetIP string, detail string) (bool, error) {
+	if targetIP == "" {
+		return false, nil
+	}
+	if e.blocker == nil {
+		return false, nil
+	}
+	if !blockerInLiveMode(e.blocker) {
+		return false, nil
+	}
+	if e.blocker.IsIPBlocked(targetIP) {
+		return true, nil
+	}
+	reason := "DPI enforce block: " + detail
+	if len(reason) > 200 {
+		reason = reason[:200]
+	}
+	_, err := e.blocker.BlockIP(targetIP, reason)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func selectBlockTargetIP(srcIP, dstIP string) (string, string) {
+	src := net.ParseIP(strings.TrimSpace(srcIP))
+	dst := net.ParseIP(strings.TrimSpace(dstIP))
+	srcPublic := isPublicBlockTarget(src)
+	dstPublic := isPublicBlockTarget(dst)
+
+	switch {
+	case srcPublic && !dstPublic:
+		return strings.TrimSpace(srcIP), "inbound_source"
+	case dstPublic && !srcPublic:
+		return strings.TrimSpace(dstIP), "outbound_destination"
+	case srcPublic && dstPublic:
+		return strings.TrimSpace(srcIP), "public_source"
+	default:
+		return "", "no_public_target"
+	}
+}
+
+func isPublicBlockTarget(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	return true
+}
+
+func appendDetail(detail, token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		if len(detail) > 420 {
+			return detail[:420]
+		}
+		return detail
+	}
+	out := strings.TrimSpace(detail + " " + token)
+	if len(out) > 420 {
+		return out[:420]
+	}
+	return out
+}
+
+func compactError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.Join(strings.Fields(err.Error()), " ")
+	if len(msg) > 96 {
+		return msg[:96]
+	}
+	return msg
+}
+
+func blockerInLiveMode(blocker IPBlocker) bool {
+	if blocker == nil {
+		return false
+	}
+	if infoProvider, ok := blocker.(interface{ EngineInfo() models.FirewallEngineInfo }); ok {
+		return infoProvider.EngineInfo().LiveMode
+	}
+	return true
 }

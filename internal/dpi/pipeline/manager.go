@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"kaliwall/internal/dpi/action"
 	"kaliwall/internal/logger"
 )
 
@@ -12,6 +13,7 @@ type Manager struct {
 	mu      sync.RWMutex
 	cfg     Config
 	log     *logger.TrafficLogger
+	blocker action.IPBlocker
 	pipe    *Pipeline
 	enabled bool
 }
@@ -19,6 +21,18 @@ type Manager struct {
 // NewManager creates a lifecycle manager with constructor-injected dependencies.
 func NewManager(cfg Config, l *logger.TrafficLogger) *Manager {
 	return &Manager{cfg: cfg, log: l}
+}
+
+// NewManagerWithBlocker creates a manager with firewall block enforcement support.
+func NewManagerWithBlocker(cfg Config, l *logger.TrafficLogger, blocker action.IPBlocker) *Manager {
+	return &Manager{cfg: cfg, log: l, blocker: blocker}
+}
+
+// SetBlocker updates the runtime blocker used for DPI block enforcement.
+func (m *Manager) SetBlocker(blocker action.IPBlocker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.blocker = blocker
 }
 
 // SetEnabled starts or stops DPI safely.
@@ -45,7 +59,7 @@ func (m *Manager) Start(parent context.Context) error {
 		m.pipe = nil
 	}
 
-	pipe, err := New(m.cfg, m.log)
+	pipe, err := New(m.cfg, m.log, m.blocker)
 	if err != nil {
 		m.enabled = false
 		return err
