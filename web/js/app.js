@@ -3033,7 +3033,11 @@
         }
         const warnings = validationData.data || [];
         renderRuleWarnings(warnings);
-        if (warnings.length > 0 && !confirm("Rule analyzer found warnings. Continue anyway?")) {
+        if (warnings.length > 0 && !(await appConfirm("Rule analyzer found warnings. Continue anyway?", {
+            title: "Rule Analyzer Warning",
+            confirmText: "Continue",
+            cancelText: "Cancel",
+        }))) {
             return;
         }
 
@@ -3075,7 +3079,12 @@
     }
 
     async function deleteRule(id) {
-        if (!confirm("Delete this firewall rule?")) return;
+        if (!(await appConfirm("Delete this firewall rule?", {
+            title: "Delete Rule",
+            confirmText: "Delete",
+            cancelText: "Cancel",
+            confirmClass: "btn btn-danger",
+        }))) return;
         const res = await fetch(API + "/rules/" + encodeURIComponent(id), { method: "DELETE" });
         const data = await res.json();
         if (data.success) {
@@ -3217,7 +3226,11 @@
     }
 
     async function unblockIP(ip) {
-        if (!confirm("Unblock IP " + ip + "?")) return;
+        if (!(await appConfirm("Unblock IP " + ip + "?", {
+            title: "Unblock IP",
+            confirmText: "Unblock",
+            cancelText: "Cancel",
+        }))) return;
         const res = await fetch(API + "/blocked/" + encodeURIComponent(ip), { method: "DELETE" });
         const data = await res.json();
         if (data.success) {
@@ -3280,7 +3293,12 @@
     }
 
     async function blockIPFromThreat(ip) {
-        if (!confirm("Block IP " + ip + "?")) return;
+        if (!(await appConfirm("Block IP " + ip + "?", {
+            title: "Block IP",
+            confirmText: "Block",
+            cancelText: "Cancel",
+            confirmClass: "btn btn-danger",
+        }))) return;
         const res = await fetch(API + "/blocked", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -3416,7 +3434,11 @@
     }
 
     async function unblockWebsite(domain) {
-        if (!confirm("Unblock website " + domain + "?")) return;
+        if (!(await appConfirm("Unblock website " + domain + "?", {
+            title: "Unblock Website",
+            confirmText: "Unblock",
+            cancelText: "Cancel",
+        }))) return;
         const res = await fetch(API + "/websites/" + encodeURIComponent(domain), { method: "DELETE" });
         const data = await res.json();
         if (data.success) {
@@ -3554,7 +3576,10 @@
 
             if (!shouldCreate) {
                 toast("AI decision: no rule suggested", "success");
-                alert("AI Decision\n\nCreate rule: NO\nConfidence: " + confidence + "%\nSource: " + source + "\nReason: " + reason);
+                await appAlert("Create rule: NO\nConfidence: " + confidence + "%\nSource: " + source + "\nReason: " + reason, {
+                    title: "AI Decision",
+                    confirmText: "OK",
+                });
                 return;
             }
 
@@ -3574,7 +3599,11 @@
                 "Reason: " + reason + "\n\n" +
                 "Approve and create this firewall rule?";
 
-            if (!confirm(summary)) {
+            if (!(await appConfirm(summary, {
+                title: "AI Rule Suggestion",
+                confirmText: "Approve",
+                cancelText: "Reject",
+            }))) {
                 toast("AI rule suggestion not approved", "error");
                 return;
             }
@@ -4174,7 +4203,12 @@
     }
 
     async function stopFirewallFromTopbar() {
-        if (!confirm("Switch firewall to memory mode (stop live backend)?")) return;
+        if (!(await appConfirm("Switch firewall to memory mode (stop live backend)?", {
+            title: "Stop Live Firewall",
+            confirmText: "Switch",
+            cancelText: "Cancel",
+            confirmClass: "btn btn-danger",
+        }))) return;
         var res = await fetch(API + "/firewall/engine", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -4299,7 +4333,12 @@
                 toast("Choose an AI provider", "error");
                 return;
             }
-            if (!confirm("Remove saved key for " + prettyAIProviderName(provider) + "?")) return;
+            if (!(await appConfirm("Remove saved key for " + prettyAIProviderName(provider) + "?", {
+                title: "Remove API Key",
+                confirmText: "Remove",
+                cancelText: "Cancel",
+                confirmClass: "btn btn-danger",
+            }))) return;
 
             var res = await fetch(API + "/ai/apikey?provider=" + encodeURIComponent(provider), {
                 method: "DELETE",
@@ -4317,7 +4356,12 @@
     }
 
     document.getElementById("btnRemoveApiKey").addEventListener("click", async function () {
-        if (!confirm("Remove the VirusTotal API key?")) return;
+        if (!(await appConfirm("Remove the VirusTotal API key?", {
+            title: "Remove VirusTotal Key",
+            confirmText: "Remove",
+            cancelText: "Cancel",
+            confirmClass: "btn btn-danger",
+        }))) return;
         await fetch(API + "/threat/apikey", { method: "DELETE" });
         toast("API key removed", "success");
         threatCache = {};
@@ -4746,6 +4790,139 @@
     function setText(id, value) {
         var el = document.getElementById(id);
         if (el) el.textContent = String(value);
+    }
+
+    var promptState = {
+        modal: null,
+        title: null,
+        message: null,
+        confirmBtn: null,
+        cancelBtn: null,
+        closeBtn: null,
+        resolver: null,
+        defaultConfirmClass: "",
+    };
+
+    function ensurePromptModal() {
+        if (promptState.modal) return;
+
+        var overlay = document.createElement("div");
+        overlay.id = "appPromptModal";
+        overlay.className = "modal-overlay";
+        overlay.innerHTML =
+            '<div class="modal" style="max-width:560px">' +
+                '<div class="modal-header">' +
+                    '<h3 id="appPromptTitle"><i class="fa-solid fa-circle-question"></i> Confirm</h3>' +
+                    '<button class="modal-close" id="appPromptClose" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>' +
+                '</div>' +
+                '<div class="modal-body">' +
+                    '<p id="appPromptMessage" class="prompt-message"></p>' +
+                '</div>' +
+                '<div class="modal-footer">' +
+                    '<button type="button" class="btn btn-secondary" id="appPromptCancel">Cancel</button>' +
+                    '<button type="button" class="btn btn-primary" id="appPromptConfirm">OK</button>' +
+                '</div>' +
+            '</div>';
+
+        document.body.appendChild(overlay);
+
+        promptState.modal = overlay;
+        promptState.title = overlay.querySelector("#appPromptTitle");
+        promptState.message = overlay.querySelector("#appPromptMessage");
+        promptState.confirmBtn = overlay.querySelector("#appPromptConfirm");
+        promptState.cancelBtn = overlay.querySelector("#appPromptCancel");
+        promptState.closeBtn = overlay.querySelector("#appPromptClose");
+        promptState.defaultConfirmClass = promptState.confirmBtn.className;
+
+        promptState.confirmBtn.addEventListener("click", function () {
+            closePromptModal(true);
+        });
+        promptState.cancelBtn.addEventListener("click", function () {
+            closePromptModal(false);
+        });
+        promptState.closeBtn.addEventListener("click", function () {
+            closePromptModal(false);
+        });
+        promptState.modal.addEventListener("click", function (event) {
+            if (event.target === promptState.modal) {
+                closePromptModal(false);
+            }
+        });
+    }
+
+    function closePromptModal(result) {
+        if (!promptState.modal) return;
+        promptState.modal.classList.remove("open");
+        document.removeEventListener("keydown", handlePromptKeydown);
+        var resolver = promptState.resolver;
+        promptState.resolver = null;
+        if (resolver) resolver(!!result);
+    }
+
+    function handlePromptKeydown(event) {
+        if (!promptState.modal || !promptState.modal.classList.contains("open")) return;
+        if (event.key === "Escape") {
+            event.preventDefault();
+            closePromptModal(false);
+        } else if (event.key === "Enter") {
+            event.preventDefault();
+            closePromptModal(true);
+        }
+    }
+
+    function appConfirm(message, options) {
+        ensurePromptModal();
+
+        options = options || {};
+        if (promptState.resolver) {
+            closePromptModal(false);
+        }
+
+        promptState.title.innerHTML = '<i class="fa-solid fa-circle-question"></i> ' + escapeHtml(options.title || "Confirm action");
+        promptState.message.textContent = String(message || "Are you sure?");
+        promptState.confirmBtn.textContent = options.confirmText || "OK";
+        promptState.cancelBtn.textContent = options.cancelText || "Cancel";
+        promptState.confirmBtn.className = options.confirmClass || promptState.defaultConfirmClass;
+        promptState.cancelBtn.style.display = "inline-flex";
+        promptState.closeBtn.style.display = "inline-flex";
+
+        promptState.modal.classList.add("open");
+        document.addEventListener("keydown", handlePromptKeydown);
+        setTimeout(function () {
+            promptState.confirmBtn.focus();
+        }, 0);
+
+        return new Promise(function (resolve) {
+            promptState.resolver = resolve;
+        });
+    }
+
+    function appAlert(message, options) {
+        ensurePromptModal();
+
+        options = options || {};
+        if (promptState.resolver) {
+            closePromptModal(false);
+        }
+
+        promptState.title.innerHTML = '<i class="fa-solid fa-circle-info"></i> ' + escapeHtml(options.title || "Notification");
+        promptState.message.textContent = String(message || "");
+        promptState.confirmBtn.textContent = options.confirmText || "OK";
+        promptState.confirmBtn.className = options.confirmClass || promptState.defaultConfirmClass;
+        promptState.cancelBtn.style.display = "none";
+        promptState.closeBtn.style.display = "none";
+
+        promptState.modal.classList.add("open");
+        document.addEventListener("keydown", handlePromptKeydown);
+        setTimeout(function () {
+            promptState.confirmBtn.focus();
+        }, 0);
+
+        return new Promise(function (resolve) {
+            promptState.resolver = function () {
+                resolve();
+            };
+        });
     }
 
     function toast(message, type) {
