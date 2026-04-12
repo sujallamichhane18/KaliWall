@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -96,6 +97,9 @@ func (p *DPIProvider) SetEnabled(enabled bool) error {
 	if p == nil {
 		return errors.New("DPI provider unavailable")
 	}
+	if !enabled {
+		return errors.New("DPI disable removed: always-on mode")
+	}
 	p.mu.RLock()
 	provider := p.provider
 	p.mu.RUnlock()
@@ -106,7 +110,7 @@ func (p *DPIProvider) SetEnabled(enabled bool) error {
 	if !ok {
 		return errors.New("DPI control not supported")
 	}
-	return ctrl.SetEnabled(enabled)
+	return ctrl.SetEnabled(true)
 }
 
 // DetailedStats returns provider-specific rich stats when available.
@@ -326,16 +330,21 @@ func (h *handlers) handleDPIControl(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "enabled is required"})
 		return
 	}
-	if err := h.dpi.SetEnabled(*body.Enabled); err != nil {
+	if !*body.Enabled {
+		if err := h.dpi.SetEnabled(true); err != nil {
+			respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		status, _ := h.dpi.Status()
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "DPI always-on mode active", Data: status})
+		return
+	}
+	if err := h.dpi.SetEnabled(true); err != nil {
 		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: err.Error()})
 		return
 	}
 	status, _ := h.dpi.Status()
-	msg := "DPI disabled"
-	if *body.Enabled {
-		msg = "DPI enabled"
-	}
-	respond(w, http.StatusOK, models.APIResponse{Success: true, Message: msg, Data: status})
+	respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "DPI enabled", Data: status})
 }
 
 func (h *handlers) handleDPIStatus(w http.ResponseWriter, r *http.Request) {
@@ -489,6 +498,7 @@ func (h *handlers) handleTrafficAnomalies(w http.ResponseWriter, r *http.Request
 	}
 
 	snapshot := h.buildTrafficAnomalySnapshot(limit, windowMinutes)
+	h.enforceAnomalyBlocking(snapshot)
 	h.recordAnomalySnapshot(snapshot)
 	snapshot = h.withAnomalyTrendHistory(snapshot, trendLimit)
 
@@ -503,12 +513,12 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		windowMinutes = 15
 	}
 
-	minHistorySamples := 80
+	minHistorySamples := 60
 	minHistoryDurationMinutes := windowMinutes * 2
-	if minHistoryDurationMinutes < 20 {
-		minHistoryDurationMinutes = 20
+	if minHistoryDurationMinutes < 15 {
+		minHistoryDurationMinutes = 15
 	}
-	minHistoryFastTrackSamples := minHistorySamples + 10
+	minHistoryFastTrackSamples := minHistorySamples + 6
 
 	now := time.Now().UTC()
 	snapshot := models.TrafficAnomalySnapshot{
@@ -767,13 +777,13 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		idx++
 	}
 
-	if currentMinuteCount >= 16 {
-		if (meanPerMin > 0 && zScore >= 2.4) || (burstRatio >= 2.2 && currentMinuteCount >= 24) {
+	if currentMinuteCount >= 12 {
+		if (meanPerMin > 0 && zScore >= 1.9) || (burstRatio >= 1.8 && currentMinuteCount >= 18) {
 			severity := "warning"
-			if zScore >= 4.0 || burstRatio >= 3.4 {
+			if zScore >= 3.2 || burstRatio >= 2.8 {
 				severity = "critical"
 			}
-			score := int(34 + zScore*14 + math.Max(0, burstRatio-1.0)*10)
+			score := int(40 + zScore*14 + math.Max(0, burstRatio-1.0)*12)
 			appendAnomaly(
 				"traffic_spike",
 				severity,
@@ -795,11 +805,11 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if prevTotal >= 20 && windowTotal >= 36 {
+	if prevTotal >= 16 && windowTotal >= 28 {
 		growth := float64(windowTotal) / float64(prevTotal)
-		if growth >= 1.55 && (windowTotal-prevTotal) >= 18 {
+		if growth >= 1.35 && (windowTotal-prevTotal) >= 12 {
 			severity := "warning"
-			if growth >= 2.35 {
+			if growth >= 1.9 {
 				severity = "critical"
 			}
 			appendAnomaly(
@@ -821,11 +831,11 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if windowTotal >= 24 {
+	if windowTotal >= 20 {
 		blockedRatio := float64(windowBlocked) / float64(windowTotal)
-		if blockedRatio >= 0.46 && windowBlocked >= 12 {
+		if blockedRatio >= 0.34 && windowBlocked >= 8 {
 			severity := "warning"
-			if blockedRatio >= 0.68 {
+			if blockedRatio >= 0.52 {
 				severity = "critical"
 			}
 			appendAnomaly(
@@ -846,13 +856,13 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if prevTotal >= 20 && windowTotal >= 24 {
+	if prevTotal >= 16 && windowTotal >= 20 {
 		prevBlockedRatio := float64(prevBlocked) / float64(prevTotal)
 		blockedRatio := float64(windowBlocked) / float64(windowTotal)
 		delta := blockedRatio - prevBlockedRatio
-		if blockedRatio >= 0.38 && delta >= 0.14 && windowBlocked >= 10 {
+		if blockedRatio >= 0.30 && delta >= 0.10 && windowBlocked >= 7 {
 			severity := "warning"
-			if blockedRatio >= 0.58 || delta >= 0.26 {
+			if blockedRatio >= 0.45 || delta >= 0.18 {
 				severity = "critical"
 			}
 			appendAnomaly(
@@ -915,11 +925,11 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if windowTotal >= 24 && windowSuspicious >= 8 {
+	if windowTotal >= 18 && windowSuspicious >= 5 {
 		suspiciousRatio := float64(windowSuspicious) / float64(windowTotal)
-		if suspiciousRatio >= 0.22 {
+		if suspiciousRatio >= 0.16 {
 			severity := "warning"
-			if suspiciousRatio >= 0.35 {
+			if suspiciousRatio >= 0.26 {
 				severity = "critical"
 			}
 			appendAnomaly(
@@ -1020,10 +1030,10 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		portCount := len(portsSet)
 		targetCount := len(sourceTargets[src])
 		events := sourceTotal[src]
-		if events < 14 || portCount < 8 {
+		if events < 10 || portCount < 6 {
 			continue
 		}
-		if targetCount < 5 && portCount < 12 {
+		if targetCount < 4 && portCount < 9 {
 			continue
 		}
 		weight := portCount*3 + targetCount*2 + events/2 + sourceBlocked[src]
@@ -1069,11 +1079,11 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		targetCount := len(targetsSet)
 		events := sourceTotal[src]
 		riskHits := sourceBlocked[src] + sourceSuspicious[src]
-		if events < 16 || targetCount < 10 {
+		if events < 12 || targetCount < 8 {
 			continue
 		}
 		targetRatio := safeRatio(float64(targetCount), float64(events))
-		if targetRatio < 0.34 && targetCount < 14 {
+		if targetRatio < 0.26 && targetCount < 10 {
 			continue
 		}
 		weight := targetCount*3 + riskHits*2 + events/2
@@ -1116,17 +1126,17 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	bestOffender := offenderCandidate{}
 	bestOffenderWeight := 0
 	for src, total := range sourceTotal {
-		if total < 14 {
+		if total < 10 {
 			continue
 		}
 		blockedHits := sourceBlocked[src]
 		suspiciousHits := sourceSuspicious[src]
-		if blockedHits < 8 {
+		if blockedHits < 6 {
 			continue
 		}
 		riskHits := blockedHits + suspiciousHits
 		ratio := float64(riskHits) / float64(total)
-		if ratio < 0.62 {
+		if ratio < 0.50 {
 			continue
 		}
 		weight := blockedHits*3 + suspiciousHits*2 + total/2
@@ -1161,7 +1171,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 	}
 
-	if windowTotal >= 20 && historicalTotal >= 50 && len(sourceWindow) > 0 {
+	if windowTotal >= 16 && historicalTotal >= 40 && len(sourceWindow) > 0 {
 		type entityShiftCandidate struct {
 			SourceIP       string
 			CurrentHits    int
@@ -1184,7 +1194,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			if historicalHits >= 5 {
 				baselineShare := safeRatio(float64(historicalHits), float64(historicalTotal))
 				shareDelta := currentShare - baselineShare
-				if currentHits >= 7 && shareDelta >= 0.06 && currentShare >= baselineShare*2.7+0.04 {
+				if currentHits >= 5 && shareDelta >= 0.04 && currentShare >= baselineShare*2.2+0.03 {
 					weight := int(shareDelta*1000) + riskHits*4 + currentHits
 					if weight > bestShiftWeight {
 						bestShiftWeight = weight
@@ -1201,7 +1211,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 				continue
 			}
 
-			if historicalHits == 0 && currentHits >= 10 && riskHits >= 5 {
+			if historicalHits == 0 && currentHits >= 8 && riskHits >= 4 {
 				weight := currentHits*2 + riskHits*5
 				if weight > bestNewWeight {
 					bestNewWeight = weight
@@ -1270,7 +1280,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if windowTotal >= 20 && historicalTotal >= 64 && len(windowHourCounts) > 0 {
+	if windowTotal >= 16 && historicalTotal >= 48 && len(windowHourCounts) > 0 {
 		dominantHour := -1
 		dominantHourHits := 0
 		for hour, hits := range windowHourCounts {
@@ -1280,12 +1290,12 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			}
 		}
 
-		if dominantHour >= 0 && dominantHourHits >= 8 {
+		if dominantHour >= 0 && dominantHourHits >= 6 {
 			baselineShare := safeRatio(float64(historicalHourTotals[dominantHour]), float64(historicalTotal))
 			currentShare := safeRatio(float64(dominantHourHits), float64(windowTotal))
-			if (baselineShare <= 0.10 && currentShare >= 0.30) || (baselineShare > 0 && currentShare >= baselineShare*2.5 && (currentShare-baselineShare) >= 0.12) {
+			if (baselineShare <= 0.10 && currentShare >= 0.24) || (baselineShare > 0 && currentShare >= baselineShare*2.1 && (currentShare-baselineShare) >= 0.09) {
 				severity := "warning"
-				if currentShare >= 0.50 || baselineShare <= 0.025 {
+				if currentShare >= 0.40 || baselineShare <= 0.02 {
 					severity = "critical"
 				}
 				appendAnomaly(
@@ -1311,7 +1321,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	windowRiskHits := windowBlocked + windowSuspicious
-	if windowTotal >= 30 && len(destinationWindow) > 0 {
+	if windowTotal >= 22 && len(destinationWindow) > 0 {
 		topDst := ""
 		topHits := 0
 		for dst, hits := range destinationWindow {
@@ -1320,16 +1330,16 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 				topHits = hits
 			}
 		}
-		if topDst != "" && topHits >= 12 {
+		if topDst != "" && topHits >= 9 {
 			riskHits := destinationRiskWindow[topDst]
 			share := safeRatio(float64(topHits), float64(windowTotal))
 			riskShare := 0.0
 			if windowRiskHits > 0 {
 				riskShare = safeRatio(float64(riskHits), float64(windowRiskHits))
 			}
-			if share >= 0.36 || (riskHits >= 8 && riskShare >= 0.45) {
+			if share >= 0.28 || (riskHits >= 6 && riskShare >= 0.34) {
 				severity := "warning"
-				if share >= 0.54 || riskShare >= 0.72 {
+				if share >= 0.42 || riskShare >= 0.56 {
 					severity = "critical"
 				}
 				appendAnomaly(
@@ -1361,11 +1371,11 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			halfOpen++
 		}
 	}
-	if len(conns) >= 28 && halfOpen >= 10 {
+	if len(conns) >= 20 && halfOpen >= 7 {
 		halfOpenRatio := float64(halfOpen) / float64(len(conns))
-		if halfOpenRatio >= 0.28 {
+		if halfOpenRatio >= 0.22 {
 			severity := "warning"
-			if halfOpenRatio >= 0.45 {
+			if halfOpenRatio >= 0.34 {
 				severity = "critical"
 			}
 			appendAnomaly(
@@ -1386,9 +1396,9 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 	}
 
-	if maxFanout.Ports >= 10 {
+	if maxFanout.Ports >= 8 {
 		severity := "warning"
-		if maxFanout.Ports >= 18 {
+		if maxFanout.Ports >= 14 {
 			severity = "critical"
 		}
 		appendAnomaly(
@@ -1419,11 +1429,11 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 
 	status := "normal"
 	switch {
-	case riskScore >= 82:
+	case riskScore >= 72:
 		status = "critical"
-	case riskScore >= 60:
+	case riskScore >= 50:
 		status = "high"
-	case riskScore >= 35:
+	case riskScore >= 28:
 		status = "elevated"
 	}
 
@@ -1440,12 +1450,12 @@ func calculateAnomalyRiskScore(anomalies []models.TrafficAnomaly, windowTotal in
 		if windowTotal > 0 {
 			blockedRatio := safeRatio(float64(windowBlocked), float64(windowTotal))
 			suspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
-			base += blockedRatio*18 + suspiciousRatio*12
+			base += blockedRatio*24 + suspiciousRatio*18
 		}
 		if meanPerMin > 0 {
-			threshold := meanPerMin + math.Max(stdPerMin*1.8, 2.5)
+			threshold := meanPerMin + math.Max(stdPerMin*1.4, 2.0)
 			if float64(currentMinuteCount) > threshold {
-				base += math.Min(12, (float64(currentMinuteCount)-threshold)*0.9)
+				base += math.Min(18, (float64(currentMinuteCount)-threshold)*1.1)
 			}
 		}
 		return clampInt(int(math.Round(base)), 0, 100)
@@ -2575,19 +2585,148 @@ func (h *handlers) handleThreatCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	verdict, err := h.threat.CheckIP(ip)
+	autoBlocked, autoBlockMsg := h.enforceThreatAutoBlock(verdict)
+
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "no api key configured") {
 			respond(w, http.StatusOK, models.APIResponse{Success: true, Data: verdict})
 			return
 		}
+		msg := err.Error()
+		if autoBlocked {
+			msg = msg + " | " + autoBlockMsg
+		}
 		respond(w, http.StatusOK, models.APIResponse{
 			Success: true,
-			Message: err.Error(),
+			Message: msg,
 			Data:    verdict,
 		})
 		return
 	}
+
+	if autoBlocked {
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: autoBlockMsg, Data: verdict})
+		return
+	}
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: verdict})
+}
+
+func (h *handlers) enforceThreatAutoBlock(verdict threatintel.Verdict) (bool, string) {
+	if h == nil || h.fw == nil {
+		return false, ""
+	}
+	ip := strings.TrimSpace(verdict.IP)
+	if ip == "" {
+		return false, ""
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
+		return false, ""
+	}
+	if !shouldAggressivelyBlockThreat(verdict) {
+		return false, ""
+	}
+	if h.fw.IsIPBlocked(ip) {
+		return false, ""
+	}
+	reason := fmt.Sprintf("Auto threat block: level=%s malicious=%d suspicious=%d reputation=%d", verdict.ThreatLevel, verdict.Malicious, verdict.Suspicious, verdict.Reputation)
+	if _, err := h.fw.BlockIP(ip, reason); err != nil {
+		if h.logger != nil {
+			h.logger.Log("ERROR", ip, "-", "THREAT", fmt.Sprintf("threat auto-block failed: %v", err))
+		}
+		return false, ""
+	}
+	msg := fmt.Sprintf("Threat auto-block enforced for %s", ip)
+	if h.logger != nil {
+		h.logger.Log("BLOCK", ip, "-", "THREAT", msg)
+	}
+	return true, msg
+}
+
+func shouldAggressivelyBlockThreat(verdict threatintel.Verdict) bool {
+	level := strings.ToLower(strings.TrimSpace(verdict.ThreatLevel))
+	if level == "malicious" {
+		return verdict.Malicious >= 1 || verdict.Suspicious >= 2
+	}
+	if level == "suspicious" {
+		return verdict.Malicious >= 1 || verdict.Suspicious >= 4
+	}
+	return verdict.Malicious >= 2
+}
+
+func (h *handlers) enforceAnomalyBlocking(snapshot models.TrafficAnomalySnapshot) {
+	if h == nil || h.fw == nil {
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(snapshot.Status)) != "critical" && snapshot.RiskScore < 68 {
+		return
+	}
+
+	for _, anomaly := range snapshot.Anomalies {
+		severity := strings.ToLower(strings.TrimSpace(anomaly.Severity))
+		if severity != "critical" && anomaly.Score < 80 {
+			continue
+		}
+		if !isAnomalyAutoBlockType(anomaly.Type) {
+			continue
+		}
+		ip := anomalyEvidenceSourceIP(anomaly.Evidence)
+		if ip == "" || !isBlockableInternetIP(ip) {
+			continue
+		}
+		if h.fw.IsIPBlocked(ip) {
+			continue
+		}
+
+		reason := fmt.Sprintf("Auto anomaly block: type=%s score=%d risk=%d", anomaly.Type, anomaly.Score, snapshot.RiskScore)
+		if _, err := h.fw.BlockIP(ip, reason); err != nil {
+			if h.logger != nil {
+				h.logger.Log("ERROR", ip, "-", "ANOMALY", fmt.Sprintf("anomaly auto-block failed: %v", err))
+			}
+			continue
+		}
+		if h.logger != nil {
+			h.logger.Log("BLOCK", ip, "-", "ANOMALY", fmt.Sprintf("Anomaly auto-block applied (%s)", anomaly.Type))
+		}
+		return
+	}
+}
+
+func isAnomalyAutoBlockType(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "source_port_scan", "source_target_sweep", "repeat_offender", "entity_behavior_shift", "new_entity_risk_surge", "half_open_connection_pressure":
+		return true
+	default:
+		return false
+	}
+}
+
+func anomalyEvidenceSourceIP(evidence map[string]interface{}) string {
+	if len(evidence) == 0 {
+		return ""
+	}
+	for _, key := range []string{"source_ip", "entity_ip"} {
+		if raw, ok := evidence[key]; ok {
+			if s, ok := raw.(string); ok {
+				s = strings.TrimSpace(s)
+				if net.ParseIP(s) != nil {
+					return s
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func isBlockableInternetIP(ipStr string) bool {
+	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return false
+	}
+	return true
 }
 
 // handleThreatCache returns all cached VT verdicts with connection/block status.

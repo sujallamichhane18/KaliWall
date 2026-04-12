@@ -6,6 +6,7 @@ import (
     "log"
     "runtime"
     "sort"
+    "strings"
     "sync"
     "sync/atomic"
     "time"
@@ -146,7 +147,10 @@ func New(cfg Config, tl *logger.TrafficLogger) *Engine {
         cfg.MaxTrackedIPs = 50000
     }
     if cfg.DetectionLogEvery <= 0 {
-        cfg.DetectionLogEvery = 8
+        cfg.DetectionLogEvery = 1
+    }
+    if cfg.DetectionLogEvery > 1 {
+        cfg.DetectionLogEvery = 1
     }
 
     c := capture.New(capture.Config{
@@ -484,13 +488,16 @@ func (e *Engine) record(result types.InspectResult) {
 
     if result.HTTPMethod != "" {
         e.httpDetected.Add(1)
+        e.detectionEvents.Add(1)
         seen = true
-        msg := "[HTTP] " + result.HTTPMethod + " " + result.HTTPURL + " Host: " + result.HTTPHost
-        if e.shouldEmitSampledDetectionLog() {
-            log.Println(msg)
+        target := strings.TrimSpace(result.HTTPHost)
+        if target == "" {
+            target = strings.TrimSpace(result.HTTPURL)
         }
+        msg := briefText("HTTP "+strings.ToUpper(strings.TrimSpace(result.HTTPMethod))+" "+target, 96)
+        log.Println(msg)
         if e.logger != nil && e.emitEventLogs() {
-            e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "http", "dpi:lite:"+msg)
+            e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "http", "dpi:"+msg)
         }
         e.metaMu.Lock()
         e.lastHTTP = msg
@@ -500,13 +507,12 @@ func (e *Engine) record(result types.InspectResult) {
 
     if result.DNSDomain != "" {
         e.dnsDetected.Add(1)
+        e.detectionEvents.Add(1)
         seen = true
-        msg := "[DNS] Query: " + result.DNSDomain
-        if e.shouldEmitSampledDetectionLog() {
-            log.Println(msg)
-        }
+        msg := briefText("DNS "+strings.TrimSpace(result.DNSDomain), 96)
+        log.Println(msg)
         if e.logger != nil && e.emitEventLogs() {
-            e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "dns", "dpi:lite:"+msg)
+            e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "dns", "dpi:"+msg)
         }
         e.metaMu.Lock()
         e.lastDNS = msg
@@ -516,13 +522,12 @@ func (e *Engine) record(result types.InspectResult) {
 
     if result.TLSSNI != "" {
         e.tlsDetected.Add(1)
+        e.detectionEvents.Add(1)
         seen = true
-        msg := "[TLS] SNI: " + result.TLSSNI
-        if e.shouldEmitSampledDetectionLog() {
-            log.Println(msg)
-        }
+        msg := briefText("TLS "+strings.TrimSpace(result.TLSSNI), 96)
+        log.Println(msg)
         if e.logger != nil && e.emitEventLogs() {
-            e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "tls", "dpi:lite:"+msg)
+            e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "tls", "dpi:"+msg)
         }
         e.metaMu.Lock()
         e.lastTLS = msg
@@ -603,6 +608,17 @@ func (e *Engine) shouldEmitSampledDetectionLog() bool {
         return true
     }
     return n%uint64(every) == 0
+}
+
+func briefText(s string, maxLen int) string {
+    s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+    if s == "" {
+        return "dpi event"
+    }
+    if maxLen <= 3 || len(s) <= maxLen {
+        return s
+    }
+    return s[:maxLen-3] + "..."
 }
 
 func topN(m map[string]uint64, n int) []IPCount {

@@ -48,7 +48,7 @@ const (
 func main() {
 	// CLI flags
 	daemon := flag.Bool("daemon", false, "Run in background daemon mode")
-	dpiEnable := flag.Bool("dpi", false, "Enable deep packet inspection pipeline")
+	dpiEnable := flag.Bool("dpi", true, "Enable deep packet inspection pipeline (always-on mode)")
 	dpiIface := flag.String("dpi-interface", "", "Network interface for DPI capture (e.g. eth0)")
 	dpiRules := flag.String("dpi-rules", "configs/dpi-rules.json", "Deprecated in lite mode; kept for CLI compatibility")
 	dpiWorkers := flag.Int("dpi-workers", 0, "Number of DPI workers (default: CPU cores)")
@@ -58,7 +58,7 @@ func main() {
 	dpiQueue := flag.Int("dpi-queue", envInt("KALIWALL_DPI_QUEUE", 16384), "DPI packet queue capacity")
 	dpiBatch := flag.Int("dpi-batch", envInt("KALIWALL_DPI_BATCH", 32), "DPI worker micro-batch size")
 	dpiMaxTrackedIPs := flag.Int("dpi-max-ips", envInt("KALIWALL_DPI_MAX_IPS", 50000), "DPI max unique src/dst IP cardinality tracking")
-	dpiLogEvery := flag.Int("dpi-log-every", envInt("KALIWALL_DPI_LOG_EVERY", 8), "Sample console detection logs every N events (1 = log all)")
+	dpiLogEvery := flag.Int("dpi-log-every", envInt("KALIWALL_DPI_LOG_EVERY", 1), "Console detection log cadence (forced to 1 in always-on brief mode)")
 	dpiEmitLogs := flag.Bool("dpi-emit-logs", envBool("KALIWALL_DPI_EMIT_LOGS", true), "Emit DPI detections into traffic logs")
 	dpiLite := flag.Bool("dpi-lite", true, "Run lightweight IDS/DPI engine (HTTP/DNS/TLS + L3/L7 stats)")
 	geoDBPath := flag.String("geo-db", defaultGeoDBFile, "Path to GeoIP database (.mmdb or IP2Location CSV)")
@@ -70,7 +70,7 @@ func main() {
 	proxyBlockedLogPath := flag.String("http-proxy-blocklog", proxyBlockLogFile, "JSONL path for blocked HTTP requests")
 	proxyReloadInterval := flag.Duration("http-proxy-reload-interval", 10*time.Second, "Malicious domain list auto-reload interval")
 	proxyEscalationEnable := flag.Bool("http-proxy-escalation", true, "Enable automatic source-IP blocking when VT malicious score exceeds threshold")
-	proxyEscalationThreshold := flag.Int("http-proxy-escalation-threshold", 5, "VT malicious detections threshold for auto-escalation")
+	proxyEscalationThreshold := flag.Int("http-proxy-escalation-threshold", 3, "VT malicious detections threshold for auto-escalation")
 	proxyEscalationPrivate := flag.Bool("http-proxy-escalation-private-ip", false, "Allow auto-escalation to block private/local attacker IPs")
 	flag.Parse()
 	_ = dpiRules
@@ -232,12 +232,13 @@ func main() {
 	}, trafficLogger)
 	dpiProvider.Set(liteEngine)
 	fmt.Printf("[+] DPI mode: lightweight IDS/DPI (L3 + L7)\n")
-	if *dpiEnable {
-		if err := liteEngine.SetEnabled(true); err != nil {
-			log.Printf("DPI requested but failed to start: %v", err)
-		} else {
-			fmt.Printf("[+] DPI enabled on interface: %s\n", resolvedIface)
-		}
+	if !*dpiEnable {
+		fmt.Printf("[!] --dpi=false ignored: DPI disable is removed in always-on mode\n")
+	}
+	if err := liteEngine.SetEnabled(true); err != nil {
+		log.Printf("DPI startup failed: %v", err)
+	} else {
+		fmt.Printf("[+] DPI enabled on interface: %s\n", resolvedIface)
 	}
 
 	// Initialize REST API and web server

@@ -360,9 +360,9 @@ func normalizeURL(raw string) string {
 
 func threatLevelFromStats(malicious, suspicious int) string {
 	switch {
-	case malicious >= 3:
+	case malicious >= 1:
 		return "malicious"
-	case malicious >= 1 || suspicious >= 3:
+	case suspicious >= 2:
 		return "suspicious"
 	default:
 		return "safe"

@@ -1462,12 +1462,11 @@
 
         const btn = document.getElementById("btnToggleDPI");
         if (btn) {
-            btn.innerHTML = on
-                ? '<i class="fa-solid fa-power-off"></i> Turn OFF DPI'
-                : '<i class="fa-solid fa-power-off"></i> Turn ON DPI';
-            btn.classList.toggle("btn-danger", on);
-            btn.classList.toggle("btn-primary", !on);
-            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-lock"></i> DPI Always ON';
+            btn.classList.remove("btn-danger");
+            btn.classList.remove("btn-primary");
+            btn.classList.add("btn-secondary");
+            btn.disabled = true;
         }
 
         if (!res.success && res.message) {
@@ -1796,29 +1795,7 @@
     }
 
     async function toggleDPI() {
-        const btn = document.getElementById("btnToggleDPI");
-        const nextEnabled = !dpiRunning;
-        if (btn) btn.disabled = true;
-        try {
-            const resp = await fetch(API + "/dpi/control", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ enabled: nextEnabled }),
-            });
-            const raw = await resp.text();
-            let data;
-            try {
-                data = raw ? JSON.parse(raw) : {};
-            } catch (_err) {
-                throw new Error("DPI control endpoint returned non-JSON response. Restart server with latest build.");
-            }
-            if (!data.success) {
-                throw new Error(data.message || "Failed to toggle DPI");
-            }
-            toast(data.message || (nextEnabled ? "DPI enabled" : "DPI disabled"), "success");
-        } catch (err) {
-            toast(err.message || "Failed to toggle DPI", "error");
-        }
+        toast("DPI disable removed. DPI is locked ON.", "info");
         await loadDPIStatus();
     }
 

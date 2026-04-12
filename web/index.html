@@ -98,7 +98,7 @@
 
                 <div class="soc-kpi-grid">
                     <div class="soc-kpi-card"><span class="label">Firewall</span><span class="value" id="socFwState">ACTIVE</span></div>
-                    <div class="soc-kpi-card"><span class="label">DPI</span><span class="value" id="socDpiState">OFF</span></div>
+                    <div class="soc-kpi-card"><span class="label">DPI</span><span class="value" id="socDpiState">ON</span></div>
                     <div class="soc-kpi-card"><span class="label">Traffic Anomaly Risk</span><span class="value" id="socAnomalyRisk">NORMAL (0)</span></div>
                     <div class="soc-kpi-card"><span class="label">Decode Errors</span><span class="value" id="socDecodeErrors">0</span></div>
                     <div class="soc-kpi-card"><span class="label">TI Feed</span><span class="value" id="socTiFreshness">-</span></div>
@@ -231,7 +231,7 @@
                 <div class="card-body">
                     <div class="stats-grid compact-stats" style="margin-bottom:12px">
                         <div class="stat-card compact dpi-status-card" id="dpiStatusCard" title="Current DPI pipeline state">
-                            <div class="stat-info"><span class="stat-value" id="dpiStatusText">OFF</span><span class="stat-label">Status</span></div>
+                            <div class="stat-info"><span class="stat-value" id="dpiStatusText">ON</span><span class="stat-label">Status</span></div>
                         </div>
                         <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiPacketsSeen">0</span><span class="stat-label">Packets Seen</span></div></div>
                         <div class="stat-card compact"><div class="stat-info"><span class="stat-value" id="dpiPacketsPerSec">0</span><span class="stat-label">Packets/sec</span></div></div>
@@ -248,7 +248,7 @@
                         <span class="badge badge-disabled" id="dpiWorkersBadge">workers: 0</span>
                         <span class="badge badge-disabled" id="dpiWorkerCpuBadge">worker cpu est: -</span>
                         <span class="badge badge-disabled" id="dpiUptimeBadge">uptime: 0s</span>
-                        <button class="btn btn-primary" id="btnToggleDPI"><i class="fa-solid fa-power-off"></i> Turn ON DPI</button>
+                        <button class="btn btn-secondary" id="btnToggleDPI" disabled><i class="fa-solid fa-lock"></i> DPI Always ON</button>
                         <button class="btn btn-secondary" id="btnRefreshDPIStatus"><i class="fa-solid fa-arrows-rotate"></i> Refresh DPI</button>
                     </div>
                     <div class="toolbar-actions" style="margin-top:10px">

@@ -39,6 +39,8 @@ type EscalationResult struct {
 	Threshold   int    `json:"threshold"`
 	DomainScore int    `json:"domain_score"`
 	URLScore    int    `json:"url_score"`
+	DomainSuspicious int `json:"domain_suspicious"`
+	URLSuspicious    int `json:"url_suspicious"`
 	AppliedIP   string `json:"applied_ip,omitempty"`
 }
 
@@ -133,7 +135,7 @@ type FirewallProxy struct {
 // NewFirewallProxy builds a proxy handler that blocks malicious hosts.
 func NewFirewallProxy(blocklist *DomainBlocklist, eventLogger *BlockedEventLogger, tl *logger.TrafficLogger, ti *threatintel.Service, blocker sourceIPBlocker, escalation EscalationConfig) *FirewallProxy {
 	if escalation.VTMaliciousThreshold <= 0 {
-		escalation.VTMaliciousThreshold = 5
+		escalation.VTMaliciousThreshold = 3
 	}
 	return &FirewallProxy{
 		blocklist: blocklist,
@@ -372,16 +374,23 @@ func (p *FirewallProxy) maybeEscalate(attackerIP, domain, eventID string, assess
 	res := EscalationResult{Enabled: p.escalation.Enabled, Threshold: p.escalation.VTMaliciousThreshold}
 	res.DomainScore = assessment.Domain.Malicious
 	res.URLScore = assessment.URL.Malicious
+	res.DomainSuspicious = assessment.Domain.Suspicious
+	res.URLSuspicious = assessment.URL.Suspicious
 
 	if !p.escalation.Enabled {
 		res.Reason = "disabled"
 		return res
 	}
-	maxScore := res.DomainScore
-	if res.URLScore > maxScore {
-		maxScore = res.URLScore
+	maxMalicious := res.DomainScore
+	if res.URLScore > maxMalicious {
+		maxMalicious = res.URLScore
 	}
-	if maxScore < p.escalation.VTMaliciousThreshold {
+	maxSuspicious := res.DomainSuspicious
+	if res.URLSuspicious > maxSuspicious {
+		maxSuspicious = res.URLSuspicious
+	}
+
+	if maxMalicious < p.escalation.VTMaliciousThreshold && maxSuspicious < p.escalation.VTMaliciousThreshold*2 {
 		res.Reason = "below_threshold"
 		return res
 	}
@@ -406,7 +415,7 @@ func (p *FirewallProxy) maybeEscalate(attackerIP, domain, eventID string, assess
 		return res
 	}
 
-	reason := "Auto-escalation: VT malicious score=" + strconv.Itoa(maxScore) + " domain=" + domain + " event_id=" + eventID
+	reason := "Auto-escalation: VT malicious=" + strconv.Itoa(maxMalicious) + " suspicious=" + strconv.Itoa(maxSuspicious) + " domain=" + domain + " event_id=" + eventID
 	if _, err := p.srcBlocker.BlockIP(ip, reason); err != nil {
 		res.Reason = "block_failed: " + err.Error()
 		if p.logger != nil {
@@ -419,7 +428,7 @@ func (p *FirewallProxy) maybeEscalate(attackerIP, domain, eventID string, assess
 	res.AppliedIP = ip
 	res.Reason = "blocked"
 	if p.logger != nil {
-		p.logger.Log("BLOCK", ip, domain, "HTTP", fmt.Sprintf("auto escalation source block applied event_id=%s score=%d threshold=%d", eventID, maxScore, p.escalation.VTMaliciousThreshold))
+		p.logger.Log("BLOCK", ip, domain, "HTTP", fmt.Sprintf("auto escalation source block applied event_id=%s malicious=%d suspicious=%d threshold=%d", eventID, maxMalicious, maxSuspicious, p.escalation.VTMaliciousThreshold))
 	}
 	return res
 }
