@@ -14,6 +14,7 @@ import (
 
     "kaliwall/internal/dpi/capture"
     "kaliwall/internal/dpi/decode"
+    "kaliwall/internal/dpi/flow"
     "kaliwall/internal/dpi/inspect"
     "kaliwall/internal/dpi/pipeline"
     "kaliwall/internal/dpi/reassembly"
@@ -74,6 +75,10 @@ type Stats struct {
     DetectionEvents   uint64 `json:"detection_events"`
     DetectionLogEvery int    `json:"detection_log_every"`
     MaxTrackedIPs     int    `json:"max_tracked_ips"`
+    ActiveFlows       uint64 `json:"active_flows"`
+    FlowEvicted       uint64 `json:"flow_evicted"`
+    FlowExpired       uint64 `json:"flow_expired"`
+    FlowClosed        uint64 `json:"flow_closed"`
 }
 
 // Engine is a lightweight live IDS/DPI processor focused on protocol extraction.
@@ -86,6 +91,7 @@ type Engine struct {
     decoder  decode.Decoder
     inspect  *inspect.Engine
     reasm    reassembly.Reassembler
+    tracker  *flow.Tracker
 
     inputCh chan gopacket.Packet
     stop    context.CancelFunc
@@ -149,12 +155,23 @@ func New(cfg Config, tl *logger.TrafficLogger) *Engine {
         BPF:         cfg.BPF,
     })
 
+    flowMax := max(cfg.MaxTrackedIPs*2, 20000)
+    tracker := flow.NewWithConfig(flow.TrackerConfig{
+        ShardCount:      64,
+        MaxFlows:        flowMax,
+        FlowTimeout:     2 * time.Minute,
+        ClosedFlowTTL:   20 * time.Second,
+        CleanupInterval: 30 * time.Second,
+        RateLimitPerSec: 0,
+    })
+
     return &Engine{
         cfg:     cfg,
         logger:  tl,
         capturer: c,
         decoder: decode.New(),
         inspect: inspect.New(),
+        tracker: tracker,
         reasm: reassembly.New(reassembly.Config{
             MaxBytesPerFlow: 1 << 20,
             MaxWindowBytes:  8192,
@@ -194,6 +211,7 @@ func (e *Engine) Start(parent context.Context) error {
     e.running.Store(true)
     e.enabled.Store(true)
     e.inputCh = make(chan gopacket.Packet, e.queueCapacity())
+    e.tracker.Start()
     e.reasm.Start()
 
     e.wg.Add(1)
@@ -237,6 +255,7 @@ func (e *Engine) Stop() {
         e.stop()
     }
     _ = e.capturer.Close()
+    e.tracker.Stop()
     e.reasm.Stop()
     e.wg.Wait()
     e.running.Store(false)
@@ -284,6 +303,7 @@ func (e *Engine) DetailedStats() Stats {
     if !e.startedAt.IsZero() {
         uptime = time.Since(e.startedAt).Seconds()
     }
+    flowStats := e.tracker.Stats()
 
     return Stats{
         Enabled:      e.enabled.Load(),
@@ -316,6 +336,10 @@ func (e *Engine) DetailedStats() Stats {
         DetectionEvents:   e.detectionEvents.Load(),
         DetectionLogEvery: e.detectionLogEvery(),
         MaxTrackedIPs:     e.maxTrackedIPs(),
+        ActiveFlows:       uint64(flowStats.ActiveFlows),
+        FlowEvicted:       flowStats.EvictedFlows,
+        FlowExpired:       flowStats.ExpiredFlows,
+        FlowClosed:        flowStats.ClosedFlows,
     }
 }
 
@@ -408,6 +432,7 @@ func (e *Engine) processPacket(pkt gopacket.Packet) {
     }
 
     e.recordL3(decoded)
+    e.tracker.ObserveDecoded(decoded)
 
     payloads, err := e.reasm.Process(decoded)
     if err != nil {
@@ -416,6 +441,7 @@ func (e *Engine) processPacket(pkt gopacket.Packet) {
     }
     for _, payload := range payloads {
         result := e.inspect.Inspect(payload)
+        e.tracker.ObserveInspection(result)
         e.record(result)
     }
 }

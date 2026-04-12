@@ -248,7 +248,7 @@ func (p *Pipeline) worker(ctx context.Context, id int) {
 				continue
 			}
 
-			p.tracker.Touch(decoded.Tuple, len(decoded.Payload))
+			p.tracker.ObserveDecoded(decoded)
 			payloads, err := p.reassembler.Process(decoded)
 			if err != nil {
 				p.reasmErrors.Add(1)
@@ -258,6 +258,7 @@ func (p *Pipeline) worker(ctx context.Context, id int) {
 
 			for _, item := range payloads {
 				result := p.inspector.Inspect(item)
+				p.tracker.ObserveInspection(result)
 				decision := p.ruleEngine.Evaluate(result)
 				switch decision.Action {
 				case types.ActionBlock:
