@@ -122,7 +122,7 @@ type Engine struct {
 // New creates a lightweight IDS/DPI engine.
 func New(cfg Config, tl *logger.TrafficLogger) *Engine {
     if cfg.Workers <= 0 {
-        cfg.Workers = max(4, runtime.NumCPU())
+        cfg.Workers = defaultWorkerCount(runtime.NumCPU())
     }
     if cfg.Workers < 1 {
         cfg.Workers = 1
@@ -131,7 +131,7 @@ func New(cfg Config, tl *logger.TrafficLogger) *Engine {
         cfg.Workers = 256
     }
     if cfg.InputQueueSize <= 0 {
-        cfg.InputQueueSize = 16384
+        cfg.InputQueueSize = 8192
     }
     if cfg.PacketBatchSize <= 0 {
         cfg.PacketBatchSize = 32
@@ -514,6 +514,23 @@ func max(a, b int) int {
         return a
     }
     return b
+}
+
+func defaultWorkerCount(cpus int) int {
+    if cpus <= 1 {
+        return 1
+    }
+    if cpus <= 4 {
+        return cpus
+    }
+    workers := cpus / 2
+    if workers < 2 {
+        workers = 2
+    }
+    if workers > 8 {
+        workers = 8
+    }
+    return workers
 }
 
 func (e *Engine) queueDepth() int {

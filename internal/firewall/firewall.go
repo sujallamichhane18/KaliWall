@@ -901,9 +901,6 @@ func (e *Engine) resolveHost(ip string) string {
 		e.dnsMu.Lock()
 		e.cacheHits++
 		e.dnsMu.Unlock()
-		if ent.verified {
-			e.logger.EmitFirewallEvent(models.FirewallEvent{EventType: "dns_lookup", Backend: e.backend, Action: "CACHE_HIT", SrcIP: ip, Detail: "Forward-confirmed PTR cache hit", Severity: "info"})
-		}
 		return ent.host
 	}
 	e.dnsMu.RUnlock()

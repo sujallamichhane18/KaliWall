@@ -84,7 +84,7 @@ func New(cfg Config, l *logger.TrafficLogger) (*Pipeline, error) {
 		return nil, fmt.Errorf("dpi interface is required")
 	}
 	if cfg.Workers <= 0 {
-		cfg.Workers = max(2, runtime.NumCPU())
+		cfg.Workers = adaptiveWorkerCount(runtime.NumCPU())
 	}
 
 	ruleEngine, err := rules.LoadFromFile(cfg.RulesPath)
@@ -278,4 +278,21 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func adaptiveWorkerCount(cpus int) int {
+	if cpus <= 1 {
+		return 1
+	}
+	if cpus <= 4 {
+		return cpus
+	}
+	workers := cpus / 2
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 8 {
+		workers = 8
+	}
+	return workers
 }

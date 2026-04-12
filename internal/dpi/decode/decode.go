@@ -23,18 +23,16 @@ func New() *GopacketDecoder { return &GopacketDecoder{} }
 
 func (d *GopacketDecoder) Decode(packet gopacket.Packet) (*types.DecodedPacket, error) {
 	ethLayer := packet.Layer(layers.LayerTypeEthernet)
-	if ethLayer == nil {
-		return nil, types.ErrUnsupportedPacket
-	}
-	eth, ok := ethLayer.(*layers.Ethernet)
-	if !ok {
-		return nil, types.ErrMalformedPacket
-	}
-
 	decoded := &types.DecodedPacket{
 		Timestamp: time.Now(),
-		SrcMAC:    eth.SrcMAC.String(),
-		DstMAC:    eth.DstMAC.String(),
+	}
+	if ethLayer != nil {
+		eth, ok := ethLayer.(*layers.Ethernet)
+		if !ok {
+			return nil, types.ErrMalformedPacket
+		}
+		decoded.SrcMAC = eth.SrcMAC.String()
+		decoded.DstMAC = eth.DstMAC.String()
 	}
 
 	ip4Layer := packet.Layer(layers.LayerTypeIPv4)

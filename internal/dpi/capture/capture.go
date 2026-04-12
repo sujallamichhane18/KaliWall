@@ -3,6 +3,7 @@ package capture
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/gopacket"
@@ -38,10 +39,15 @@ type PcapCapturer struct {
 
 func New(cfg Config) *PcapCapturer {
 	if cfg.SnapLen <= 0 {
-		cfg.SnapLen = 65535
+		// 8 KiB captures full L3/L4 headers plus typical L7 metadata while reducing copy overhead.
+		cfg.SnapLen = 8192
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 500 * time.Millisecond
+	}
+	if strings.TrimSpace(cfg.BPF) == "" {
+		// DPI only inspects IP traffic; filtering early avoids spending cycles on non-IP frames.
+		cfg.BPF = "ip or ip6"
 	}
 	return &PcapCapturer{
 		cfg:     cfg,
@@ -67,6 +73,10 @@ func (c *PcapCapturer) Start(ctx context.Context) error {
 			return fmt.Errorf("bpf filter failed: %w", err)
 		}
 	}
+	decoderLayer := c.handle.LinkType().LayerType()
+	if decoderLayer == 0 {
+		decoderLayer = layers.LayerTypeEthernet
+	}
 
 	go func() {
 		defer close(c.packets)
@@ -91,7 +101,7 @@ func (c *PcapCapturer) Start(ctx context.Context) error {
 				}
 				continue
 			}
-			pkt := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.DecodeOptions{Lazy: true, NoCopy: false})
+			pkt := gopacket.NewPacket(data, decoderLayer, gopacket.DecodeOptions{Lazy: true, NoCopy: false})
 			pkt.Metadata().CaptureInfo = ci
 			select {
 			case c.packets <- pkt:

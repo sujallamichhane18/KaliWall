@@ -45,6 +45,50 @@ func TestDecodeUDPDNSPacket(t *testing.T) {
 	}
 }
 
+func TestDecodeRawIPv4PacketWithoutEthernet(t *testing.T) {
+	d := New()
+
+	ip := &layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		Protocol: layers.IPProtocolTCP,
+		SrcIP:    net.ParseIP("192.0.2.10").To4(),
+		DstIP:    net.ParseIP("198.51.100.20").To4(),
+	}
+	tcp := &layers.TCP{
+		SrcPort: 50001,
+		DstPort: 443,
+		SYN:     true,
+		Seq:     42,
+	}
+	if err := tcp.SetNetworkLayerForChecksum(ip); err != nil {
+		t.Fatalf("set checksum layer failed: %v", err)
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, ip, tcp, gopacket.Payload([]byte("hello"))); err != nil {
+		t.Fatalf("serialize raw ipv4 packet failed: %v", err)
+	}
+
+	pkt := gopacket.NewPacket(buf.Bytes(), layers.LayerTypeIPv4, gopacket.Default)
+	pkt.Metadata().Timestamp = time.Now()
+
+	decoded, err := d.Decode(pkt)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if decoded.Tuple.Protocol != "tcp" {
+		t.Fatalf("expected tcp protocol, got %s", decoded.Tuple.Protocol)
+	}
+	if decoded.Tuple.SrcIP != "192.0.2.10" || decoded.Tuple.DstIP != "198.51.100.20" {
+		t.Fatalf("unexpected tuple src/dst: %s -> %s", decoded.Tuple.SrcIP, decoded.Tuple.DstIP)
+	}
+	if decoded.SrcMAC != "" || decoded.DstMAC != "" {
+		t.Fatalf("expected empty MAC addresses for non-ethernet packet, got src=%q dst=%q", decoded.SrcMAC, decoded.DstMAC)
+	}
+}
+
 func buildTCPPacket(t *testing.T, appPayload []byte) gopacket.Packet {
 	t.Helper()
 	eth := &layers.Ethernet{
