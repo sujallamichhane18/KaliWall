@@ -449,6 +449,7 @@ func (e *Engine) processPacket(pkt gopacket.Packet) {
 
     e.logPacketBrief(decoded)
     e.recordL3(decoded)
+    e.enforceIPIndicatorTuple(decoded.Tuple)
     e.tracker.ObserveDecoded(decoded)
 
     payloads, err := e.reasm.Process(decoded)
@@ -686,42 +687,45 @@ func (e *Engine) logPacketBrief(decoded *types.DecodedPacket) {
 }
 
 func (e *Engine) enforceIndicatorBlocks(result types.InspectResult) {
-    ipMatcher := e.maliciousIPMatcher()
     domainMatcher := e.maliciousDomainMatcher()
-    if ipMatcher == nil && domainMatcher == nil {
+    if domainMatcher == nil {
         return
     }
 
-    if ipMatcher != nil {
-        seenIPs := make(map[string]struct{}, 2)
-        for _, candidate := range []string{strings.TrimSpace(result.Tuple.SrcIP), strings.TrimSpace(result.Tuple.DstIP)} {
-            if candidate == "" || net.ParseIP(candidate) == nil {
-                continue
-            }
-            if _, exists := seenIPs[candidate]; exists {
-                continue
-            }
-            seenIPs[candidate] = struct{}{}
-            if ipMatcher(candidate) {
-                e.maybeBlockIPIndicator(candidate, result)
-            }
+    seenDomains := make(map[string]struct{}, 3)
+    for _, raw := range []string{result.DNSDomain, result.TLSSNI, result.HTTPHost} {
+        domain := normalizeIndicatorDomain(raw)
+        if domain == "" {
+            continue
+        }
+        if _, exists := seenDomains[domain]; exists {
+            continue
+        }
+        seenDomains[domain] = struct{}{}
+        if domainMatcher(domain) {
+            e.maybeBlockDomainIndicator(domain, result)
         }
     }
+}
 
-    if domainMatcher != nil {
-        seenDomains := make(map[string]struct{}, 3)
-        for _, raw := range []string{result.DNSDomain, result.TLSSNI, result.HTTPHost} {
-            domain := normalizeIndicatorDomain(raw)
-            if domain == "" {
-                continue
-            }
-            if _, exists := seenDomains[domain]; exists {
-                continue
-            }
-            seenDomains[domain] = struct{}{}
-            if domainMatcher(domain) {
-                e.maybeBlockDomainIndicator(domain, result)
-            }
+func (e *Engine) enforceIPIndicatorTuple(tuple types.FiveTuple) {
+    ipMatcher := e.maliciousIPMatcher()
+    if ipMatcher == nil {
+        return
+    }
+
+    result := types.InspectResult{Tuple: tuple}
+    seenIPs := make(map[string]struct{}, 2)
+    for _, candidate := range []string{strings.TrimSpace(tuple.SrcIP), strings.TrimSpace(tuple.DstIP)} {
+        if candidate == "" || net.ParseIP(candidate) == nil {
+            continue
+        }
+        if _, exists := seenIPs[candidate]; exists {
+            continue
+        }
+        seenIPs[candidate] = struct{}{}
+        if ipMatcher(candidate) {
+            e.maybeBlockIPIndicator(candidate, result)
         }
     }
 }

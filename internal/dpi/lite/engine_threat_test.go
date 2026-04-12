@@ -28,12 +28,14 @@ func TestRecordEnforcesMaliciousIndicators(t *testing.T) {
 			return nil
 		},
 	}, nil)
+	tuple := types.FiveTuple{
+		SrcIP: "1.2.3.4",
+		DstIP: "8.8.8.8",
+	}
+	e.enforceIPIndicatorTuple(tuple)
 
 	e.record(types.InspectResult{
-		Tuple: types.FiveTuple{
-			SrcIP: "1.2.3.4",
-			DstIP: "8.8.8.8",
-		},
+		Tuple:     tuple,
 		DNSDomain: "bad.example",
 		TLSSNI:    "bad.example",
 		HTTPHost:  "bad.example:443",
@@ -65,12 +67,14 @@ func TestRecordSkipsAlreadyBlockedIndicators(t *testing.T) {
 			return nil
 		},
 	}, nil)
+	tuple := types.FiveTuple{
+		SrcIP: "5.6.7.8",
+		DstIP: "8.8.8.8",
+	}
+	e.enforceIPIndicatorTuple(tuple)
 
 	e.record(types.InspectResult{
-		Tuple: types.FiveTuple{
-			SrcIP: "5.6.7.8",
-			DstIP: "8.8.8.8",
-		},
+		Tuple:     tuple,
 		DNSDomain: "evil.example",
 	})
 
