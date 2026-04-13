@@ -20,6 +20,9 @@ import (
 	"sync"
 	"time"
 
+	iforest "github.com/e-XpertSolutions/go-iforest/v2/iforest"
+
+	"kaliwall/internal/ai"
 	"kaliwall/internal/analytics"
 	"kaliwall/internal/dpi/pipeline"
 	"kaliwall/internal/firewall"
@@ -29,7 +32,6 @@ import (
 	"kaliwall/internal/proxy"
 	"kaliwall/internal/sysinfo"
 	"kaliwall/internal/threatintel"
-	"kaliwall/internal/ai"
 )
 
 type dpiStatusProvider interface {
@@ -505,6 +507,44 @@ func (h *handlers) handleTrafficAnomalies(w http.ResponseWriter, r *http.Request
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: snapshot})
 }
 
+const (
+	anomalyEWMAEventsAlpha      = 0.24
+	anomalyEWMABlockedAlpha     = 0.20
+	anomalyEWMASuspiciousAlpha  = 0.20
+	anomalyIsolationForestTrees = 128
+	anomalyIsolationOutlierFrac = 0.10
+)
+
+type trafficMinuteAggregate struct {
+	Total         int
+	Blocked       int
+	Suspicious    int
+	SourceSet     map[string]struct{}
+	DestinationSet map[string]struct{}
+	ProtocolCounts map[string]int
+}
+
+type ewmaBaseline struct {
+	Mean    float64
+	StdDev  float64
+	Last    float64
+	Samples int
+	Alpha   float64
+}
+
+type isolationForestWindowResult struct {
+	Ready              bool
+	WindowVectors      int
+	AnomalyVectors     int
+	AnomalyRatio       float64
+	MinScore           float64
+	MeanScore          float64
+	Bound              float64
+	WorstMinuteBucket  int64
+	WorstMinuteEvents  int
+	MaxOutlierDistance float64
+}
+
 func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) models.TrafficAnomalySnapshot {
 	if limit <= 0 || limit > 10000 {
 		limit = 5000
@@ -541,6 +581,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	windowDuration := time.Duration(windowMinutes) * time.Minute
 	windowStart := now.Add(-windowDuration)
 	prevWindowStart := windowStart.Add(-windowDuration)
+	windowStartBucket := windowStart.Unix() / 60
 
 	entries := h.logger.RecentEntries(limit)
 	conns := h.fw.ActiveConnections()
@@ -592,6 +633,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	minuteTotals := make(map[int64]int)
+	minuteAggregates := make(map[int64]*trafficMinuteAggregate)
 	windowMinuteCounts := make(map[int64]int)
 	windowTotal := 0
 	windowBlocked := 0
@@ -621,13 +663,40 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 
 	for _, entry := range entries {
 		ts := entry.Timestamp
-		minuteTotals[ts.Unix()/60]++
+		minuteBucket := ts.Unix() / 60
+		minuteTotals[minuteBucket]++
 
 		isBlocked := isBlockingAction(entry.Action)
 		isSuspicious := isSuspiciousDetail(entry.Detail)
 		proto := normalizeTrafficProtocol(entry.Protocol)
 		src := normalizeTrafficIP(entry.SrcIP)
 		dst := normalizeTrafficIP(entry.DstIP)
+
+		agg := minuteAggregates[minuteBucket]
+		if agg == nil {
+			agg = &trafficMinuteAggregate{
+				SourceSet:      make(map[string]struct{}),
+				DestinationSet: make(map[string]struct{}),
+				ProtocolCounts: make(map[string]int),
+			}
+			minuteAggregates[minuteBucket] = agg
+		}
+		agg.Total++
+		if isBlocked {
+			agg.Blocked++
+		}
+		if isSuspicious {
+			agg.Suspicious++
+		}
+		if src != "" {
+			agg.SourceSet[src] = struct{}{}
+		}
+		if dst != "" {
+			agg.DestinationSet[dst] = struct{}{}
+		}
+		if proto != "" {
+			agg.ProtocolCounts[proto]++
+		}
 
 		if ts.Before(windowStart) {
 			historicalTotal++
@@ -745,15 +814,64 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		historyCounts = append(historyCounts, count)
 	}
 	meanPerMin, stdPerMin := intSeriesStats(historyCounts)
-	zScore := 0.0
-	if meanPerMin > 0 {
-		if stdPerMin > 0 {
-			zScore = (float64(currentMinuteCount) - meanPerMin) / stdPerMin
-		} else {
-			zScore = (float64(currentMinuteCount) - meanPerMin) / math.Max(1, meanPerMin*0.4)
+
+	minuteBuckets := make([]int64, 0, len(minuteAggregates))
+	for bucket := range minuteAggregates {
+		minuteBuckets = append(minuteBuckets, bucket)
+	}
+	sort.Slice(minuteBuckets, func(i, j int) bool { return minuteBuckets[i] < minuteBuckets[j] })
+
+	baselineCountSeries := make([]float64, 0, len(minuteBuckets))
+	baselineBlockedRatioSeries := make([]float64, 0, len(minuteBuckets))
+	baselineSuspiciousRatioSeries := make([]float64, 0, len(minuteBuckets))
+	for _, bucket := range minuteBuckets {
+		agg := minuteAggregates[bucket]
+		if agg == nil || agg.Total <= 0 {
+			continue
 		}
-		if zScore < 0 {
-			zScore = 0
+		if bucket >= windowStartBucket {
+			continue
+		}
+		baselineCountSeries = append(baselineCountSeries, float64(agg.Total))
+		baselineBlockedRatioSeries = append(baselineBlockedRatioSeries, safeRatio(float64(agg.Blocked), float64(agg.Total)))
+		baselineSuspiciousRatioSeries = append(baselineSuspiciousRatioSeries, safeRatio(float64(agg.Suspicious), float64(agg.Total)))
+	}
+	if len(baselineCountSeries) == 0 {
+		for _, bucket := range minuteBuckets {
+			if bucket == currentBucket {
+				continue
+			}
+			agg := minuteAggregates[bucket]
+			if agg == nil || agg.Total <= 0 {
+				continue
+			}
+			baselineCountSeries = append(baselineCountSeries, float64(agg.Total))
+			baselineBlockedRatioSeries = append(baselineBlockedRatioSeries, safeRatio(float64(agg.Blocked), float64(agg.Total)))
+			baselineSuspiciousRatioSeries = append(baselineSuspiciousRatioSeries, safeRatio(float64(agg.Suspicious), float64(agg.Total)))
+		}
+	}
+
+	ewmaCountBaseline := computeEWMABaseline(baselineCountSeries, anomalyEWMAEventsAlpha)
+	ewmaBlockedRatioBaseline := computeEWMABaseline(baselineBlockedRatioSeries, anomalyEWMABlockedAlpha)
+	ewmaSuspiciousRatioBaseline := computeEWMABaseline(baselineSuspiciousRatioSeries, anomalyEWMASuspiciousAlpha)
+
+	if ewmaCountBaseline.Mean > 0 {
+		meanPerMin = ewmaCountBaseline.Mean
+	}
+	if ewmaCountBaseline.StdDev > 0 {
+		stdPerMin = ewmaCountBaseline.StdDev
+	}
+
+	trafficThreshold := meanPerMin + math.Max(stdPerMin*2.2, 2.0)
+	trafficExcessZ := 0.0
+	if meanPerMin > 0 {
+		denom := stdPerMin
+		if denom <= 0 {
+			denom = math.Max(1.0, meanPerMin*0.35)
+		}
+		trafficExcessZ = (float64(currentMinuteCount) - meanPerMin) / denom
+		if trafficExcessZ < 0 {
+			trafficExcessZ = 0
 		}
 	}
 	burstRatio := 0.0
@@ -762,6 +880,31 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	} else if currentMinuteCount > 0 {
 		burstRatio = float64(currentMinuteCount)
 	}
+
+	windowExpectedTotal := meanPerMin * float64(windowMinutes)
+	windowExpectedStd := stdPerMin * math.Sqrt(math.Max(1, float64(windowMinutes)))
+	if windowExpectedStd < 1 {
+		windowExpectedStd = 1
+	}
+	windowGrowthThreshold := windowExpectedTotal + math.Max(windowExpectedStd*2.2, 6)
+
+	currentBlockedRatio := safeRatio(float64(windowBlocked), float64(windowTotal))
+	blockedRatioBaseline := ewmaBlockedRatioBaseline.Mean
+	if blockedRatioBaseline <= 0 && prevTotal > 0 {
+		blockedRatioBaseline = safeRatio(float64(prevBlocked), float64(prevTotal))
+	}
+	blockedRatioStd := ewmaBlockedRatioBaseline.StdDev
+	blockedRatioThreshold := blockedRatioBaseline + math.Max(blockedRatioStd*2.1, 0.06)
+
+	currentSuspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
+	suspiciousRatioBaseline := ewmaSuspiciousRatioBaseline.Mean
+	if suspiciousRatioBaseline <= 0 && prevTotal > 0 {
+		suspiciousRatioBaseline = safeRatio(float64(prevSuspicious), float64(prevTotal))
+	}
+	suspiciousRatioStd := ewmaSuspiciousRatioBaseline.StdDev
+	suspiciousRatioThreshold := suspiciousRatioBaseline + math.Max(suspiciousRatioStd*2.0, 0.05)
+
+	iforestWindow := evaluateIsolationForestWindow(minuteAggregates, windowStartBucket, currentBucket)
 
 	anomalies := make([]models.TrafficAnomaly, 0, 14)
 	idx := 1
@@ -787,80 +930,84 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		idx++
 	}
 
-	if currentMinuteCount >= 12 {
-		if (meanPerMin > 0 && zScore >= 1.9) || (burstRatio >= 1.8 && currentMinuteCount >= 18) {
-			severity := "warning"
-			if zScore >= 3.2 || burstRatio >= 2.8 {
-				severity = "critical"
-			}
-			score := int(40 + zScore*14 + math.Max(0, burstRatio-1.0)*12)
-			appendAnomaly(
-				"traffic_spike",
-				severity,
-				score,
-				"Traffic Spike Detected",
-				fmt.Sprintf("Current minute traffic (%d events) exceeds baseline (%.1f/min, z=%.2f).", currentMinuteCount, meanPerMin, zScore),
-				currentMinuteCount,
-				meanPerMin,
-				float64(currentMinuteCount),
-				map[string]interface{}{
-					"current_minute_events": currentMinuteCount,
-					"baseline_avg_per_min": meanPerMin,
-					"baseline_stddev":      stdPerMin,
-					"z_score":              zScore,
-					"burst_ratio":          burstRatio,
-					"window_minutes":       windowMinutes,
-				},
-			)
+	if currentMinuteCount >= 8 && meanPerMin > 0 && float64(currentMinuteCount) > trafficThreshold {
+		severity := "warning"
+		if trafficExcessZ >= 3.2 || burstRatio >= 2.8 {
+			severity = "critical"
 		}
+		score := int(38 + trafficExcessZ*16 + math.Max(0, burstRatio-1.0)*14)
+		appendAnomaly(
+			"traffic_spike",
+			severity,
+			score,
+			"Traffic Spike Detected",
+			fmt.Sprintf("Current minute traffic (%d events) exceeded EWMA baseline %.1f/min (threshold %.1f, z=%.2f).", currentMinuteCount, meanPerMin, trafficThreshold, trafficExcessZ),
+			currentMinuteCount,
+			meanPerMin,
+			float64(currentMinuteCount),
+			map[string]interface{}{
+				"current_minute_events": currentMinuteCount,
+				"ewma_baseline_per_min": meanPerMin,
+				"ewma_stddev":          stdPerMin,
+				"ewma_threshold":       trafficThreshold,
+				"z_score":              trafficExcessZ,
+				"burst_ratio":          burstRatio,
+				"window_minutes":       windowMinutes,
+			},
+		)
 	}
 
-	if prevTotal >= 16 && windowTotal >= 28 {
-		growth := float64(windowTotal) / float64(prevTotal)
-		if growth >= 1.35 && (windowTotal-prevTotal) >= 12 {
+	if windowTotal >= 20 && windowExpectedTotal > 0 {
+		growth := safeRatio(float64(windowTotal), windowExpectedTotal)
+		if float64(windowTotal) > windowGrowthThreshold {
 			severity := "warning"
-			if growth >= 1.9 {
+			if growth >= 1.9 || float64(windowTotal) > windowExpectedTotal+windowExpectedStd*3.4 {
 				severity = "critical"
 			}
 			appendAnomaly(
 				"window_growth",
 				severity,
-				int(30+(growth-1.0)*30),
+				int(30+(growth-1.0)*36),
 				"Traffic Window Growth",
-				fmt.Sprintf("Recent %d-minute traffic volume increased %.1fx versus the previous window (%d -> %d events).", windowMinutes, growth, prevTotal, windowTotal),
+				fmt.Sprintf("Recent %d-minute traffic volume exceeded EWMA expectation (current %d vs expected %.1f, threshold %.1f).", windowMinutes, windowTotal, windowExpectedTotal, windowGrowthThreshold),
 				windowTotal,
-				float64(prevTotal),
+				windowExpectedTotal,
 				float64(windowTotal),
 				map[string]interface{}{
-					"window_total":        windowTotal,
-					"previous_window_total": prevTotal,
-					"growth_factor":       growth,
-					"window_minutes":      windowMinutes,
+					"window_total":            windowTotal,
+					"expected_window_total":   windowExpectedTotal,
+					"expected_window_stddev":  windowExpectedStd,
+					"window_growth_threshold": windowGrowthThreshold,
+					"growth_factor":           growth,
+					"previous_window_total":   prevTotal,
+					"window_minutes":          windowMinutes,
 				},
 			)
 		}
 	}
 
-	if windowTotal >= 20 {
-		blockedRatio := float64(windowBlocked) / float64(windowTotal)
-		if blockedRatio >= 0.34 && windowBlocked >= 8 {
+	if windowTotal >= 20 && windowBlocked >= 6 {
+		if currentBlockedRatio > blockedRatioThreshold || currentBlockedRatio >= blockedRatioBaseline+0.16 {
 			severity := "warning"
-			if blockedRatio >= 0.52 {
+			if currentBlockedRatio >= blockedRatioThreshold+0.14 {
 				severity = "critical"
 			}
 			appendAnomaly(
 				"blocked_ratio_spike",
 				severity,
-				int(32 + blockedRatio*95 + float64(windowBlocked)/4),
+				int(32 + currentBlockedRatio*96 + float64(windowBlocked)/4),
 				"Blocked Ratio Surge",
-				fmt.Sprintf("%d of %d recent events were blocked/rejected (%.1f%%).", windowBlocked, windowTotal, blockedRatio*100),
+				fmt.Sprintf("%d of %d recent events were blocked/rejected (%.1f%%), above EWMA baseline %.1f%% (threshold %.1f%%).", windowBlocked, windowTotal, currentBlockedRatio*100, blockedRatioBaseline*100, blockedRatioThreshold*100),
 				windowTotal,
-				0.35,
-				blockedRatio,
+				blockedRatioBaseline,
+				currentBlockedRatio,
 				map[string]interface{}{
-					"window_blocked": windowBlocked,
-					"window_total":   windowTotal,
-					"window_minutes": windowMinutes,
+					"window_blocked":          windowBlocked,
+					"window_total":            windowTotal,
+					"ewma_baseline_ratio":     blockedRatioBaseline,
+					"ewma_ratio_stddev":       blockedRatioStd,
+					"ewma_ratio_threshold":    blockedRatioThreshold,
+					"window_minutes":          windowMinutes,
 				},
 			)
 		}
@@ -936,28 +1083,59 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	if windowTotal >= 18 && windowSuspicious >= 5 {
-		suspiciousRatio := float64(windowSuspicious) / float64(windowTotal)
-		if suspiciousRatio >= 0.16 {
+		if currentSuspiciousRatio > suspiciousRatioThreshold || currentSuspiciousRatio >= suspiciousRatioBaseline+0.12 {
 			severity := "warning"
-			if suspiciousRatio >= 0.26 {
+			if currentSuspiciousRatio >= suspiciousRatioThreshold+0.10 {
 				severity = "critical"
 			}
 			appendAnomaly(
 				"suspicious_payload_burst",
 				severity,
-				int(34 + suspiciousRatio*92),
+				int(34 + currentSuspiciousRatio*96),
 				"Suspicious Payload Burst",
-				fmt.Sprintf("%d events in the analysis window include suspicious markers (%.1f%%).", windowSuspicious, suspiciousRatio*100),
+				fmt.Sprintf("%d events in the analysis window include suspicious markers (%.1f%%), above EWMA baseline %.1f%% (threshold %.1f%%).", windowSuspicious, currentSuspiciousRatio*100, suspiciousRatioBaseline*100, suspiciousRatioThreshold*100),
 				windowSuspicious,
-				0.15,
-				suspiciousRatio,
+				suspiciousRatioBaseline,
+				currentSuspiciousRatio,
 				map[string]interface{}{
-					"suspicious_events": windowSuspicious,
-					"window_total":      windowTotal,
-					"window_minutes":    windowMinutes,
+					"suspicious_events":       windowSuspicious,
+					"window_total":            windowTotal,
+					"ewma_baseline_ratio":     suspiciousRatioBaseline,
+					"ewma_ratio_stddev":       suspiciousRatioStd,
+					"ewma_ratio_threshold":    suspiciousRatioThreshold,
+					"window_minutes":          windowMinutes,
 				},
 			)
 		}
+	}
+
+	if iforestWindow.Ready && iforestWindow.AnomalyVectors > 0 {
+		severity := "warning"
+		if iforestWindow.AnomalyRatio >= 0.45 || iforestWindow.MaxOutlierDistance >= 0.34 {
+			severity = "critical"
+		}
+		appendAnomaly(
+			"isolation_forest_outlier",
+			severity,
+			int(34+iforestWindow.AnomalyRatio*86+iforestWindow.MaxOutlierDistance*118),
+			"Isolation Forest Outlier Window",
+			fmt.Sprintf("Isolation Forest marked %d/%d minute vectors as outliers (%.0f%%) in the current window; worst minute had %d events.", iforestWindow.AnomalyVectors, iforestWindow.WindowVectors, iforestWindow.AnomalyRatio*100, iforestWindow.WorstMinuteEvents),
+			iforestWindow.WindowVectors,
+			iforestWindow.Bound,
+			iforestWindow.MinScore,
+			map[string]interface{}{
+				"window_vectors":         iforestWindow.WindowVectors,
+				"anomaly_vectors":        iforestWindow.AnomalyVectors,
+				"anomaly_ratio":          iforestWindow.AnomalyRatio,
+				"forest_anomaly_bound":   iforestWindow.Bound,
+				"forest_min_score":       iforestWindow.MinScore,
+				"forest_mean_score":      iforestWindow.MeanScore,
+				"max_outlier_distance":   iforestWindow.MaxOutlierDistance,
+				"worst_minute_bucket":    iforestWindow.WorstMinuteBucket,
+				"worst_minute_events":    iforestWindow.WorstMinuteEvents,
+				"window_minutes":         windowMinutes,
+			},
+		)
 	}
 
 	if windowTotal >= 20 {
@@ -1752,6 +1930,170 @@ func meanTopAnomalyScores(anomalies []models.TrafficAnomaly, topN int) float64 {
 		total += anomalies[i].Score
 	}
 	return float64(total) / float64(topN)
+}
+
+func computeEWMABaseline(values []float64, alpha float64) ewmaBaseline {
+	b := ewmaBaseline{}
+	if len(values) == 0 {
+		return b
+	}
+	if alpha <= 0 || alpha >= 1 {
+		alpha = 0.22
+	}
+
+	mean := values[0]
+	variance := 0.0
+	for i := 1; i < len(values); i++ {
+		x := values[i]
+		delta := x - mean
+		mean += alpha * delta
+		variance = (1-alpha)*(variance+alpha*delta*delta)
+	}
+	if variance < 0 {
+		variance = 0
+	}
+
+	b.Mean = mean
+	b.StdDev = math.Sqrt(variance)
+	b.Last = values[len(values)-1]
+	b.Samples = len(values)
+	b.Alpha = alpha
+	return b
+}
+
+func minuteAggregateFeatureVector(agg *trafficMinuteAggregate) []float64 {
+	if agg == nil || agg.Total <= 0 {
+		return nil
+	}
+	riskRatio := safeRatio(float64(agg.Blocked+agg.Suspicious), float64(agg.Total))
+	_, normalizedEntropy := protocolEntropy(agg.ProtocolCounts)
+	return []float64{
+		float64(agg.Total),
+		safeRatio(float64(agg.Blocked), float64(agg.Total)),
+		safeRatio(float64(agg.Suspicious), float64(agg.Total)),
+		riskRatio,
+		float64(len(agg.SourceSet)),
+		float64(len(agg.DestinationSet)),
+		normalizedEntropy,
+	}
+}
+
+func evaluateIsolationForestWindow(minuteAggregates map[int64]*trafficMinuteAggregate, windowStartBucket int64, currentBucket int64) isolationForestWindowResult {
+	result := isolationForestWindowResult{MinScore: 1}
+	if len(minuteAggregates) == 0 {
+		return result
+	}
+
+	historyBuckets := make([]int64, 0, len(minuteAggregates))
+	windowBuckets := make([]int64, 0, len(minuteAggregates))
+	for bucket, agg := range minuteAggregates {
+		if agg == nil || agg.Total <= 0 {
+			continue
+		}
+		if bucket < windowStartBucket {
+			historyBuckets = append(historyBuckets, bucket)
+			continue
+		}
+		if bucket <= currentBucket {
+			windowBuckets = append(windowBuckets, bucket)
+		}
+	}
+	if len(historyBuckets) < 24 || len(windowBuckets) == 0 {
+		return result
+	}
+
+	sort.Slice(historyBuckets, func(i, j int) bool { return historyBuckets[i] < historyBuckets[j] })
+	sort.Slice(windowBuckets, func(i, j int) bool { return windowBuckets[i] < windowBuckets[j] })
+
+	historyVectors := make([][]float64, 0, len(historyBuckets))
+	for _, bucket := range historyBuckets {
+		vec := minuteAggregateFeatureVector(minuteAggregates[bucket])
+		if len(vec) == 0 {
+			continue
+		}
+		historyVectors = append(historyVectors, vec)
+	}
+	if len(historyVectors) < 24 {
+		return result
+	}
+
+	windowVectors := make([][]float64, 0, len(windowBuckets))
+	windowTotals := make([]int, 0, len(windowBuckets))
+	for _, bucket := range windowBuckets {
+		agg := minuteAggregates[bucket]
+		vec := minuteAggregateFeatureVector(agg)
+		if len(vec) == 0 {
+			continue
+		}
+		windowVectors = append(windowVectors, vec)
+		windowTotals = append(windowTotals, agg.Total)
+	}
+	if len(windowVectors) == 0 {
+		return result
+	}
+
+	subsampleSize := len(historyVectors)
+	if subsampleSize > 256 {
+		subsampleSize = 256
+	}
+	if subsampleSize < 8 {
+		return result
+	}
+
+	forest := iforest.NewForest(anomalyIsolationForestTrees, subsampleSize, anomalyIsolationOutlierFrac)
+	forest.Train(historyVectors)
+	if err := forest.Test(historyVectors); err != nil {
+		return result
+	}
+
+	labels, scores, err := forest.Predict(windowVectors)
+	if err != nil || len(scores) == 0 || len(labels) != len(scores) {
+		return result
+	}
+
+	result.Ready = true
+	result.WindowVectors = len(scores)
+	result.Bound = forest.AnomalyBound
+	result.MinScore = scores[0]
+	result.MeanScore = 0
+	result.WorstMinuteBucket = windowBuckets[0]
+	result.WorstMinuteEvents = windowTotals[0]
+	maxDistance := 0.0
+
+	for i, score := range scores {
+		result.MeanScore += score
+		if score < result.MinScore {
+			result.MinScore = score
+			if i < len(windowBuckets) {
+				result.WorstMinuteBucket = windowBuckets[i]
+			}
+			if i < len(windowTotals) {
+				result.WorstMinuteEvents = windowTotals[i]
+			}
+		}
+		if labels[i] == 1 {
+			result.AnomalyVectors++
+			distance := forest.AnomalyBound - score
+			if distance > maxDistance {
+				maxDistance = distance
+				if i < len(windowBuckets) {
+					result.WorstMinuteBucket = windowBuckets[i]
+				}
+				if i < len(windowTotals) {
+					result.WorstMinuteEvents = windowTotals[i]
+				}
+			}
+		}
+	}
+	result.MeanScore = result.MeanScore / float64(len(scores))
+	result.AnomalyRatio = safeRatio(float64(result.AnomalyVectors), float64(len(scores)))
+	if forest.AnomalyBound > 0 {
+		result.MaxOutlierDistance = safeRatio(maxDistance, math.Max(forest.AnomalyBound, 1e-6))
+	} else {
+		result.MaxOutlierDistance = maxDistance
+	}
+
+	return result
 }
 
 func protocolEntropy(protocolCounts map[string]int) (float64, float64) {

@@ -315,6 +315,68 @@ func TestBuildTrafficAnomalySnapshotDetectsMinuteVolatilitySpike(t *testing.T) {
 	}
 }
 
+func TestComputeEWMABaselineAdaptsToRecentTraffic(t *testing.T) {
+	values := []float64{10, 11, 10, 12, 11, 40}
+	baseline := computeEWMABaseline(values, 0.30)
+
+	if baseline.Samples != len(values) {
+		t.Fatalf("expected %d samples, got %d", len(values), baseline.Samples)
+	}
+	if baseline.Mean <= 12 || baseline.Mean >= 40 {
+		t.Fatalf("expected EWMA mean to adapt between baseline and spike, got %.2f", baseline.Mean)
+	}
+	if baseline.StdDev <= 0 {
+		t.Fatalf("expected positive EWMA stddev, got %.4f", baseline.StdDev)
+	}
+	if baseline.Last != 40 {
+		t.Fatalf("expected last value tracking to be 40, got %.2f", baseline.Last)
+	}
+}
+
+func TestEvaluateIsolationForestWindowDetectsOutlierMinute(t *testing.T) {
+	minuteAgg := make(map[int64]*trafficMinuteAggregate)
+	makeAgg := func(total, blocked, suspicious, src, dst int, protoTCP, protoUDP int) *trafficMinuteAggregate {
+		a := &trafficMinuteAggregate{
+			Total:          total,
+			Blocked:        blocked,
+			Suspicious:     suspicious,
+			SourceSet:      make(map[string]struct{}, src),
+			DestinationSet: make(map[string]struct{}, dst),
+			ProtocolCounts: map[string]int{"TCP": protoTCP, "UDP": protoUDP},
+		}
+		for i := 0; i < src; i++ {
+			a.SourceSet[fmt.Sprintf("203.0.113.%d", i+1)] = struct{}{}
+		}
+		for i := 0; i < dst; i++ {
+			a.DestinationSet[fmt.Sprintf("10.0.0.%d", i+1)] = struct{}{}
+		}
+		return a
+	}
+
+	for bucket := int64(1); bucket <= 55; bucket++ {
+		minuteAgg[bucket] = makeAgg(12, 1, 1, 5, 4, 9, 3)
+	}
+	for bucket := int64(56); bucket <= 70; bucket++ {
+		minuteAgg[bucket] = makeAgg(11, 1, 1, 5, 4, 8, 3)
+	}
+
+	minuteAgg[68] = makeAgg(120, 38, 26, 42, 31, 96, 24)
+
+	result := evaluateIsolationForestWindow(minuteAgg, 56, 70)
+	if !result.Ready {
+		t.Fatalf("expected isolation forest result to be ready")
+	}
+	if result.AnomalyVectors == 0 {
+		t.Fatalf("expected at least one anomaly minute, got 0")
+	}
+	if result.AnomalyRatio <= 0 {
+		t.Fatalf("expected positive anomaly ratio, got %.4f", result.AnomalyRatio)
+	}
+	if result.WorstMinuteBucket != 68 {
+		t.Fatalf("expected worst minute bucket 68, got %d", result.WorstMinuteBucket)
+	}
+}
+
 func TestFormatHourBucket(t *testing.T) {
 	cases := []struct {
 		hour int
