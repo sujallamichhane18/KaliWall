@@ -2748,20 +2748,79 @@ func (h *handlers) handleGeoAttacks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) handleGeoMe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		if h.geo == nil {
+			respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "GeoIP unavailable"})
+			return
+		}
+		loc, ok := h.resolveMyGeoLocation()
+		if !ok {
+			respond(w, http.StatusNotFound, models.APIResponse{Success: false, Message: "Unable to determine public location"})
+			return
+		}
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Data: loc})
+
+	case http.MethodPost:
+		var body struct {
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+			City      string  `json:"city"`
+			Country   string  `json:"country"`
+			IP        string  `json:"ip"`
+			Source    string  `json:"source"`
+			Accuracy  float64 `json:"accuracy"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "invalid JSON"})
+			return
+		}
+		if body.Latitude < -90 || body.Latitude > 90 || body.Longitude < -180 || body.Longitude > 180 {
+			respond(w, http.StatusBadRequest, models.APIResponse{Success: false, Message: "latitude/longitude out of range"})
+			return
+		}
+
+		source := strings.ToLower(strings.TrimSpace(body.Source))
+		if source == "" {
+			source = "manual"
+		}
+		if source != "manual" && source != "browser" && source != "ip" {
+			source = "manual"
+		}
+
+		loc := models.GeoLocation{
+			IP:        strings.TrimSpace(body.IP),
+			Country:   strings.TrimSpace(body.Country),
+			City:      strings.TrimSpace(body.City),
+			Latitude:  body.Latitude,
+			Longitude: body.Longitude,
+			Source:    source,
+			Accuracy:  math.Max(0, body.Accuracy),
+		}
+		if loc.IP == "" {
+			loc.IP = "manual"
+		}
+		if loc.Country == "" {
+			loc.Country = "Exact Location"
+		}
+		if loc.City == "" {
+			loc.City = "Pinned"
+		}
+
+		ttl := 24 * time.Hour
+		if source == "browser" {
+			ttl = 2 * time.Hour
+		}
+		h.setMyGeoLocation(loc, ttl)
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "Home location pinned", Data: loc})
+
+	case http.MethodDelete:
+		h.clearMyGeoLocation()
+		respond(w, http.StatusOK, models.APIResponse{Success: true, Message: "Home location override cleared"})
+
+	default:
 		methodNotAllowed(w)
-		return
 	}
-	if h.geo == nil {
-		respond(w, http.StatusServiceUnavailable, models.APIResponse{Success: false, Message: "GeoIP unavailable"})
-		return
-	}
-	loc, ok := h.resolveMyGeoLocation()
-	if !ok {
-		respond(w, http.StatusNotFound, models.APIResponse{Success: false, Message: "Unable to determine public location"})
-		return
-	}
-	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: loc})
 }
 
 func (h *handlers) handleGeoStream(w http.ResponseWriter, r *http.Request) {
@@ -2917,27 +2976,95 @@ func (h *handlers) resolveMyGeoLocation() (models.GeoLocation, bool) {
 	}
 	h.myGeoMu.RUnlock()
 
-	if ip, ok := h.detectLikelyPublicIPFromEvents(); ok {
+	if ip, ok := h.detectLikelyPublicIPFromLocalConnections(); ok {
 		if loc, found := h.geo.Lookup(ip); found {
-			h.myGeoMu.Lock()
-			h.myGeoCache = loc
-			h.myGeoExpiry = now.Add(10 * time.Minute)
-			h.myGeoMu.Unlock()
+			loc.Source = "ip"
+			h.setMyGeoLocation(loc, 10*time.Minute)
 			return loc, true
 		}
 	}
 
 	if ip, ok := fetchPublicIP(); ok {
 		if loc, found := h.geo.Lookup(ip); found {
-			h.myGeoMu.Lock()
-			h.myGeoCache = loc
-			h.myGeoExpiry = now.Add(10 * time.Minute)
-			h.myGeoMu.Unlock()
+			loc.Source = "ip"
+			h.setMyGeoLocation(loc, 10*time.Minute)
 			return loc, true
 		}
 	}
 
 	return models.GeoLocation{}, false
+}
+
+func (h *handlers) setMyGeoLocation(loc models.GeoLocation, ttl time.Duration) {
+	if h == nil {
+		return
+	}
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	h.myGeoMu.Lock()
+	h.myGeoCache = loc
+	h.myGeoExpiry = time.Now().Add(ttl)
+	h.myGeoMu.Unlock()
+}
+
+func (h *handlers) clearMyGeoLocation() {
+	if h == nil {
+		return
+	}
+	h.myGeoMu.Lock()
+	h.myGeoCache = models.GeoLocation{}
+	h.myGeoExpiry = time.Time{}
+	h.myGeoMu.Unlock()
+}
+
+func (h *handlers) detectLikelyPublicIPFromLocalConnections() (string, bool) {
+	if h == nil || h.fw == nil {
+		return "", false
+	}
+	counts := make(map[string]int)
+	for _, c := range h.fw.ActiveConnections() {
+		localIP := strings.TrimSpace(c.LocalIP)
+		parsed := net.ParseIP(localIP)
+		if parsed == nil || isPrivateOrReservedIP(parsed) {
+			continue
+		}
+		counts[localIP]++
+	}
+
+	bestIP := ""
+	bestCount := 0
+	for ip, c := range counts {
+		if c > bestCount {
+			bestIP = ip
+			bestCount = c
+		}
+	}
+	if bestIP == "" {
+		return "", false
+	}
+	return bestIP, true
+}
+
+func isPrivateOrReservedIP(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 10 || ip4[0] == 127 || ip4[0] == 0 {
+			return true
+		}
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			return true
+		}
+		if ip4[0] == 192 && ip4[1] == 168 {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *handlers) detectLikelyPublicIPFromEvents() (string, bool) {

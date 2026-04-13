@@ -188,8 +188,16 @@
                     <div class="card soc-card">
                         <div class="card-header"><i class="fa-solid fa-earth-americas"></i><h3>GeoIP Attack Map (Realtime)</h3></div>
                         <div class="card-body">
-                            <div class="toolbar-actions" style="margin-bottom:8px">
+                            <div class="toolbar-actions" style="margin-bottom:8px;flex-wrap:wrap;gap:8px">
                                 <span class="badge badge-disabled" id="geoMyLocationBadge">🏠 Home: detecting...</span>
+                                <span class="badge badge-disabled" id="geoCoordinateText">lat/lon: -</span>
+                                <button class="btn btn-secondary" id="btnGeoUseDevice"><i class="fa-solid fa-location-crosshairs"></i> Use Device Location</button>
+                            </div>
+                            <div class="toolbar-actions" style="margin-bottom:8px;flex-wrap:wrap;gap:8px">
+                                <input type="text" id="geoLatInput" class="input-inline-sm" placeholder="Latitude (e.g. 37.421998)">
+                                <input type="text" id="geoLonInput" class="input-inline-sm" placeholder="Longitude (e.g. -122.084000)">
+                                <button class="btn btn-secondary" id="btnGeoSetExact"><i class="fa-solid fa-thumbtack"></i> Set Exact</button>
+                                <button class="btn btn-secondary" id="btnGeoClearExact"><i class="fa-solid fa-eraser"></i> Clear</button>
                             </div>
                             <div id="socGeoMap" class="geo-map-canvas"></div>
                         </div>
@@ -535,6 +543,20 @@
                             <button class="btn btn-secondary" id="btnRefreshDNSStats"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button>
                             <button class="btn btn-secondary" id="btnClearDNSCache"><i class="fa-solid fa-broom"></i> Clear DNS Cache</button>
                         </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <i class="fa-solid fa-list-check"></i>
+                        <h3>Recent Firewall Rules</h3>
+                    </div>
+                    <div class="card-body table-responsive dashboard-table-wrap">
+                        <table class="table" id="dashRulesTable">
+                            <thead>
+                                <tr><th>Status</th><th>Chain</th><th>Protocol</th><th>Target</th><th>Action</th></tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
                     </div>
                 </div>
             </div>

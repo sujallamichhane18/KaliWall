@@ -254,6 +254,8 @@ type GeoLocation struct {
 	City      string  `json:"city"`
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
+	Source    string  `json:"source,omitempty"`
+	Accuracy  float64 `json:"accuracy,omitempty"`
 }
 
 // GeoAttackPoint is an enriched firewall/DPI event with map coordinates.

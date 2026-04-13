@@ -25,6 +25,8 @@
     var geoInitialSnapshotLoaded = false;
     var geoTableRenderTimer = null;
     var geoAnchorHasCentered = false;
+    var geoHomeSyncSignature = "";
+    const GEO_HOME_OVERRIDE_KEY = "kaliwall_geo_home_override";
     var maxEventRows = 120;
     var maxGeoMarkers = 450;
     var peerHostMap = {};
@@ -123,6 +125,7 @@
     initSidebarWidthControls();
     initLogTableControls();
     initDashboardControls();
+    initGeoHomeControls();
 
     // ---------- Navigation ----------
 
@@ -188,6 +191,7 @@
                 loadSysInfo();
                 loadAIApiLiveStatus();
                 loadDPIStatus();
+                loadDashboardRules();
                 loadTrafficAnomalies();
                 loadTrafficVisibility();
                 loadDashboardLogs();
@@ -354,6 +358,7 @@
             loadStats();
             loadSysInfo();
             loadDPIStatus();
+            loadDashboardRules();
             loadTrafficAnomalies();
             loadTrafficVisibility();
             loadDashboardLogs();
@@ -676,11 +681,158 @@
         }
     }
 
+    function initGeoHomeControls() {
+        var btnDevice = document.getElementById("btnGeoUseDevice");
+        var btnSetExact = document.getElementById("btnGeoSetExact");
+        var btnClearExact = document.getElementById("btnGeoClearExact");
+        var latInput = document.getElementById("geoLatInput");
+        var lonInput = document.getElementById("geoLonInput");
+        if (!btnDevice || !btnSetExact || !btnClearExact || !latInput || !lonInput) {
+            return;
+        }
+
+        var stored = loadStoredGeoHomeOverride();
+        if (stored) {
+            latInput.value = Number(stored.latitude).toFixed(6);
+            lonInput.value = Number(stored.longitude).toFixed(6);
+        }
+
+        btnDevice.addEventListener("click", async function () {
+            await loadGeoMyLocation({ force: true, recenter: true, preferBrowser: true });
+            toast("Home location updated from device", "success");
+        });
+
+        btnSetExact.addEventListener("click", async function () {
+            var lat = parseFloat((latInput.value || "").trim());
+            var lon = parseFloat((lonInput.value || "").trim());
+            if (!isFinite(lat) || lat < -90 || lat > 90 || !isFinite(lon) || lon < -180 || lon > 180) {
+                toast("Enter valid latitude (-90..90) and longitude (-180..180)", "error");
+                return;
+            }
+
+            var exact = {
+                latitude: lat,
+                longitude: lon,
+                city: "Pinned",
+                country: "Exact Location",
+                ip: "manual",
+                source: "manual",
+                accuracy: 1,
+            };
+            storeGeoHomeOverride(exact);
+            geoMyLocation = exact;
+            geoLocationResolved = true;
+            updateGeoHomeBadge(exact);
+            await syncGeoHomeLocation(exact);
+            renderGeoDefenderAnchor(true);
+            if (geoMap) geoMap.invalidateSize();
+            toast("Exact home coordinates pinned", "success");
+        });
+
+        btnClearExact.addEventListener("click", async function () {
+            clearStoredGeoHomeOverride();
+            geoHomeSyncSignature = "";
+            await clearGeoHomeLocationOverrideServer();
+            geoLocationResolved = false;
+            geoMyLocation = null;
+            latInput.value = "";
+            lonInput.value = "";
+            await loadGeoMyLocation({ force: true, recenter: true });
+            toast("Exact home coordinates cleared", "success");
+        });
+    }
+
+    function loadStoredGeoHomeOverride() {
+        try {
+            var raw = localStorage.getItem(GEO_HOME_OVERRIDE_KEY);
+            if (!raw) return null;
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object") return null;
+            var lat = Number(parsed.latitude);
+            var lon = Number(parsed.longitude);
+            if (!isFinite(lat) || lat < -90 || lat > 90 || !isFinite(lon) || lon < -180 || lon > 180) {
+                return null;
+            }
+            parsed.latitude = lat;
+            parsed.longitude = lon;
+            parsed.source = "manual";
+            parsed.city = parsed.city || "Pinned";
+            parsed.country = parsed.country || "Exact Location";
+            parsed.ip = parsed.ip || "manual";
+            parsed.accuracy = Number(parsed.accuracy || 1);
+            return parsed;
+        } catch (_err) {
+            return null;
+        }
+    }
+
+    function storeGeoHomeOverride(location) {
+        if (!location) return;
+        localStorage.setItem(GEO_HOME_OVERRIDE_KEY, JSON.stringify({
+            latitude: Number(location.latitude),
+            longitude: Number(location.longitude),
+            city: location.city || "Pinned",
+            country: location.country || "Exact Location",
+            ip: location.ip || "manual",
+            source: "manual",
+            accuracy: Number(location.accuracy || 1),
+        }));
+    }
+
+    function clearStoredGeoHomeOverride() {
+        localStorage.removeItem(GEO_HOME_OVERRIDE_KEY);
+    }
+
+    async function syncGeoHomeLocation(location) {
+        if (!location) return;
+        var sig = geoLocationSignature(location);
+        if (sig && sig === geoHomeSyncSignature) {
+            return;
+        }
+
+        try {
+            await fetch(API + "/geo/me", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    latitude: Number(location.latitude),
+                    longitude: Number(location.longitude),
+                    city: location.city || "Pinned",
+                    country: location.country || "Exact Location",
+                    ip: location.ip || "manual",
+                    source: location.source || "manual",
+                    accuracy: Number(location.accuracy || 0),
+                }),
+            });
+            geoHomeSyncSignature = sig;
+        } catch (_err) {}
+    }
+
+    async function clearGeoHomeLocationOverrideServer() {
+        try {
+            await fetch(API + "/geo/me", { method: "DELETE" });
+        } catch (_err) {}
+    }
+
+    function geoLocationSignature(location) {
+        if (!location) return "";
+        return [
+            Number(location.latitude || 0).toFixed(6),
+            Number(location.longitude || 0).toFixed(6),
+            String(location.source || ""),
+            String(location.city || ""),
+            String(location.country || ""),
+        ].join("|");
+    }
+
     async function loadGeoMyLocation(options) {
         options = options || {};
         var force = !!options.force;
         var recenter = !!options.recenter;
+        var preferBrowser = !!options.preferBrowser;
         const badge = document.getElementById("geoMyLocationBadge");
+        var latInput = document.getElementById("geoLatInput");
+        var lonInput = document.getElementById("geoLonInput");
 
         if (!force && geoLocationResolved && geoMyLocation) {
             updateGeoHomeBadge(geoMyLocation);
@@ -693,11 +845,37 @@
             badge.textContent = "🏠 Home: detecting...";
         }
 
+        var stored = loadStoredGeoHomeOverride();
+        if (stored && !preferBrowser) {
+            geoMyLocation = stored;
+            geoLocationResolved = true;
+            updateGeoHomeBadge(stored);
+            if (latInput) latInput.value = Number(stored.latitude).toFixed(6);
+            if (lonInput) lonInput.value = Number(stored.longitude).toFixed(6);
+            await syncGeoHomeLocation(stored);
+            renderGeoDefenderAnchor(recenter && !geoAnchorHasCentered);
+            return;
+        }
+
         var browserLoc = await resolveBrowserGeoLocation();
         if (browserLoc) {
             geoMyLocation = browserLoc;
             geoLocationResolved = true;
+            if (latInput) latInput.value = Number(browserLoc.latitude).toFixed(6);
+            if (lonInput) lonInput.value = Number(browserLoc.longitude).toFixed(6);
             updateGeoHomeBadge(browserLoc);
+            await syncGeoHomeLocation(browserLoc);
+            renderGeoDefenderAnchor(recenter && !geoAnchorHasCentered);
+            return;
+        }
+
+        if (stored) {
+            geoMyLocation = stored;
+            geoLocationResolved = true;
+            updateGeoHomeBadge(stored);
+            if (latInput) latInput.value = Number(stored.latitude).toFixed(6);
+            if (lonInput) lonInput.value = Number(stored.longitude).toFixed(6);
+            await syncGeoHomeLocation(stored);
             renderGeoDefenderAnchor(recenter && !geoAnchorHasCentered);
             return;
         }
@@ -711,13 +889,21 @@
                 badge.textContent = "🏠 Home: unavailable";
                 badge.title = res.message || "Unable to detect your location";
             }
+            var coordBadge = document.getElementById("geoCoordinateText");
+            if (coordBadge) {
+                coordBadge.className = "badge badge-disabled";
+                coordBadge.textContent = "lat/lon: -";
+            }
             return;
         }
 
         geoMyLocation = res.data;
-        geoMyLocation.source = "ip";
+        geoMyLocation.source = geoMyLocation.source || "ip";
         geoLocationResolved = true;
+        if (latInput && isFinite(Number(geoMyLocation.latitude))) latInput.value = Number(geoMyLocation.latitude).toFixed(6);
+        if (lonInput && isFinite(Number(geoMyLocation.longitude))) lonInput.value = Number(geoMyLocation.longitude).toFixed(6);
         updateGeoHomeBadge(geoMyLocation);
+        await syncGeoHomeLocation(geoMyLocation);
         renderGeoDefenderAnchor(recenter && !geoAnchorHasCentered);
     }
 
@@ -981,6 +1167,15 @@
             offset: [0, -10],
         });
 
+        var source = String(geoMyLocation.source || "ip").toLowerCase();
+        var sourceLabel = source === "manual" ? "manual exact" : source === "browser" ? "device exact" : "ip-based";
+        geoDefenderMarker.bindPopup(
+            "<strong>Home Location</strong><br>" +
+            escapeHtml((geoMyLocation.city ? geoMyLocation.city + ", " : "") + (geoMyLocation.country || "Unknown")) + "<br>" +
+            "<strong>Coordinates:</strong> " + escapeHtml(lat.toFixed(6) + ", " + lon.toFixed(6)) + "<br>" +
+            "<strong>Source:</strong> " + escapeHtml(sourceLabel)
+        );
+
         if (recenter && geoMap) {
             geoMap.setView([lat, lon], 3);
             geoAnchorHasCentered = true;
@@ -1044,23 +1239,40 @@
 
     function updateGeoHomeBadge(location) {
         var badge = document.getElementById("geoMyLocationBadge");
+        var coordBadge = document.getElementById("geoCoordinateText");
         if (!badge || !location) return;
 
         var lat = Number(location.latitude);
         var lon = Number(location.longitude);
         var source = String(location.source || "").toLowerCase();
+        var accuracy = Number(location.accuracy || 0);
         var cityCountry = ((location.city ? location.city + ", " : "") + (location.country || "Unknown")).trim();
         if (!cityCountry) cityCountry = "Unknown";
 
+        if (coordBadge) {
+            if (isFinite(lat) && isFinite(lon)) {
+                coordBadge.className = "badge badge-enabled";
+                coordBadge.textContent = "lat/lon: " + lat.toFixed(6) + ", " + lon.toFixed(6);
+            } else {
+                coordBadge.className = "badge badge-disabled";
+                coordBadge.textContent = "lat/lon: -";
+            }
+        }
+
         badge.className = "badge badge-enabled";
-        if (source === "browser" && isFinite(lat) && isFinite(lon)) {
-            badge.textContent = "🏠 Home: Real device location";
-            badge.title = cityCountry + " | " + lat.toFixed(4) + ", " + lon.toFixed(4);
+        if ((source === "browser" || source === "manual") && isFinite(lat) && isFinite(lon)) {
+            badge.textContent = source === "manual" ? "🏠 Home: Exact manual location" : "🏠 Home: Exact device location";
+            var accSuffix = accuracy > 0 ? (" | ±" + accuracy.toFixed(1) + "m") : "";
+            badge.title = cityCountry + " | " + lat.toFixed(6) + ", " + lon.toFixed(6) + accSuffix;
             return;
         }
 
         badge.textContent = "🏠 Home: " + cityCountry;
-        badge.title = source === "ip" ? (cityCountry + " (IP-based)") : cityCountry;
+        if (isFinite(lat) && isFinite(lon)) {
+            badge.title = cityCountry + (source === "ip" ? " (IP-based)" : "") + " | " + lat.toFixed(6) + ", " + lon.toFixed(6);
+        } else {
+            badge.title = source === "ip" ? (cityCountry + " (IP-based)") : cityCountry;
+        }
     }
 
     function buildThreatArc(srcLat, srcLon, dstLat, dstLon) {
@@ -1935,14 +2147,78 @@
         });
     }
 
+    async function loadDashboardRules() {
+        const tbody = document.querySelector("#dashRulesTable tbody");
+        if (!tbody) return;
+
+        const res = await apiFetch("/rules");
+        if (!res.success) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:16px">Unable to load rules</td></tr>';
+            return;
+        }
+
+        const rules = normalizeRulesData(res.data)
+            .slice()
+            .sort(function (a, b) {
+                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+            })
+            .slice(0, 8);
+
+        if (rules.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:16px">No firewall rules configured yet</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = "";
+        rules.forEach(function (rule) {
+            const target = escapeHtml(rule.dst_ip || "any") +
+                ((rule.dst_port && rule.dst_port !== "any") ? (":" + escapeHtml(rule.dst_port)) : "");
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td>" + enabledBadge(rule.enabled) + "</td>" +
+                "<td>" + chainBadge(rule.chain) + "</td>" +
+                "<td>" + escapeHtml(String(rule.protocol || "all").toUpperCase()) + "</td>" +
+                "<td>" + target + "</td>" +
+                "<td>" + actionBadge(rule.action) + "</td>";
+            tbody.appendChild(tr);
+        });
+    }
+
+    function normalizeRulesData(data) {
+        if (Array.isArray(data)) {
+            return data;
+        }
+        if (data && Array.isArray(data.rules)) {
+            return data.rules;
+        }
+        return [];
+    }
+
     // ---------- Rules ----------
 
     async function loadRules() {
         const res = await apiFetch("/rules");
-        if (!res.success) return;
         const tbody = document.querySelector("#rulesTable tbody");
+        if (!tbody) return;
+
+        if (!res.success) {
+            tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#9ca3af;padding:16px">Unable to load rules</td></tr>';
+            return;
+        }
+
+        const rules = normalizeRulesData(res.data)
+            .slice()
+            .sort(function (a, b) {
+                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+            });
+
         tbody.innerHTML = "";
-        res.data.forEach((rule) => {
+        if (rules.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#9ca3af;padding:20px">No firewall rules configured yet</td></tr>';
+            return;
+        }
+
+        rules.forEach((rule) => {
             const tr = document.createElement("tr");
             tr.innerHTML =
                 "<td>" + enabledBadge(rule.enabled) + "</td>" +
@@ -3041,6 +3317,7 @@
             ruleModal.classList.remove("open");
             loadRules();
             loadStats();
+            loadDashboardRules();
         } else {
             toast(data.message || "Failed to save rule", "error");
         }
@@ -3053,6 +3330,7 @@
             toast("Rule toggled", "success");
             loadRules();
             loadStats();
+            loadDashboardRules();
         } else {
             toast(data.message, "error");
         }
@@ -3071,6 +3349,7 @@
             toast("Rule deleted", "success");
             loadRules();
             loadStats();
+            loadDashboardRules();
         } else {
             toast(data.message, "error");
         }
@@ -3612,6 +3891,8 @@
 
             toast("AI suggested rule approved and created", "success");
             loadRules();
+            loadStats();
+            loadDashboardRules();
         } catch (err) {
             toast((err && err.message) || "AI rule decision failed", "error");
         }

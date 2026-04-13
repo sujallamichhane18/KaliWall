@@ -145,6 +145,7 @@ func (s *Service) Lookup(ipStr string) (models.GeoLocation, bool) {
 			City:      rec.City.Names["en"],
 			Latitude:  rec.Location.Latitude,
 			Longitude: rec.Location.Longitude,
+			Source:    "ip",
 		}
 		if loc.Country == "" || (loc.Latitude == 0 && loc.Longitude == 0) {
 			return models.GeoLocation{}, false
@@ -168,6 +169,7 @@ func (s *Service) Lookup(ipStr string) (models.GeoLocation, bool) {
 			Country:   rg.country,
 			Latitude:  rg.latitude,
 			Longitude: rg.longitude,
+			Source:    "ip",
 		}
 	}
 
