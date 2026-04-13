@@ -256,6 +256,65 @@ func TestAnomalyTrendHistoryIncludesRiskAndDetectors(t *testing.T) {
 	}
 }
 
+func TestBuildTrafficAnomalySnapshotDetectsProtocolRiskSkew(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	for i := 0; i < 72; i++ {
+		src := fmt.Sprintf("203.0.113.%d", (i%9)+30)
+		h.logger.Log("BLOCK", src, "10.9.0.5", "udp", "suspicious dns flood payload")
+	}
+	for i := 0; i < 24; i++ {
+		src := fmt.Sprintf("198.51.100.%d", (i%10)+10)
+		h.logger.Log("ALLOW", src, "10.9.0.6", "tcp", "normal web traffic")
+	}
+
+	snapshot := h.buildTrafficAnomalySnapshot(900, 15)
+	if snapshot.TotalAnomalies == 0 {
+		t.Fatalf("expected anomalies, got none")
+	}
+
+	found := false
+	for _, a := range snapshot.Anomalies {
+		if a.Type == "protocol_risk_skew" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected protocol_risk_skew anomaly, got %#v", snapshot.Anomalies)
+	}
+}
+
+func TestBuildTrafficAnomalySnapshotDetectsMinuteVolatilitySpike(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	protocols := []string{"tcp", "udp", "dns"}
+	for i := 0; i < 96; i++ {
+		src := fmt.Sprintf("203.0.113.%d", (i%32)+1)
+		dst := fmt.Sprintf("10.5.0.%d", (i%28)+1)
+		proto := protocols[i%len(protocols)]
+		h.logger.Log("ALLOW", src, dst, proto, "normal traffic sample")
+	}
+
+	snapshot := h.buildTrafficAnomalySnapshot(1000, 15)
+	if snapshot.TotalAnomalies == 0 {
+		t.Fatalf("expected anomalies, got none")
+	}
+
+	found := false
+	for _, a := range snapshot.Anomalies {
+		if a.Type == "minute_volatility_spike" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected minute_volatility_spike anomaly, got %#v", snapshot.Anomalies)
+	}
+}
+
 func TestFormatHourBucket(t *testing.T) {
 	cases := []struct {
 		hour int

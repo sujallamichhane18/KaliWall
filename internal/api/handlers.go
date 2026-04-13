@@ -592,6 +592,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	minuteTotals := make(map[int64]int)
+	windowMinuteCounts := make(map[int64]int)
 	windowTotal := 0
 	windowBlocked := 0
 	windowSuspicious := 0
@@ -601,6 +602,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	sourceWindow := make(map[string]int)
 	prevSourceWindow := make(map[string]int)
 	windowProtocolCounts := make(map[string]int)
+	windowProtocolRiskCounts := make(map[string]int)
 	prevProtocolCounts := make(map[string]int)
 	sourcePorts := make(map[string]map[string]struct{})
 	sourceTargets := make(map[string]map[string]struct{})
@@ -612,6 +614,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 
 	historicalSourceTotals := make(map[string]int)
 	historicalSourceRisk := make(map[string]int)
+	historicalProtocolCounts := make(map[string]int)
 	historicalHourTotals := make(map[int]int)
 	historicalTotal := 0
 	windowHourCounts := make(map[int]int)
@@ -629,6 +632,9 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		if ts.Before(windowStart) {
 			historicalTotal++
 			historicalHourTotals[ts.UTC().Hour()]++
+			if proto != "" {
+				historicalProtocolCounts[proto]++
+			}
 			if src != "" {
 				historicalSourceTotals[src]++
 				if isBlocked || isSuspicious {
@@ -659,6 +665,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 
 		windowTotal++
+		windowMinuteCounts[ts.Unix()/60]++
 		windowHourCounts[ts.UTC().Hour()]++
 		if isBlocked {
 			windowBlocked++
@@ -668,6 +675,9 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		}
 		if proto != "" {
 			windowProtocolCounts[proto]++
+			if isBlocked || isSuspicious {
+				windowProtocolRiskCounts[proto]++
+			}
 		}
 
 		if src != "" {
@@ -947,6 +957,228 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 					"window_minutes":    windowMinutes,
 				},
 			)
+		}
+	}
+
+	if windowTotal >= 20 {
+		startBucket := windowStart.Unix() / 60
+		endBucket := currentBucket
+		if endBucket < startBucket {
+			endBucket = startBucket
+		}
+		windowSeries := make([]int, 0, int(endBucket-startBucket)+1)
+		peakMinute := 0
+		zeroMinutes := 0
+		for bucket := startBucket; bucket <= endBucket; bucket++ {
+			count := windowMinuteCounts[bucket]
+			windowSeries = append(windowSeries, count)
+			if count == 0 {
+				zeroMinutes++
+			}
+			if count > peakMinute {
+				peakMinute = count
+			}
+		}
+
+		if len(windowSeries) >= 4 {
+			seriesMean, seriesStd := intSeriesStats(windowSeries)
+			if seriesMean > 0 {
+				cv := seriesStd / seriesMean
+				medianMinute := math.Max(1, medianInt(windowSeries))
+				peakToMedian := float64(peakMinute) / medianMinute
+				quietRatio := safeRatio(float64(zeroMinutes), float64(len(windowSeries)))
+				if cv >= 1.05 && peakToMedian >= 2.5 && quietRatio >= 0.30 {
+					severity := "warning"
+					if cv >= 1.8 || peakToMedian >= 4.5 || quietRatio >= 0.65 {
+						severity = "critical"
+					}
+					appendAnomaly(
+						"minute_volatility_spike",
+						severity,
+						int(28+cv*24+peakToMedian*7+quietRatio*28),
+						"Burst Volatility Spike",
+						fmt.Sprintf("Per-minute traffic volatility spiked (CV %.2f) with peak minute %d events and %.0f%% quiet minutes.", cv, peakMinute, quietRatio*100),
+						windowTotal,
+						seriesMean,
+						float64(peakMinute),
+						map[string]interface{}{
+							"window_minutes":    windowMinutes,
+							"peak_minute_events": peakMinute,
+							"mean_per_minute":   seriesMean,
+							"stddev_per_minute": seriesStd,
+							"coefficient_variation": cv,
+							"peak_to_median":    peakToMedian,
+							"quiet_minute_ratio": quietRatio,
+						},
+					)
+				}
+			}
+		}
+	}
+
+	if windowTotal >= 24 && len(windowProtocolCounts) > 0 {
+		globalRiskHits := windowBlocked
+		if windowSuspicious > globalRiskHits {
+			globalRiskHits = windowSuspicious
+		}
+		globalRiskRatio := safeRatio(float64(globalRiskHits), float64(windowTotal))
+		type protocolRiskCandidate struct {
+			Protocol      string
+			Events        int
+			RiskHits      int
+			Share         float64
+			RiskRatio     float64
+			GlobalRisk    float64
+		}
+		best := protocolRiskCandidate{}
+		bestWeight := 0.0
+		for proto, count := range windowProtocolCounts {
+			if count < 8 {
+				continue
+			}
+			riskHits := windowProtocolRiskCounts[proto]
+			if riskHits < 5 {
+				continue
+			}
+			share := safeRatio(float64(count), float64(windowTotal))
+			riskRatio := safeRatio(float64(riskHits), float64(count))
+			if share < 0.18 || riskRatio < 0.55 {
+				continue
+			}
+			if globalRiskRatio > 0 && riskRatio < globalRiskRatio+0.20 {
+				continue
+			}
+			weight := riskRatio*share*100 + float64(riskHits)
+			if weight > bestWeight {
+				bestWeight = weight
+				best = protocolRiskCandidate{
+					Protocol:   proto,
+					Events:     count,
+					RiskHits:   riskHits,
+					Share:      share,
+					RiskRatio:  riskRatio,
+					GlobalRisk: globalRiskRatio,
+				}
+			}
+		}
+		if best.Protocol != "" {
+			severity := "warning"
+			if best.RiskRatio >= 0.80 || best.Share >= 0.45 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"protocol_risk_skew",
+				severity,
+				int(32+best.RiskRatio*78+best.Share*34+safeRatio(float64(best.RiskHits), 3)),
+				"Protocol Risk Skew",
+				fmt.Sprintf("%s accounts for %.1f%% of traffic but %.1f%% of its events are blocked/suspicious (%d/%d).", best.Protocol, best.Share*100, best.RiskRatio*100, best.RiskHits, best.Events),
+				best.Events,
+				best.GlobalRisk,
+				best.RiskRatio,
+				map[string]interface{}{
+					"protocol":              best.Protocol,
+					"protocol_events":       best.Events,
+					"protocol_share":        best.Share,
+					"protocol_risk_hits":    best.RiskHits,
+					"protocol_risk_ratio":   best.RiskRatio,
+					"global_risk_ratio":     best.GlobalRisk,
+					"window_minutes":        windowMinutes,
+				},
+			)
+		}
+	}
+
+	if windowTotal >= 40 && len(windowProtocolCounts) >= 2 {
+		baselineProtocolCounts := historicalProtocolCounts
+		baselineProtocolTotal := sumIntMap(baselineProtocolCounts)
+		if baselineProtocolTotal < 24 && prevTotal >= 20 {
+			baselineProtocolCounts = prevProtocolCounts
+			baselineProtocolTotal = sumIntMap(baselineProtocolCounts)
+		}
+		if baselineProtocolTotal >= 20 {
+			jsd, shiftedProto, currentShare, baselineShare := protocolDistributionDrift(windowProtocolCounts, baselineProtocolCounts)
+			delta := currentShare - baselineShare
+			if shiftedProto != "" && jsd >= 0.14 && currentShare >= 0.24 && delta >= 0.08 {
+				severity := "warning"
+				if jsd >= 0.24 || currentShare >= 0.42 || delta >= 0.18 {
+					severity = "critical"
+				}
+				appendAnomaly(
+					"protocol_distribution_drift",
+					severity,
+					int(30+jsd*190+delta*120+currentShare*38),
+					"Protocol Distribution Drift",
+					fmt.Sprintf("Protocol distribution diverged from baseline (JSD %.2f); %s rose from %.1f%% to %.1f%% share.", jsd, shiftedProto, baselineShare*100, currentShare*100),
+					windowTotal,
+					baselineShare,
+					currentShare,
+					map[string]interface{}{
+						"protocol":                shiftedProto,
+						"jsd":                     jsd,
+						"current_share":           currentShare,
+						"baseline_share":          baselineShare,
+						"share_delta":             delta,
+						"window_minutes":          windowMinutes,
+						"baseline_protocol_events": baselineProtocolTotal,
+					},
+				)
+			}
+
+			type rareProtocolCandidate struct {
+				Protocol      string
+				CurrentShare  float64
+				BaselineShare float64
+				Events        int
+			}
+			bestRare := rareProtocolCandidate{}
+			bestRareWeight := 0.0
+			for proto, count := range windowProtocolCounts {
+				if count < 8 {
+					continue
+				}
+				currentShare := safeRatio(float64(count), float64(windowTotal))
+				baselineShare := safeRatio(float64(baselineProtocolCounts[proto]), float64(baselineProtocolTotal))
+				if currentShare < 0.12 || baselineShare > 0.10 {
+					continue
+				}
+				if baselineShare > 0 && currentShare < baselineShare*3.5+0.05 {
+					continue
+				}
+				weight := (currentShare - baselineShare) * 100
+				if weight > bestRareWeight {
+					bestRareWeight = weight
+					bestRare = rareProtocolCandidate{
+						Protocol:      proto,
+						CurrentShare:  currentShare,
+						BaselineShare: baselineShare,
+						Events:        count,
+					}
+				}
+			}
+			if bestRare.Protocol != "" {
+				severity := "warning"
+				if bestRare.CurrentShare >= 0.30 || bestRare.BaselineShare <= 0.01 {
+					severity = "critical"
+				}
+				appendAnomaly(
+					"rare_protocol_emergence",
+					severity,
+					int(28+bestRare.CurrentShare*96+(bestRare.CurrentShare-bestRare.BaselineShare)*92),
+					"Rare Protocol Emergence",
+					fmt.Sprintf("Protocol %s surged to %.1f%% share (%d events) from baseline %.1f%%.", bestRare.Protocol, bestRare.CurrentShare*100, bestRare.Events, bestRare.BaselineShare*100),
+					bestRare.Events,
+					bestRare.BaselineShare,
+					bestRare.CurrentShare,
+					map[string]interface{}{
+						"protocol":              bestRare.Protocol,
+						"protocol_events":       bestRare.Events,
+						"current_share":         bestRare.CurrentShare,
+						"baseline_share":        bestRare.BaselineShare,
+						"window_minutes":        windowMinutes,
+						"baseline_protocol_total": baselineProtocolTotal,
+					},
+				)
+			}
 		}
 	}
 
@@ -1567,6 +1799,72 @@ func safeRatio(numerator float64, denominator float64) float64 {
 		return 0
 	}
 	return numerator / denominator
+}
+
+func medianInt(values []int) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	cp := append([]int(nil), values...)
+	sort.Ints(cp)
+	mid := len(cp) / 2
+	if len(cp)%2 == 1 {
+		return float64(cp[mid])
+	}
+	return float64(cp[mid-1]+cp[mid]) / 2
+}
+
+func sumIntMap(values map[string]int) int {
+	total := 0
+	for _, v := range values {
+		total += v
+	}
+	return total
+}
+
+func protocolDistributionDrift(currentCounts map[string]int, baselineCounts map[string]int) (jsd float64, shiftedProto string, shiftedCurrentShare float64, shiftedBaselineShare float64) {
+	totalCurrent := sumIntMap(currentCounts)
+	totalBaseline := sumIntMap(baselineCounts)
+	if totalCurrent <= 0 || totalBaseline <= 0 {
+		return 0, "", 0, 0
+	}
+
+	keys := make(map[string]struct{}, len(currentCounts)+len(baselineCounts))
+	for proto := range currentCounts {
+		keys[proto] = struct{}{}
+	}
+	for proto := range baselineCounts {
+		keys[proto] = struct{}{}
+	}
+
+	maxDelta := 0.0
+	for proto := range keys {
+		p := safeRatio(float64(currentCounts[proto]), float64(totalCurrent))
+		q := safeRatio(float64(baselineCounts[proto]), float64(totalBaseline))
+		m := (p + q) / 2
+		if p > 0 && m > 0 {
+			jsd += 0.5 * p * math.Log2(p/m)
+		}
+		if q > 0 && m > 0 {
+			jsd += 0.5 * q * math.Log2(q/m)
+		}
+
+		delta := p - q
+		if delta > maxDelta {
+			maxDelta = delta
+			shiftedProto = proto
+			shiftedCurrentShare = p
+			shiftedBaselineShare = q
+		}
+	}
+
+	if jsd < 0 {
+		jsd = 0
+	}
+	if jsd > 1 {
+		jsd = 1
+	}
+	return jsd, shiftedProto, shiftedCurrentShare, shiftedBaselineShare
 }
 
 func (h *handlers) recordAnomalySnapshot(snapshot models.TrafficAnomalySnapshot) {
