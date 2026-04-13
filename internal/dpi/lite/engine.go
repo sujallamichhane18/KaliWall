@@ -18,6 +18,7 @@ import (
     "kaliwall/internal/dpi/decode"
     "kaliwall/internal/dpi/flow"
     "kaliwall/internal/dpi/inspect"
+    "kaliwall/internal/dpi/ndpi"
     "kaliwall/internal/dpi/pipeline"
     "kaliwall/internal/dpi/reassembly"
     "kaliwall/internal/dpi/types"
@@ -48,6 +49,10 @@ type Config struct {
     IsWebsiteBlocked       func(string) bool
     BlockIP                func(string, string) error
     BlockWebsite           func(string, string) error
+
+    // Optional stronger DPI classifier based on nDPI (build tag: ndpi).
+    AdvancedDPIEnabled bool
+    AdvancedDPIConfig  *ndpi.Config
 }
 
 // Stats is a lightweight REST-friendly view for protocol detections.
@@ -90,6 +95,17 @@ type Stats struct {
     FlowEvicted       uint64 `json:"flow_evicted"`
     FlowExpired       uint64 `json:"flow_expired"`
     FlowClosed        uint64 `json:"flow_closed"`
+
+    AdvancedDPIEnabled      bool              `json:"advanced_dpi_enabled"`
+    AdvancedDPIActive       bool              `json:"advanced_dpi_active"`
+    AdvancedDetected        uint64            `json:"advanced_detected"`
+    AdvancedGuessed         uint64            `json:"advanced_guessed"`
+    AdvancedMisses          uint64            `json:"advanced_misses"`
+    AdvancedMasterProtocols map[string]uint64 `json:"advanced_master_protocols,omitempty"`
+    AdvancedAppProtocols    map[string]uint64 `json:"advanced_app_protocols,omitempty"`
+    AdvancedCategories      map[string]uint64 `json:"advanced_categories,omitempty"`
+    LastAdvanced            string            `json:"last_advanced"`
+    AdvancedClassifierStats map[string]uint64 `json:"advanced_classifier_stats,omitempty"`
 }
 
 // Engine is a lightweight live IDS/DPI processor focused on protocol extraction.
@@ -132,9 +148,20 @@ type Engine struct {
     lastHTTP   string
     lastDNS    string
     lastTLS    string
+    lastAdvanced string
     lastSeenAt time.Time
     srcHits    map[string]uint64
     dstHits    map[string]uint64
+
+    advancedEnabled atomic.Bool
+    advancedClassifier ndpi.Classifier
+    advancedDetected atomic.Uint64
+    advancedGuessed atomic.Uint64
+    advancedMisses  atomic.Uint64
+    advancedMu sync.RWMutex
+    advancedMasterProtocols map[string]uint64
+    advancedAppProtocols    map[string]uint64
+    advancedCategories      map[string]uint64
 }
 
 // New creates a lightweight IDS/DPI engine.
@@ -180,7 +207,7 @@ func New(cfg Config, tl *logger.TrafficLogger) *Engine {
         RateLimitPerSec: 0,
     })
 
-    return &Engine{
+    engine := &Engine{
         cfg:     cfg,
         logger:  tl,
         capturer: c,
@@ -196,7 +223,11 @@ func New(cfg Config, tl *logger.TrafficLogger) *Engine {
         inputCh: make(chan gopacket.Packet, cfg.InputQueueSize),
         srcHits: make(map[string]uint64, 4096),
         dstHits: make(map[string]uint64, 4096),
+        advancedMasterProtocols: make(map[string]uint64, 64),
+        advancedAppProtocols: make(map[string]uint64, 64),
+        advancedCategories: make(map[string]uint64, 64),
     }
+    return engine
 }
 
 // SetEnabled starts/stops the lightweight engine.
@@ -214,6 +245,8 @@ func (e *Engine) Start(parent context.Context) error {
         e.enabled.Store(true)
         return nil
     }
+
+    e.ensureAdvancedClassifier()
 
     ctx, cancel := context.WithCancel(parent)
     if err := e.capturer.Start(ctx); err != nil {
@@ -273,6 +306,11 @@ func (e *Engine) Stop() {
     e.tracker.Stop()
     e.reasm.Stop()
     e.wg.Wait()
+    if e.advancedClassifier != nil {
+        e.advancedClassifier.Close()
+        e.advancedClassifier = nil
+    }
+    e.advancedEnabled.Store(false)
     e.running.Store(false)
     e.enabled.Store(false)
     log.Printf("DPI lite stopped")
@@ -307,6 +345,7 @@ func (e *Engine) DetailedStats() Stats {
     lastHTTP := e.lastHTTP
     lastDNS := e.lastDNS
     lastTLS := e.lastTLS
+    lastAdvanced := e.lastAdvanced
     lastSeen := e.lastSeenAt
     uniqueSrc := uint64(len(e.srcHits))
     uniqueDst := uint64(len(e.dstHits))
@@ -314,11 +353,21 @@ func (e *Engine) DetailedStats() Stats {
     topDst := topN(e.dstHits, 8)
     e.metaMu.RUnlock()
 
+    e.advancedMu.RLock()
+    advancedMaster := cloneCountMap(e.advancedMasterProtocols)
+    advancedApp := cloneCountMap(e.advancedAppProtocols)
+    advancedCategories := cloneCountMap(e.advancedCategories)
+    e.advancedMu.RUnlock()
+
     uptime := 0.0
     if !e.startedAt.IsZero() {
         uptime = time.Since(e.startedAt).Seconds()
     }
     flowStats := e.tracker.Stats()
+    classifierStats := map[string]uint64(nil)
+    if e.advancedClassifier != nil {
+        classifierStats = e.advancedClassifier.Stats()
+    }
 
     return Stats{
         Enabled:      e.enabled.Load(),
@@ -356,6 +405,16 @@ func (e *Engine) DetailedStats() Stats {
         FlowEvicted:       flowStats.EvictedFlows,
         FlowExpired:       flowStats.ExpiredFlows,
         FlowClosed:        flowStats.ClosedFlows,
+        AdvancedDPIEnabled:      e.cfg.AdvancedDPIEnabled,
+        AdvancedDPIActive:       e.advancedEnabled.Load(),
+        AdvancedDetected:        e.advancedDetected.Load(),
+        AdvancedGuessed:         e.advancedGuessed.Load(),
+        AdvancedMisses:          e.advancedMisses.Load(),
+        AdvancedMasterProtocols: advancedMaster,
+        AdvancedAppProtocols:    advancedApp,
+        AdvancedCategories:      advancedCategories,
+        LastAdvanced:            lastAdvanced,
+        AdvancedClassifierStats: classifierStats,
     }
 }
 
@@ -369,6 +428,31 @@ func (e *Engine) interfaceName() string {
     e.cfgMu.RLock()
     defer e.cfgMu.RUnlock()
     return e.cfg.Interface
+}
+
+func (e *Engine) ensureAdvancedClassifier() {
+    if !e.cfg.AdvancedDPIEnabled {
+        e.advancedEnabled.Store(false)
+        return
+    }
+    if e.advancedClassifier != nil {
+        e.advancedEnabled.Store(true)
+        return
+    }
+
+    advancedCfg := ndpi.DefaultConfig()
+    if e.cfg.AdvancedDPIConfig != nil {
+        advancedCfg = *e.cfg.AdvancedDPIConfig
+    }
+    classifier, err := ndpi.NewClassifier(advancedCfg)
+    if err != nil {
+        e.advancedEnabled.Store(false)
+        log.Printf("DPI lite advanced classifier unavailable: %v", err)
+        return
+    }
+    e.advancedClassifier = classifier
+    e.advancedEnabled.Store(true)
+    log.Printf("DPI lite advanced classifier enabled")
 }
 
 func (e *Engine) forwardPackets(ctx context.Context) {
@@ -451,6 +535,8 @@ func (e *Engine) processPacket(pkt gopacket.Packet) {
     e.recordL3(decoded)
     e.enforceIPIndicatorTuple(decoded.Tuple)
     e.tracker.ObserveDecoded(decoded)
+
+    e.observeAdvancedClassification(pkt, decoded, types.InspectResult{Tuple: decoded.Tuple})
 
     payloads, err := e.reasm.Process(decoded)
     if err != nil {
@@ -818,3 +904,89 @@ func topN(m map[string]uint64, n int) []IPCount {
     }
     return items
 }
+
+func cloneCountMap(src map[string]uint64) map[string]uint64 {
+    if len(src) == 0 {
+        return nil
+    }
+    dst := make(map[string]uint64, len(src))
+    for k, v := range src {
+        dst[k] = v
+    }
+    return dst
+}
+
+func (e *Engine) observeAdvancedClassification(pkt gopacket.Packet, decoded *types.DecodedPacket, result types.InspectResult) {
+    if !e.advancedEnabled.Load() || e.advancedClassifier == nil || decoded == nil {
+        return
+    }
+
+    flowKey := ndpi.BuildFlowKey(types.DecodedPacket{
+        Tuple: types.FiveTuple{
+            SrcIP:    decoded.Tuple.SrcIP,
+            DstIP:    decoded.Tuple.DstIP,
+            SrcPort:  decoded.Tuple.SrcPort,
+            DstPort:  decoded.Tuple.DstPort,
+            Protocol: decoded.Tuple.Protocol,
+        },
+    })
+
+    classified, ok := e.advancedClassifier.ClassifyPacket(
+        flowKey,
+        pkt,
+        types.DecodedPacket{
+            Tuple: types.FiveTuple{
+                SrcIP:    decoded.Tuple.SrcIP,
+                DstIP:    decoded.Tuple.DstIP,
+                SrcPort:  decoded.Tuple.SrcPort,
+                DstPort:  decoded.Tuple.DstPort,
+                Protocol: decoded.Tuple.Protocol,
+            },
+        },
+        result,
+        time.Now(),
+    )
+    if !ok {
+        e.advancedMisses.Add(1)
+        return
+    }
+
+    e.advancedDetected.Add(1)
+    if classified.Guessed {
+        e.advancedGuessed.Add(1)
+    }
+
+    master := briefText(strings.TrimSpace(classified.MasterProtocol), 48)
+    app := briefText(strings.TrimSpace(classified.AppProtocol), 48)
+    category := briefText(strings.TrimSpace(classified.Category), 48)
+
+    e.advancedMu.Lock()
+    if master != "" {
+        e.advancedMasterProtocols[master]++
+    }
+    if app != "" {
+        e.advancedAppProtocols[app]++
+    }
+    if category != "" {
+        e.advancedCategories[category]++
+    }
+    e.advancedMu.Unlock()
+
+    line := fmt.Sprintf(
+        "ADV master=%s app=%s category=%s confidence=%s guessed=%t",
+        master,
+        app,
+        category,
+        briefText(strings.TrimSpace(classified.Confidence), 32),
+        classified.Guessed,
+    )
+    e.metaMu.Lock()
+    e.lastAdvanced = line
+    e.lastSeenAt = time.Now()
+    e.metaMu.Unlock()
+
+    if e.logger != nil && e.emitEventLogs() {
+        e.logger.Log("LOG", result.Tuple.SrcIP, result.Tuple.DstIP, "dpi", "dpi:"+briefText(line, 180))
+    }
+}
+
