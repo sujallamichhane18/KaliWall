@@ -47,6 +47,9 @@
         <a href="#" class="nav-item" data-page="logs">
             <i class="fa-solid fa-file-lines"></i><span>Traffic Logs</span>
         </a>
+        <a href="#" class="nav-item" data-page="mlmodel">
+            <i class="fa-solid fa-brain"></i><span>ML Model</span>
+        </a>
         <a href="#" class="nav-item" data-page="settings">
             <i class="fa-solid fa-gear"></i><span>Settings</span>
         </a>
@@ -888,6 +891,75 @@
                         </thead>
                         <tbody>
                             <tr><td colspan="6" style="text-align:center;color:#9ca3af;padding:20px">No anomaly analysis generated yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== ML MODEL PAGE ===== -->
+        <section class="page" id="page-mlmodel">
+            <div class="page-toolbar ops-toolbar">
+                <h2>ML Model Monitoring</h2>
+                <div class="toolbar-actions">
+                    <span class="badge badge-disabled" id="mlModelStateBadge">State: checking...</span>
+                    <span class="badge badge-disabled" id="mlModelWindowBadge">Window: 15m</span>
+                    <button class="btn btn-secondary" id="btnRefreshMLModel">
+                        <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                    </button>
+                </div>
+            </div>
+
+            <div class="ops-kpi-grid" style="margin-bottom:20px">
+                <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Model Running</span>
+                    <span class="ops-kpi-value" id="mlRunningValue">UNKNOWN</span>
+                    <span class="ops-kpi-sub" id="mlDeviceValue">device: -</span>
+                </div>
+                <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Model Health</span>
+                    <span class="ops-kpi-value" id="mlHealthValue">-</span>
+                    <span class="ops-kpi-sub" id="mlHealthHint">status pending</span>
+                </div>
+                <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">ML Decision</span>
+                    <span class="ops-kpi-value" id="mlDecisionValue">-</span>
+                    <span class="ops-kpi-sub" id="mlDecisionHint">decision pending</span>
+                </div>
+                <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Anomaly Score</span>
+                    <span class="ops-kpi-value" id="mlScoreValue">-</span>
+                    <span class="ops-kpi-sub" id="mlThresholdValue">threshold: -</span>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header">
+                    <i class="fa-solid fa-heart-pulse"></i>
+                    <h3>Model Health &amp; Errors</h3>
+                </div>
+                <div class="card-body">
+                    <div class="toolbar-actions" style="margin-bottom:12px;gap:8px;flex-wrap:wrap">
+                        <span class="badge badge-disabled" id="mlGeneratedAtBadge">Updated: -</span>
+                        <span class="badge badge-disabled" id="mlFeatureCountBadge">Features: -</span>
+                        <span class="badge badge-disabled" id="mlClassBadge">Predicted Class: -</span>
+                    </div>
+                    <p id="mlHealthMessage" class="settings-desc" style="margin:0">No ML health telemetry yet.</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <i class="fa-solid fa-shield-halved"></i>
+                    <h3>ML Attack Detections</h3>
+                </div>
+                <div class="card-body table-responsive">
+                    <table class="table" id="mlDetectionTable">
+                        <thead>
+                            <tr><th>Source</th><th>Severity</th><th>Type</th><th>Score</th><th>Decision</th><th>Summary</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td colspan="6" style="text-align:center;color:#9ca3af;padding:20px">No ML detections available yet</td></tr>
                         </tbody>
                     </table>
                 </div>
