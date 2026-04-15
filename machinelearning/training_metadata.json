@@ -1,0 +1,28 @@
+{
+  "label_column": "Label",
+  "trained_device": "cuda",
+  "auc": 0.9999743273092462,
+  "train_rows": 2264594,
+  "test_rows": 566149,
+  "feature_count": 78,
+  "normal_train": 1818477,
+  "attack_train": 446117,
+  "normal_test": 454620,
+  "attack_test": 111529,
+  "args": {
+    "data_dir": ".",
+    "pattern": "*.csv",
+    "output_dir": "outputs",
+    "sample_frac": 1.0,
+    "max_rows": null,
+    "chunksize": 200000,
+    "test_size": 0.2,
+    "device": "cuda",
+    "n_estimators": 500,
+    "max_depth": 10,
+    "learning_rate": 0.05,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "random_state": 42
+  }
+}

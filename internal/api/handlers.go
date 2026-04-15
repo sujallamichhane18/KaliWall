@@ -28,6 +28,7 @@ import (
 	"kaliwall/internal/firewall"
 	"kaliwall/internal/geoip"
 	"kaliwall/internal/logger"
+	"kaliwall/internal/ml"
 	"kaliwall/internal/models"
 	"kaliwall/internal/proxy"
 	"kaliwall/internal/sysinfo"
@@ -154,9 +155,13 @@ func (p *DPIProvider) SetWorkers(workers int) error {
 func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Service, an *analytics.Service, dpi *DPIProvider, geo *geoip.Service, proxy maliciousDomainProxy, aiService *ai.OpenRouterService) http.Handler {
 	mux := http.NewServeMux()
 
-	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo, proxy: proxy, aiService: aiService}
+	mlAnomalyPredictor := ml.NewAnomalyPredictorFromEnv()
+	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo, proxy: proxy, aiService: aiService, mlAnomaly: mlAnomalyPredictor}
 	h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
 	h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
+	if mlAnomalyPredictor != nil && mlAnomalyPredictor.Enabled() {
+		log.Printf("ML anomaly predictor enabled: model=%s", mlAnomalyPredictor.ModelPath())
+	}
 
 	// REST API v1 endpoints
 	mux.HandleFunc("/api/v1/rules", h.handleRules)
@@ -2019,6 +2024,84 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 	}
 
+	var mlPrediction *models.TrafficAnomalyMLPrediction
+	if h != nil && h.mlAnomaly != nil && h.mlAnomaly.Enabled() {
+		featureVector := buildMLAnomalyFeatureVector(
+			windowMinutes,
+			windowTotal,
+			windowBlocked,
+			windowSuspicious,
+			currentMinuteCount,
+			meanPerMin,
+			stdPerMin,
+			trafficThreshold,
+			trafficExcessZ,
+			trafficRobustZ,
+			burstRatio,
+			blockedRatioBaseline,
+			currentBlockedRatio,
+			blockedRatioThreshold,
+			suspiciousRatioBaseline,
+			currentSuspiciousRatio,
+			suspiciousRatioThreshold,
+			prevTotal,
+			len(sourceWindow),
+			len(destinationWindow),
+			len(windowProtocolCounts),
+			len(conns),
+			halfOpen,
+			iforestWindow,
+			anomalies,
+		)
+
+		pred, err := h.mlAnomaly.Predict(featureVector)
+		mlPrediction = &models.TrafficAnomalyMLPrediction{Enabled: true}
+		if err != nil {
+			mlPrediction.Available = false
+			mlPrediction.Error = err.Error()
+		} else {
+			mlPrediction.Available = pred.Available
+			mlPrediction.Score = pred.Score
+			mlPrediction.Threshold = pred.Threshold
+			mlPrediction.IsAnomaly = pred.IsAnomaly
+			mlPrediction.PredictedClass = pred.PredictedClass
+			mlPrediction.FeatureCount = pred.FeatureCount
+			mlPrediction.Warning = pred.Warning
+
+			if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
+				severity := "warning"
+				if pred.Score >= 0.85 {
+					severity = "critical"
+				}
+
+				detectorScore := clampInt(int(math.Round(pred.Score*100)), 1, 100)
+				if detectorScore < 32 {
+					detectorScore = 32
+				}
+
+				appendAnomaly(
+					"xgboost_anomaly_score",
+					severity,
+					detectorScore,
+					"XGBoost Model Alert",
+					fmt.Sprintf("XGBoost anomaly model produced %.1f%% anomaly probability (threshold %.1f%%).", pred.Score*100, pred.Threshold*100),
+					windowTotal,
+					pred.Threshold,
+					pred.Score,
+					map[string]interface{}{
+						"model":           "xgboost_joblib",
+						"score":           pred.Score,
+						"threshold":       pred.Threshold,
+						"predicted_class": pred.PredictedClass,
+						"feature_count":   pred.FeatureCount,
+						"window_total":    windowTotal,
+						"window_minutes":  windowMinutes,
+					},
+				)
+			}
+		}
+	}
+
 	sort.SliceStable(anomalies, func(i, j int) bool {
 		return anomalies[i].Score > anomalies[j].Score
 	})
@@ -2027,6 +2110,15 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	riskScore := calculateAnomalyRiskScore(anomalies, windowTotal, windowBlocked, windowSuspicious, currentMinuteCount, meanPerMin, stdPerMin)
+	if mlPrediction != nil && mlPrediction.Available {
+		mlRisk := clampInt(int(math.Round(mlPrediction.Score*100)), 0, 100)
+		blendWeight := 0.10
+		if mlPrediction.IsAnomaly {
+			blendWeight = 0.22
+		}
+		blended := int(math.Round(float64(riskScore)*(1-blendWeight) + float64(mlRisk)*blendWeight))
+		riskScore = clampInt(blended, 0, 100)
+	}
 
 	status := "normal"
 	switch {
@@ -2042,6 +2134,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	snapshot.Status = status
 	snapshot.TotalAnomalies = len(anomalies)
 	snapshot.Anomalies = anomalies
+	snapshot.ML = mlPrediction
 	return snapshot
 }
 
@@ -2147,6 +2240,101 @@ func meanTopAnomalyScores(anomalies []models.TrafficAnomaly, topN int) float64 {
 		total += anomalies[i].Score
 	}
 	return float64(total) / float64(topN)
+}
+
+func buildMLAnomalyFeatureVector(
+	windowMinutes int,
+	windowTotal int,
+	windowBlocked int,
+	windowSuspicious int,
+	currentMinuteCount int,
+	meanPerMin float64,
+	stdPerMin float64,
+	trafficThreshold float64,
+	trafficExcessZ float64,
+	trafficRobustZ float64,
+	burstRatio float64,
+	blockedRatioBaseline float64,
+	currentBlockedRatio float64,
+	blockedRatioThreshold float64,
+	suspiciousRatioBaseline float64,
+	currentSuspiciousRatio float64,
+	suspiciousRatioThreshold float64,
+	previousWindowTotal int,
+	sourceCardinality int,
+	destinationCardinality int,
+	protocolCardinality int,
+	connectionCount int,
+	halfOpenConnections int,
+	iforestWindow isolationForestWindowResult,
+	anomalies []models.TrafficAnomaly,
+) map[string]float64 {
+	criticalCount := 0
+	warningCount := 0
+	maxScore := 0
+	for _, a := range anomalies {
+		sev := strings.ToLower(strings.TrimSpace(a.Severity))
+		if sev == "critical" {
+			criticalCount++
+		} else if sev == "warning" {
+			warningCount++
+		}
+		if a.Score > maxScore {
+			maxScore = a.Score
+		}
+	}
+
+	halfOpenRatio := 0.0
+	if connectionCount > 0 {
+		halfOpenRatio = safeRatio(float64(halfOpenConnections), float64(connectionCount))
+	}
+
+	featureMap := map[string]float64{
+		"window_minutes":              float64(windowMinutes),
+		"window_total":                float64(windowTotal),
+		"window_blocked":              float64(windowBlocked),
+		"window_suspicious":           float64(windowSuspicious),
+		"window_blocked_ratio":        safeRatio(float64(windowBlocked), float64(windowTotal)),
+		"window_suspicious_ratio":     safeRatio(float64(windowSuspicious), float64(windowTotal)),
+		"window_risk_ratio":           safeRatio(float64(windowBlocked+windowSuspicious), float64(windowTotal)),
+		"current_minute_events":       float64(currentMinuteCount),
+		"mean_per_min":                meanPerMin,
+		"std_per_min":                 stdPerMin,
+		"traffic_threshold":           trafficThreshold,
+		"traffic_excess_z":            trafficExcessZ,
+		"traffic_robust_z":            trafficRobustZ,
+		"traffic_burst_ratio":         burstRatio,
+		"blocked_ratio_baseline":      blockedRatioBaseline,
+		"blocked_ratio_current":       currentBlockedRatio,
+		"blocked_ratio_threshold":     blockedRatioThreshold,
+		"suspicious_ratio_baseline":   suspiciousRatioBaseline,
+		"suspicious_ratio_current":    currentSuspiciousRatio,
+		"suspicious_ratio_threshold":  suspiciousRatioThreshold,
+		"previous_window_total":       float64(previousWindowTotal),
+		"source_cardinality":          float64(sourceCardinality),
+		"destination_cardinality":     float64(destinationCardinality),
+		"protocol_cardinality":        float64(protocolCardinality),
+		"active_connections":          float64(connectionCount),
+		"half_open_connections":       float64(halfOpenConnections),
+		"half_open_ratio":             halfOpenRatio,
+		"iforest_ready":               0,
+		"iforest_window_vectors":      float64(iforestWindow.WindowVectors),
+		"iforest_anomaly_vectors":     float64(iforestWindow.AnomalyVectors),
+		"iforest_anomaly_ratio":       iforestWindow.AnomalyRatio,
+		"iforest_min_score":           iforestWindow.MinScore,
+		"iforest_mean_score":          iforestWindow.MeanScore,
+		"iforest_anomaly_bound":       iforestWindow.Bound,
+		"iforest_max_outlier_distance": iforestWindow.MaxOutlierDistance,
+		"detector_total":              float64(len(anomalies)),
+		"detector_critical":           float64(criticalCount),
+		"detector_warning":            float64(warningCount),
+		"detector_max_score":          float64(maxScore),
+	}
+	if iforestWindow.Ready {
+		featureMap["iforest_ready"] = 1
+	}
+
+	return featureMap
 }
 
 func computeEWMABaseline(values []float64, alpha float64) ewmaBaseline {
@@ -2929,6 +3117,7 @@ type handlers struct {
 	geo       *geoip.Service
 	proxy     maliciousDomainProxy
 	aiService *ai.OpenRouterService
+	mlAnomaly *ml.AnomalyPredictor
 
 	anomalyTrendMu       sync.RWMutex
 	anomalyRiskHistory   []models.TrafficAnomalyRiskPoint

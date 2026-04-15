@@ -193,6 +193,19 @@ type TrafficAnomalyDetectorTrend struct {
 	Points         []TrafficAnomalyDetectorPoint `json:"points"`
 }
 
+// TrafficAnomalyMLPrediction captures optional ML model output for anomaly scoring.
+type TrafficAnomalyMLPrediction struct {
+	Enabled        bool    `json:"enabled"`
+	Available      bool    `json:"available"`
+	Score          float64 `json:"score,omitempty"`
+	Threshold      float64 `json:"threshold,omitempty"`
+	IsAnomaly      bool    `json:"is_anomaly,omitempty"`
+	PredictedClass int     `json:"predicted_class,omitempty"`
+	FeatureCount   int     `json:"feature_count,omitempty"`
+	Warning        string  `json:"warning,omitempty"`
+	Error          string  `json:"error,omitempty"`
+}
+
 // TrafficAnomalySnapshot is the aggregated anomaly report consumed by the UI.
 type TrafficAnomalySnapshot struct {
 	GeneratedAt    time.Time        `json:"generated_at"`
@@ -206,6 +219,7 @@ type TrafficAnomalySnapshot struct {
 	Status         string           `json:"status"`
 	TotalAnomalies int              `json:"total_anomalies"`
 	Anomalies      []TrafficAnomaly `json:"anomalies"`
+	ML             *TrafficAnomalyMLPrediction   `json:"ml,omitempty"`
 	RiskTrend      []TrafficAnomalyRiskPoint    `json:"risk_trend,omitempty"`
 	DetectorTrends []TrafficAnomalyDetectorTrend `json:"detector_trends,omitempty"`
 }
