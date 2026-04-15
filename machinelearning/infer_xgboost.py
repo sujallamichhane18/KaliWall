@@ -585,6 +585,10 @@ def main() -> None:
         if cpu_warning:
             warning = cpu_warning
 
+    request_feature_names = sorted(
+        str(k).strip() for k in features_obj.keys() if str(k).strip()
+    )
+
     feature_names = list(metadata.feature_names)
 
     if not feature_names and embedded_feature_names:
@@ -595,16 +599,50 @@ def main() -> None:
     if not feature_names:
         inferred_feature_count = _feature_count_from_model(model)
         if inferred_feature_count > 0:
-            feature_names = [f"f{i}" for i in range(inferred_feature_count)]
+            if request_feature_names:
+                if len(request_feature_names) >= inferred_feature_count:
+                    feature_names = request_feature_names[:inferred_feature_count]
+                    if len(request_feature_names) == inferred_feature_count:
+                        feature_warning = (
+                            "Feature names were not found in metadata/model. "
+                            "Using sorted request feature names (count matched model feature count)."
+                        )
+                    else:
+                        feature_warning = (
+                            "Feature names were not found in metadata/model. "
+                            "Using sorted request feature names truncated to model feature count."
+                        )
+                else:
+                    feature_names = list(request_feature_names)
+                    missing_count = inferred_feature_count - len(request_feature_names)
+                    feature_names.extend(
+                        f"__missing_feature_{idx}" for idx in range(missing_count)
+                    )
+                    feature_warning = (
+                        "Feature names were not found in metadata/model. "
+                        "Using sorted request feature names and zero-filling missing features."
+                    )
+            else:
+                feature_names = [f"f{i}" for i in range(inferred_feature_count)]
+                feature_warning = (
+                    "Feature names were not found in metadata/model. "
+                    f"Using generated fallback names f0..f{inferred_feature_count-1}."
+                )
+            warning = (warning + " " + feature_warning).strip()
+
+    if feature_names and request_feature_names:
+        overlap = sum(1 for name in feature_names if name in features_obj)
+        if overlap == 0 and len(feature_names) == len(request_feature_names):
+            feature_names = request_feature_names
             feature_warning = (
-                "Feature names were not found in metadata/model. "
-                f"Using generated fallback names f0..f{inferred_feature_count-1}."
+                "Resolved model feature names had zero overlap with request payload keys. "
+                "Falling back to sorted request feature names."
             )
             warning = (warning + " " + feature_warning).strip()
 
     if not feature_names:
         # Last-resort deterministic ordering from request payload.
-        feature_names = sorted(str(k).strip() for k in features_obj.keys() if str(k).strip())
+        feature_names = request_feature_names
         if feature_names:
             feature_warning = (
                 "Feature names were not found in metadata/model. "

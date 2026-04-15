@@ -22,7 +22,9 @@ const (
 	defaultModelUBJPath  = "machinelearning/xgboost_anomaly_model.ubj"
 	defaultModelPath    = "machinelearning/xgboost_anomaly_model.joblib"
 	defaultMetadataPath = "machinelearning/training_metadata.json"
-	defaultTimeout      = 1500 * time.Millisecond
+	defaultTimeout      = 6 * time.Second
+	minRetryTimeout     = 4 * time.Second
+	maxRetryTimeout     = 15 * time.Second
 )
 
 var errPredictorDisabled = errors.New("ml anomaly predictor disabled")
@@ -80,12 +82,9 @@ func NewAnomalyPredictorFromEnv() *AnomalyPredictor {
 		return predictor
 	}
 
-	pythonCmd := strings.TrimSpace(os.Getenv("KALIWALL_ML_PYTHON_CMD"))
+	pythonCmd, pythonResolutionErr := resolvePythonCommand(strings.TrimSpace(os.Getenv("KALIWALL_ML_PYTHON_CMD")))
 	if pythonCmd == "" {
-		pythonCmd = defaultPythonCommand()
-	}
-	if _, err := exec.LookPath(pythonCmd); err != nil {
-		predictor.disableReason = fmt.Sprintf("python command not found: %s", pythonCmd)
+		predictor.disableReason = pythonResolutionErr
 		return predictor
 	}
 
@@ -198,46 +197,19 @@ func (p *AnomalyPredictor) Predict(features map[string]float64) (Prediction, err
 		return Prediction{}, fmt.Errorf("marshal ml request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, p.pythonCmd, p.scriptPath)
-	cmd.Stdin = bytes.NewReader(payload)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	runErr := cmd.Run()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return Prediction{}, fmt.Errorf("ml inference timeout after %s", p.timeout.String())
-	}
-	if runErr != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = strings.TrimSpace(stdout.String())
+	response, err := p.invokePredict(payload, p.timeout)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		retryTimeout := p.timeout * 3
+		if retryTimeout < minRetryTimeout {
+			retryTimeout = minRetryTimeout
 		}
-		if detail != "" {
-			return Prediction{}, fmt.Errorf("ml inference failed: %v (%s)", runErr, detail)
+		if retryTimeout > maxRetryTimeout {
+			retryTimeout = maxRetryTimeout
 		}
-		return Prediction{}, fmt.Errorf("ml inference failed: %w", runErr)
+		response, err = p.invokePredict(payload, retryTimeout)
 	}
-
-	raw := bytes.TrimSpace(stdout.Bytes())
-	if len(raw) == 0 {
-		return Prediction{}, errors.New("ml inference produced empty output")
-	}
-
-	var response predictResponse
-	if err := json.Unmarshal(raw, &response); err != nil {
-		return Prediction{}, fmt.Errorf("parse ml response: %w", err)
-	}
-	if !response.OK {
-		msg := strings.TrimSpace(response.Error)
-		if msg == "" {
-			msg = "ml bridge returned an unsuccessful response"
-		}
-		return Prediction{}, errors.New(msg)
+	if err != nil {
+		return Prediction{}, err
 	}
 
 	score := clampFloat(response.Score, 0, 1)
@@ -265,11 +237,103 @@ func (p *AnomalyPredictor) Predict(features map[string]float64) (Prediction, err
 	return prediction, nil
 }
 
+func (p *AnomalyPredictor) invokePredict(payload []byte, timeout time.Duration) (predictResponse, error) {
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, p.pythonCmd, p.scriptPath)
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return predictResponse{}, fmt.Errorf("ml inference timeout after %s", timeout.String())
+	}
+	if runErr != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		if detail != "" {
+			return predictResponse{}, fmt.Errorf("ml inference failed: %v (%s)", runErr, detail)
+		}
+		return predictResponse{}, fmt.Errorf("ml inference failed: %w", runErr)
+	}
+
+	raw := bytes.TrimSpace(stdout.Bytes())
+	if len(raw) == 0 {
+		return predictResponse{}, errors.New("ml inference produced empty output")
+	}
+
+	var response predictResponse
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return predictResponse{}, fmt.Errorf("parse ml response: %w", err)
+	}
+	if !response.OK {
+		msg := strings.TrimSpace(response.Error)
+		if msg == "" {
+			msg = "ml bridge returned an unsuccessful response"
+		}
+		return response, errors.New(msg)
+	}
+	return response, nil
+}
+
 func defaultPythonCommand() string {
 	if runtime.GOOS == "windows" {
 		return "python"
 	}
 	return "python3"
+}
+
+func resolvePythonCommand(preferred string) (string, string) {
+	candidates := make([]string, 0, 4)
+	tried := make([]string, 0, 4)
+
+	addCandidate := func(cmd string) {
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if strings.EqualFold(existing, cmd) {
+				return
+			}
+		}
+		candidates = append(candidates, cmd)
+	}
+
+	if preferred != "" {
+		addCandidate(preferred)
+	}
+
+	if runtime.GOOS == "windows" {
+		addCandidate("python")
+		addCandidate("py")
+		addCandidate("python3")
+	} else {
+		addCandidate("python3")
+		addCandidate("python")
+	}
+
+	for _, cmd := range candidates {
+		if _, err := exec.LookPath(cmd); err == nil {
+			return cmd, ""
+		}
+		tried = append(tried, cmd)
+	}
+
+	if len(tried) == 0 {
+		return "", "python command not found"
+	}
+	return "", fmt.Sprintf("python command not found (tried: %s)", strings.Join(tried, ", "))
 }
 
 func envBool(key string, fallback bool) bool {
