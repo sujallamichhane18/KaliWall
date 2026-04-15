@@ -143,6 +143,7 @@
         threats: "Threat Intelligence",
         websites: "Website Blocking",
         logs: "Traffic Logs",
+        mlmodel: "ML Model",
         settings: "Settings",
     };
 
@@ -215,6 +216,10 @@
             case "logs":
                 loadLogs();
                 loadTrafficAnomalies();
+                break;
+            case "mlmodel":
+                loadStats();
+                loadTrafficAnomalies({ windowMinutes: 15, limit: 5000, trendLimit: 240 });
                 break;
             case "settings":
                 loadSettings();
@@ -2535,6 +2540,7 @@
             if (tableBody) {
                 tableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#ef4444;padding:20px">' + escapeHtml(errorMessage || "Anomaly analysis unavailable") + '</td></tr>';
             }
+            renderMLModelSubpage(null, fallbackWindowMinutes, errorMessage || "Anomaly analysis unavailable");
             return;
         }
 
@@ -2591,7 +2597,7 @@
             }
         }
 
-        var ml = snapshot.ml && typeof snapshot.ml === "object" ? snapshot.ml : null;
+        var ml = extractMLPayload(snapshot);
         if (!ml || ml.enabled === false) {
             if (modelBadge) {
                 modelBadge.className = "badge badge-disabled";
@@ -2662,6 +2668,8 @@
             socRisk.textContent = String(status || "normal").toUpperCase() + " (" + riskScore + ")";
         }
 
+        renderMLModelSubpage(snapshot, fallbackWindowMinutes, "");
+
         renderAnomalyRiskTrend(snapshot);
         renderAnomalyDetectorTrend(snapshot);
 
@@ -2693,6 +2701,219 @@
                 "<td><strong>" + escapeHtml(String(item.score || 0)) + "</strong></td>" +
                 "<td>" + escapeHtml(formatAnomalyMetric(item.current_value)) + "</td>" +
                 "<td>" + escapeHtml(formatAnomalyMetric(item.baseline_value)) + "</td>";
+            tableBody.appendChild(tr);
+        });
+    }
+
+    function extractMLPayload(snapshot) {
+        if (!snapshot || typeof snapshot !== "object") return null;
+        if (snapshot.ml && typeof snapshot.ml === "object") return snapshot.ml;
+        if (snapshot.ML && typeof snapshot.ML === "object") return snapshot.ML;
+        return null;
+    }
+
+    function renderMLModelSubpage(snapshot, fallbackWindowMinutes, errorMessage) {
+        var stateBadge = document.getElementById("mlModelStateBadge");
+        var windowBadge = document.getElementById("mlModelWindowBadge");
+        var runningValue = document.getElementById("mlRunningValue");
+        var deviceValue = document.getElementById("mlDeviceValue");
+        var healthValue = document.getElementById("mlHealthValue");
+        var healthHint = document.getElementById("mlHealthHint");
+        var decisionValue = document.getElementById("mlDecisionValue");
+        var decisionHint = document.getElementById("mlDecisionHint");
+        var scoreValue = document.getElementById("mlScoreValue");
+        var thresholdValue = document.getElementById("mlThresholdValue");
+        var generatedBadge = document.getElementById("mlGeneratedAtBadge");
+        var featureBadge = document.getElementById("mlFeatureCountBadge");
+        var classBadge = document.getElementById("mlClassBadge");
+        var healthMessage = document.getElementById("mlHealthMessage");
+        var tableBody = document.querySelector("#mlDetectionTable tbody");
+
+        if (!stateBadge && !tableBody) return;
+
+        var windowLabel = Number((snapshot && snapshot.window_minutes) || fallbackWindowMinutes || 15);
+        if (!isFinite(windowLabel) || windowLabel < 1) windowLabel = 15;
+        if (windowBadge) {
+            windowBadge.className = "badge badge-disabled";
+            windowBadge.textContent = "Window: " + windowLabel + "m";
+        }
+
+        if (!snapshot) {
+            if (stateBadge) {
+                stateBadge.className = "badge badge-reject";
+                stateBadge.textContent = "State: unavailable";
+            }
+            if (runningValue) runningValue.textContent = "OFFLINE";
+            if (deviceValue) deviceValue.textContent = "device: -";
+            if (healthValue) healthValue.textContent = "ERROR";
+            if (healthHint) healthHint.textContent = "anomaly service unavailable";
+            if (decisionValue) decisionValue.textContent = "UNKNOWN";
+            if (decisionHint) decisionHint.textContent = "no model decision";
+            if (scoreValue) scoreValue.textContent = "-";
+            if (thresholdValue) thresholdValue.textContent = "threshold: -";
+            if (generatedBadge) {
+                generatedBadge.className = "badge badge-reject";
+                generatedBadge.textContent = "Updated: failed";
+            }
+            if (featureBadge) {
+                featureBadge.className = "badge badge-disabled";
+                featureBadge.textContent = "Features: -";
+            }
+            if (classBadge) {
+                classBadge.className = "badge badge-disabled";
+                classBadge.textContent = "Predicted Class: -";
+            }
+            if (healthMessage) {
+                healthMessage.textContent = String(errorMessage || "ML telemetry is unavailable.");
+            }
+            if (tableBody) {
+                tableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#ef4444;padding:20px">' + escapeHtml(errorMessage || "No ML detections available") + '</td></tr>';
+            }
+            return;
+        }
+
+        var ml = extractMLPayload(snapshot);
+        var anomalies = Array.isArray(snapshot.anomalies) ? snapshot.anomalies : [];
+
+        if (generatedBadge) {
+            generatedBadge.className = "badge badge-disabled";
+            generatedBadge.textContent = "Updated: " + formatTime(snapshot.generated_at);
+        }
+
+        if (!ml || ml.enabled === false) {
+            if (stateBadge) {
+                stateBadge.className = "badge badge-disabled";
+                stateBadge.textContent = "State: disabled";
+            }
+            if (runningValue) runningValue.textContent = "DISABLED";
+            if (deviceValue) deviceValue.textContent = "device: -";
+            if (healthValue) healthValue.textContent = "NOT CONFIGURED";
+            if (healthHint) healthHint.textContent = "set KALIWALL_ML_ANOMALY_ENABLED=1";
+            if (decisionValue) decisionValue.textContent = "NO DECISION";
+            if (decisionHint) decisionHint.textContent = "model is disabled";
+            if (scoreValue) scoreValue.textContent = "-";
+            if (thresholdValue) thresholdValue.textContent = "threshold: -";
+            if (featureBadge) {
+                featureBadge.className = "badge badge-disabled";
+                featureBadge.textContent = "Features: -";
+            }
+            if (classBadge) {
+                classBadge.className = "badge badge-disabled";
+                classBadge.textContent = "Predicted Class: -";
+            }
+            if (healthMessage) {
+                healthMessage.textContent = "ML anomaly model is disabled or not configured.";
+            }
+        } else if (ml.available) {
+            var mlScore = Number(ml.score || 0);
+            var mlThreshold = Number(ml.threshold || 0.5);
+            if (!isFinite(mlScore)) mlScore = 0;
+            if (!isFinite(mlThreshold)) mlThreshold = 0.5;
+            mlScore = Math.max(0, Math.min(1, mlScore));
+            mlThreshold = Math.max(0, Math.min(1, mlThreshold));
+
+            var scorePct = Math.round(mlScore * 100);
+            var thresholdPct = Math.round(mlThreshold * 100);
+            var isAttack = ml.is_anomaly === true || ml.predicted_class === 1;
+            var mlWarn = String(ml.warning || "").trim();
+            var device = String(ml.inference_device || "cpu").trim().toUpperCase();
+
+            if (stateBadge) {
+                stateBadge.className = "badge " + (isAttack ? "badge-reject" : "badge-enabled");
+                stateBadge.textContent = isAttack ? "State: attack detected" : "State: running";
+            }
+            if (runningValue) runningValue.textContent = isAttack ? "RUNNING (ALERT)" : "RUNNING";
+            if (deviceValue) deviceValue.textContent = "device: " + (device || "CPU");
+            if (healthValue) healthValue.textContent = "HEALTHY";
+            if (healthHint) healthHint.textContent = "inference responding";
+            if (decisionValue) decisionValue.textContent = isAttack ? "ATTACK" : "NORMAL";
+            if (decisionHint) decisionHint.textContent = "predicted class: " + String(ml.predicted_class || 0);
+            if (scoreValue) scoreValue.textContent = scorePct + "%";
+            if (thresholdValue) thresholdValue.textContent = "threshold: " + thresholdPct + "%";
+            if (featureBadge) {
+                featureBadge.className = "badge badge-enabled";
+                featureBadge.textContent = "Features: " + String(ml.feature_count || 0);
+            }
+            if (classBadge) {
+                classBadge.className = "badge " + (isAttack ? "badge-reject" : "badge-enabled");
+                classBadge.textContent = "Predicted Class: " + String(ml.predicted_class || 0);
+            }
+            if (healthMessage) {
+                healthMessage.textContent = mlWarn || "ML model is running and producing anomaly decisions.";
+            }
+        } else {
+            var err = String(ml.error || ml.warning || "inference unavailable").trim();
+            if (stateBadge) {
+                stateBadge.className = "badge badge-reject";
+                stateBadge.textContent = "State: error";
+            }
+            if (runningValue) runningValue.textContent = "ERROR";
+            if (deviceValue) deviceValue.textContent = "device: -";
+            if (healthValue) healthValue.textContent = "ERROR";
+            if (healthHint) healthHint.textContent = "inference failed";
+            if (decisionValue) decisionValue.textContent = "UNKNOWN";
+            if (decisionHint) decisionHint.textContent = "no decision (model error)";
+            if (scoreValue) scoreValue.textContent = "-";
+            if (thresholdValue) thresholdValue.textContent = "threshold: -";
+            if (featureBadge) {
+                featureBadge.className = "badge badge-disabled";
+                featureBadge.textContent = "Features: -";
+            }
+            if (classBadge) {
+                classBadge.className = "badge badge-disabled";
+                classBadge.textContent = "Predicted Class: -";
+            }
+            if (healthMessage) {
+                healthMessage.textContent = err || "ML model health check failed.";
+            }
+        }
+
+        if (!tableBody) return;
+        tableBody.innerHTML = "";
+
+        var mlRows = anomalies.filter(function (a) {
+            var typeText = String(a.type || "").toLowerCase();
+            var titleText = String(a.title || "").toLowerCase();
+            return typeText.indexOf("xgboost") >= 0 || titleText.indexOf("xgboost") >= 0;
+        });
+
+        if (mlRows.length === 0 && ml && ml.enabled) {
+            var pseudoDecision = ml.available
+                ? ((ml.is_anomaly === true || ml.predicted_class === 1) ? "attack detected" : "normal")
+                : "inference error";
+            mlRows = [{
+                type: "ml_decision",
+                severity: ml.available ? ((ml.is_anomaly || ml.predicted_class === 1) ? "warning" : "info") : "critical",
+                title: "XGBoost Decision",
+                score: Math.round(Number(ml.score || 0) * 100),
+                summary: ml.available
+                    ? "Model decision: " + pseudoDecision + " (threshold " + Math.round(Number(ml.threshold || 0.5) * 100) + "%)."
+                    : String(ml.error || ml.warning || "inference unavailable"),
+            }];
+        }
+
+        if (mlRows.length === 0) {
+            tableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#6b7280;padding:20px">No ML detections in the last ' + escapeHtml(String(windowLabel)) + ' minutes</td></tr>';
+            return;
+        }
+
+        mlRows.slice(0, 20).forEach(function (item) {
+            var sev = String(item.severity || "info").toLowerCase();
+            if (sev === "high") sev = "warning";
+            if (sev === "medium" || sev === "low") sev = "info";
+            var score = Number(item.score || 0);
+            if (!isFinite(score)) score = 0;
+            score = Math.max(0, Math.min(100, Math.round(score)));
+            var decision = score >= 70 ? "attack detected" : score >= 45 ? "watch" : "normal";
+
+            var tr = document.createElement("tr");
+            tr.innerHTML =
+                "<td>XGBoost</td>" +
+                "<td>" + severityBadge(sev) + "</td>" +
+                "<td>" + escapeHtml(String(item.title || item.type || "ml_event").replace(/_/g, " ")) + "</td>" +
+                "<td><strong>" + escapeHtml(String(score)) + "%</strong></td>" +
+                "<td>" + escapeHtml(decision) + "</td>" +
+                "<td>" + escapeHtml(item.summary || "-") + "</td>";
             tableBody.appendChild(tr);
         });
     }
@@ -4009,6 +4230,13 @@
         btnRefreshAnomalies.addEventListener("click", function () {
             loadTrafficAnomalies();
             toast("Anomaly analysis refreshed", "success");
+        });
+    }
+    var btnRefreshMLModel = document.getElementById("btnRefreshMLModel");
+    if (btnRefreshMLModel) {
+        btnRefreshMLModel.addEventListener("click", function () {
+            loadTrafficAnomalies({ windowMinutes: 15, limit: 5000, trendLimit: 240 });
+            toast("ML model status refreshed", "success");
         });
     }
     document.getElementById("aiModalClose").addEventListener("click", closeAIExplanationModal);
