@@ -181,6 +181,40 @@ func TestBuildTrafficAnomalySnapshotDetectsSourceTargetSweep(t *testing.T) {
 	}
 }
 
+func TestBuildTrafficAnomalySnapshotDetectsCoordinatedScanCampaign(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	attackers := []string{"203.0.113.200", "203.0.113.201", "203.0.113.202", "203.0.113.203"}
+	for i, src := range attackers {
+		for j := 0; j < 14; j++ {
+			dst := fmt.Sprintf("10.8.%d.%d", i+1, (j%9)+1)
+			dstPort := 2000 + j
+			h.logger.Log("BLOCK", src, dst, "tcp", fmt.Sprintf("coordinated scan probe dst_port=%d suspicious payload", dstPort))
+		}
+	}
+
+	for i := 0; i < 24; i++ {
+		h.logger.Log("ALLOW", fmt.Sprintf("198.51.100.%d", i+1), "10.0.0.15", "udp", "normal dns lookup")
+	}
+
+	snapshot := h.buildTrafficAnomalySnapshot(1200, 15)
+	if snapshot.TotalAnomalies == 0 {
+		t.Fatalf("expected anomalies, got none")
+	}
+
+	found := false
+	for _, a := range snapshot.Anomalies {
+		if a.Type == "coordinated_scan_campaign" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected coordinated_scan_campaign anomaly, got %#v", snapshot.Anomalies)
+	}
+}
+
 func TestBuildTrafficAnomalySnapshotRiskScoreBoundedAndElevated(t *testing.T) {
 	h, cleanup := newAnomalyTestHandlers(t)
 	defer cleanup()
@@ -394,5 +428,26 @@ func TestFormatHourBucket(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("formatHourBucket(%d) = %q, want %q", tc.hour, got, tc.want)
 		}
+	}
+}
+
+func TestComputeRobustSeriesStatsCapturesMedianAndSpread(t *testing.T) {
+	values := []float64{10, 10, 11, 12, 12, 13, 40}
+	stats := computeRobustSeriesStats(values)
+
+	if stats.Samples != len(values) {
+		t.Fatalf("expected %d samples, got %d", len(values), stats.Samples)
+	}
+	if stats.Median < 11.5 || stats.Median > 12.5 {
+		t.Fatalf("expected median around 12, got %.3f", stats.Median)
+	}
+	if stats.MAD <= 0 {
+		t.Fatalf("expected positive MAD, got %.6f", stats.MAD)
+	}
+	if stats.RobustStd <= 0 {
+		t.Fatalf("expected positive robust stddev, got %.6f", stats.RobustStd)
+	}
+	if stats.P90 <= stats.Median {
+		t.Fatalf("expected p90 to exceed median, got p90=%.3f median=%.3f", stats.P90, stats.Median)
 	}
 }

@@ -532,6 +532,14 @@ type ewmaBaseline struct {
 	Alpha   float64
 }
 
+type robustSeriesStats struct {
+	Median    float64
+	MAD       float64
+	RobustStd float64
+	P90       float64
+	Samples   int
+}
+
 type isolationForestWindowResult struct {
 	Ready              bool
 	WindowVectors      int
@@ -651,6 +659,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	sourceTotal := make(map[string]int)
 	sourceBlocked := make(map[string]int)
 	sourceSuspicious := make(map[string]int)
+	sourceRiskHits := make(map[string]int)
 	destinationWindow := make(map[string]int)
 	destinationRiskWindow := make(map[string]int)
 
@@ -758,6 +767,9 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			if isSuspicious {
 				sourceSuspicious[src]++
 			}
+			if isBlocked || isSuspicious {
+				sourceRiskHits[src]++
+			}
 			if dst != "" {
 				if _, ok := sourceTargets[src]; !ok {
 					sourceTargets[src] = make(map[string]struct{})
@@ -854,26 +866,61 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	ewmaCountBaseline := computeEWMABaseline(baselineCountSeries, anomalyEWMAEventsAlpha)
 	ewmaBlockedRatioBaseline := computeEWMABaseline(baselineBlockedRatioSeries, anomalyEWMABlockedAlpha)
 	ewmaSuspiciousRatioBaseline := computeEWMABaseline(baselineSuspiciousRatioSeries, anomalyEWMASuspiciousAlpha)
+	robustCountStats := computeRobustSeriesStats(baselineCountSeries)
+	robustBlockedRatioStats := computeRobustSeriesStats(baselineBlockedRatioSeries)
+	robustSuspiciousRatioStats := computeRobustSeriesStats(baselineSuspiciousRatioSeries)
 
-	if ewmaCountBaseline.Mean > 0 {
+	if ewmaCountBaseline.Mean > 0 && robustCountStats.Median > 0 {
+		meanPerMin = blendFloat(ewmaCountBaseline.Mean, robustCountStats.Median, 0.62)
+	} else if ewmaCountBaseline.Mean > 0 {
 		meanPerMin = ewmaCountBaseline.Mean
+	} else if robustCountStats.Median > 0 {
+		meanPerMin = robustCountStats.Median
 	}
 	if ewmaCountBaseline.StdDev > 0 {
 		stdPerMin = ewmaCountBaseline.StdDev
 	}
+	if robustCountStats.RobustStd > stdPerMin {
+		stdPerMin = robustCountStats.RobustStd
+	}
 
-	trafficThreshold := meanPerMin + math.Max(stdPerMin*2.2, 2.0)
+	adaptiveTrafficStd := stdPerMin
+	if adaptiveTrafficStd <= 0 {
+		adaptiveTrafficStd = math.Max(1.0, meanPerMin*0.35)
+	}
+	floorStd := math.Max(1.0, meanPerMin*0.12)
+	if adaptiveTrafficStd < floorStd {
+		adaptiveTrafficStd = floorStd
+	}
+
+	trafficThreshold := meanPerMin + math.Max(adaptiveTrafficStd*2.15, 2.0)
+	if robustCountStats.P90 > 0 {
+		p90Threshold := robustCountStats.P90 * 1.18
+		if p90Threshold > trafficThreshold {
+			trafficThreshold = p90Threshold
+		}
+	}
+
 	trafficExcessZ := 0.0
 	if meanPerMin > 0 {
-		denom := stdPerMin
-		if denom <= 0 {
-			denom = math.Max(1.0, meanPerMin*0.35)
-		}
+		denom := adaptiveTrafficStd
 		trafficExcessZ = (float64(currentMinuteCount) - meanPerMin) / denom
 		if trafficExcessZ < 0 {
 			trafficExcessZ = 0
 		}
 	}
+	trafficRobustZ := 0.0
+	if robustCountStats.Median > 0 {
+		denom := robustCountStats.RobustStd
+		if denom <= 0 {
+			denom = math.Max(1.0, robustCountStats.Median*0.35)
+		}
+		trafficRobustZ = (float64(currentMinuteCount) - robustCountStats.Median) / denom
+		if trafficRobustZ < 0 {
+			trafficRobustZ = 0
+		}
+	}
+
 	burstRatio := 0.0
 	if meanPerMin > 0 {
 		burstRatio = float64(currentMinuteCount) / (meanPerMin + 1)
@@ -882,7 +929,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	windowExpectedTotal := meanPerMin * float64(windowMinutes)
-	windowExpectedStd := stdPerMin * math.Sqrt(math.Max(1, float64(windowMinutes)))
+	windowExpectedStd := adaptiveTrafficStd * math.Sqrt(math.Max(1, float64(windowMinutes)))
 	if windowExpectedStd < 1 {
 		windowExpectedStd = 1
 	}
@@ -894,7 +941,20 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		blockedRatioBaseline = safeRatio(float64(prevBlocked), float64(prevTotal))
 	}
 	blockedRatioStd := ewmaBlockedRatioBaseline.StdDev
-	blockedRatioThreshold := blockedRatioBaseline + math.Max(blockedRatioStd*2.1, 0.06)
+	if robustBlockedRatioStats.Samples >= 6 {
+		if blockedRatioBaseline > 0 {
+			blockedRatioBaseline = blendFloat(blockedRatioBaseline, robustBlockedRatioStats.Median, 0.66)
+		} else {
+			blockedRatioBaseline = robustBlockedRatioStats.Median
+		}
+		if robustBlockedRatioStats.RobustStd > blockedRatioStd {
+			blockedRatioStd = robustBlockedRatioStats.RobustStd
+		}
+	}
+	blockedRatioThreshold := blockedRatioBaseline + math.Max(blockedRatioStd*2.0, 0.05)
+	if blockedRatioThreshold > 0.98 {
+		blockedRatioThreshold = 0.98
+	}
 
 	currentSuspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
 	suspiciousRatioBaseline := ewmaSuspiciousRatioBaseline.Mean
@@ -902,7 +962,20 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		suspiciousRatioBaseline = safeRatio(float64(prevSuspicious), float64(prevTotal))
 	}
 	suspiciousRatioStd := ewmaSuspiciousRatioBaseline.StdDev
+	if robustSuspiciousRatioStats.Samples >= 6 {
+		if suspiciousRatioBaseline > 0 {
+			suspiciousRatioBaseline = blendFloat(suspiciousRatioBaseline, robustSuspiciousRatioStats.Median, 0.66)
+		} else {
+			suspiciousRatioBaseline = robustSuspiciousRatioStats.Median
+		}
+		if robustSuspiciousRatioStats.RobustStd > suspiciousRatioStd {
+			suspiciousRatioStd = robustSuspiciousRatioStats.RobustStd
+		}
+	}
 	suspiciousRatioThreshold := suspiciousRatioBaseline + math.Max(suspiciousRatioStd*2.0, 0.05)
+	if suspiciousRatioThreshold > 0.98 {
+		suspiciousRatioThreshold = 0.98
+	}
 
 	iforestWindow := evaluateIsolationForestWindow(minuteAggregates, windowStartBucket, currentBucket)
 
@@ -930,29 +1003,33 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		idx++
 	}
 
-	if currentMinuteCount >= 8 && meanPerMin > 0 && float64(currentMinuteCount) > trafficThreshold {
+	if currentMinuteCount >= 8 && meanPerMin > 0 && (float64(currentMinuteCount) > trafficThreshold || trafficRobustZ >= 3.1) {
+		combinedTrafficZ := math.Max(trafficExcessZ, trafficRobustZ)
 		severity := "warning"
-		if trafficExcessZ >= 3.2 || burstRatio >= 2.8 {
+		if combinedTrafficZ >= 3.2 || burstRatio >= 2.8 {
 			severity = "critical"
 		}
-		score := int(38 + trafficExcessZ*16 + math.Max(0, burstRatio-1.0)*14)
+		score := int(36 + combinedTrafficZ*15 + math.Max(0, burstRatio-1.0)*13)
 		appendAnomaly(
 			"traffic_spike",
 			severity,
 			score,
 			"Traffic Spike Detected",
-			fmt.Sprintf("Current minute traffic (%d events) exceeded EWMA baseline %.1f/min (threshold %.1f, z=%.2f).", currentMinuteCount, meanPerMin, trafficThreshold, trafficExcessZ),
+			fmt.Sprintf("Current minute traffic (%d events) exceeded adaptive baseline %.1f/min (threshold %.1f, z=%.2f robust_z=%.2f).", currentMinuteCount, meanPerMin, trafficThreshold, trafficExcessZ, trafficRobustZ),
 			currentMinuteCount,
 			meanPerMin,
 			float64(currentMinuteCount),
 			map[string]interface{}{
 				"current_minute_events": currentMinuteCount,
-				"ewma_baseline_per_min": meanPerMin,
-				"ewma_stddev":          stdPerMin,
-				"ewma_threshold":       trafficThreshold,
-				"z_score":              trafficExcessZ,
-				"burst_ratio":          burstRatio,
-				"window_minutes":       windowMinutes,
+				"adaptive_baseline_per_min": meanPerMin,
+				"adaptive_stddev":          adaptiveTrafficStd,
+				"adaptive_threshold":       trafficThreshold,
+				"ewma_z_score":            trafficExcessZ,
+				"robust_z_score":          trafficRobustZ,
+				"robust_median_per_min":   robustCountStats.Median,
+				"robust_stddev":           robustCountStats.RobustStd,
+				"burst_ratio":             burstRatio,
+				"window_minutes":          windowMinutes,
 			},
 		)
 	}
@@ -1036,6 +1113,38 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 					"current_blocked_ratio":  blockedRatio,
 					"ratio_delta":            delta,
 					"window_minutes":         windowMinutes,
+				},
+			)
+		}
+	}
+
+	if prevTotal >= 20 && windowTotal >= 24 {
+		prevRiskIntensity := safeRatio(float64(prevBlocked)+float64(prevSuspicious)*1.25, float64(prevTotal))
+		currentRiskIntensity := safeRatio(float64(windowBlocked)+float64(windowSuspicious)*1.25, float64(windowTotal))
+		riskDelta := currentRiskIntensity - prevRiskIntensity
+		riskGrowth := safeRatio(currentRiskIntensity, math.Max(prevRiskIntensity, 0.01))
+		if (windowBlocked+windowSuspicious) >= 10 && currentRiskIntensity >= 0.24 && riskDelta >= 0.08 && riskGrowth >= 1.55 {
+			severity := "warning"
+			if riskDelta >= 0.16 || riskGrowth >= 2.4 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"risk_velocity_spike",
+				severity,
+				int(30+riskDelta*160+math.Max(0, riskGrowth-1.0)*24),
+				"Risk Velocity Spike",
+				fmt.Sprintf("Combined blocked/suspicious intensity accelerated from %.1f%% to %.1f%% across consecutive %d-minute windows.", prevRiskIntensity*100, currentRiskIntensity*100, windowMinutes),
+				windowTotal,
+				prevRiskIntensity,
+				currentRiskIntensity,
+				map[string]interface{}{
+					"previous_risk_intensity": prevRiskIntensity,
+					"current_risk_intensity":  currentRiskIntensity,
+					"risk_delta":              riskDelta,
+					"risk_growth_factor":      riskGrowth,
+					"previous_window_total":   prevTotal,
+					"window_total":            windowTotal,
+					"window_minutes":          windowMinutes,
 				},
 			)
 		}
@@ -1527,6 +1636,88 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 	}
 
+	if windowTotal >= 36 {
+		windowRiskHits := windowBlocked + windowSuspicious
+		type campaignSource struct {
+			SourceIP      string
+			Events        int
+			RiskHits      int
+			UniquePorts   int
+			UniqueTargets int
+			RiskRatio     float64
+			Weight        float64
+		}
+
+		aggressiveSources := 0
+		campaignWeight := 0.0
+		bestCampaignSource := campaignSource{}
+		for src, total := range sourceTotal {
+			if total < 8 {
+				continue
+			}
+			riskHits := sourceRiskHits[src]
+			if riskHits < 4 {
+				continue
+			}
+			portCount := len(sourcePorts[src])
+			targetCount := len(sourceTargets[src])
+			riskRatio := safeRatio(float64(riskHits), float64(total))
+			if riskRatio < 0.35 || (portCount < 4 && targetCount < 5) {
+				continue
+			}
+
+			spread := float64(portCount)*0.75 + float64(targetCount)
+			sourceWeight := spread*riskRatio*1.7 + float64(riskHits)*0.45
+			aggressiveSources++
+			campaignWeight += sourceWeight
+
+			if sourceWeight > bestCampaignSource.Weight {
+				bestCampaignSource = campaignSource{
+					SourceIP:      src,
+					Events:        total,
+					RiskHits:      riskHits,
+					UniquePorts:   portCount,
+					UniqueTargets: targetCount,
+					RiskRatio:     riskRatio,
+					Weight:        sourceWeight,
+				}
+			}
+		}
+
+		riskCoverage := safeRatio(float64(windowRiskHits), float64(windowTotal))
+		if aggressiveSources >= 3 && windowRiskHits >= 16 && riskCoverage >= 0.28 && campaignWeight >= 10 {
+			severity := "warning"
+			if aggressiveSources >= 5 || campaignWeight >= 18 || riskCoverage >= 0.46 {
+				severity = "critical"
+			}
+			appendAnomaly(
+				"coordinated_scan_campaign",
+				severity,
+				int(32+campaignWeight*2.4+float64(aggressiveSources)*5.8+riskCoverage*26),
+				"Coordinated Scan Campaign",
+				fmt.Sprintf("Detected %d coordinated high-risk sources driving %.1f%% risk coverage in the active window.", aggressiveSources, riskCoverage*100),
+				windowRiskHits,
+				0.25,
+				riskCoverage,
+				map[string]interface{}{
+					"aggressive_sources":        aggressiveSources,
+					"window_risk_hits":          windowRiskHits,
+					"window_total":              windowTotal,
+					"risk_coverage":             riskCoverage,
+					"campaign_weight":           campaignWeight,
+					"source_ip":                 bestCampaignSource.SourceIP,
+					"dominant_source_ip":        bestCampaignSource.SourceIP,
+					"dominant_source_events":    bestCampaignSource.Events,
+					"dominant_source_risk_hits": bestCampaignSource.RiskHits,
+					"dominant_source_ports":     bestCampaignSource.UniquePorts,
+					"dominant_source_targets":   bestCampaignSource.UniqueTargets,
+					"dominant_source_risk_ratio": bestCampaignSource.RiskRatio,
+					"window_minutes":            windowMinutes,
+				},
+			)
+		}
+	}
+
 	type offenderCandidate struct {
 		SourceIP    string
 		Total       int
@@ -1860,62 +2051,88 @@ func calculateAnomalyRiskScore(anomalies []models.TrafficAnomaly, windowTotal in
 		if windowTotal > 0 {
 			blockedRatio := safeRatio(float64(windowBlocked), float64(windowTotal))
 			suspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
-			base += blockedRatio*24 + suspiciousRatio*18
+			base += blockedRatio*34 + suspiciousRatio*26
 		}
 		if meanPerMin > 0 {
-			threshold := meanPerMin + math.Max(stdPerMin*1.4, 2.0)
+			threshold := meanPerMin + math.Max(stdPerMin*1.6, 2.0)
 			if float64(currentMinuteCount) > threshold {
-				base += math.Min(18, (float64(currentMinuteCount)-threshold)*1.1)
+				base += math.Min(24, (float64(currentMinuteCount)-threshold)*1.0)
 			}
 		}
-		return clampInt(int(math.Round(base)), 0, 100)
+		normalized := 100 * (1 - math.Exp(-base/78.0))
+		return clampInt(int(math.Round(normalized)), 0, 100)
 	}
 
 	criticalCount := 0
 	warningCount := 0
 	weightedTotal := 0.0
 	maxScore := 0
+	uniqueDetectors := make(map[string]struct{}, len(anomalies))
 	for _, a := range anomalies {
 		w := 1.0
-		if a.Severity == "critical" {
+		severity := strings.ToLower(strings.TrimSpace(a.Severity))
+		if severity == "critical" {
 			criticalCount++
-			w = 1.35
-		} else if a.Severity == "warning" {
+			w = 1.38
+		} else if severity == "warning" {
 			warningCount++
-			w = 1.12
+			w = 1.14
 		}
 		weightedTotal += float64(a.Score) * w
 		if a.Score > maxScore {
 			maxScore = a.Score
 		}
+		kind := strings.ToLower(strings.TrimSpace(a.Type))
+		if kind != "" {
+			uniqueDetectors[kind] = struct{}{}
+		}
 	}
 	weightedAvg := weightedTotal / float64(len(anomalies))
 	topMean := meanTopAnomalyScores(anomalies, 3)
+	detectorDiversity := float64(len(uniqueDetectors))
+	criticalShare := safeRatio(float64(criticalCount), float64(len(anomalies)))
 
-	severityPressure := float64(criticalCount*15 + warningCount*8 + len(anomalies)*3)
+	severityPressure := float64(criticalCount*16 + warningCount*7 + len(anomalies)*3)
+	diversityPressure := detectorDiversity * 3.2
 	behaviorPressure := 0.0
+	riskCoverage := 0.0
 	if windowTotal > 0 {
 		blockedRatio := safeRatio(float64(windowBlocked), float64(windowTotal))
 		suspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
-		behaviorPressure = blockedRatio*28 + suspiciousRatio*20
+		behaviorPressure = blockedRatio*34 + suspiciousRatio*24
+		riskCoverage = safeRatio(float64(windowBlocked+windowSuspicious), float64(windowTotal))
 	}
 	volatilityPressure := 0.0
 	if meanPerMin > 0 {
-		threshold := meanPerMin + math.Max(stdPerMin*1.8, 2.5)
+		threshold := meanPerMin + math.Max(stdPerMin*1.7, 2.2)
 		if float64(currentMinuteCount) > threshold {
-			volatilityPressure = math.Min(14, (float64(currentMinuteCount)-threshold)*0.9)
+			volatilityPressure = math.Min(16, (float64(currentMinuteCount)-threshold)*0.8)
 		}
 	}
 
-	composite := weightedAvg*0.36 + float64(maxScore)*0.30 + topMean*0.18 + severityPressure*0.22 + behaviorPressure + volatilityPressure
+	composite := weightedAvg*0.33 + float64(maxScore)*0.26 + topMean*0.18 + severityPressure*0.24 + diversityPressure + behaviorPressure + volatilityPressure
 	if len(anomalies) >= 5 {
-		composite += 6
+		composite += 5
 	}
 	if criticalCount >= 2 {
-		composite += 7
+		composite += 6
+	}
+	if detectorDiversity >= 5 {
+		composite += 4
+	}
+	if riskCoverage >= 0.50 {
+		composite += 5
 	}
 
-	return clampInt(int(math.Round(composite)), 0, 100)
+	normalized := 100 * (1 - math.Exp(-composite/92.0))
+	if maxScore >= 95 && criticalCount >= 2 {
+		normalized += 4
+	}
+	if criticalShare >= 0.50 && topMean >= 70 {
+		normalized += 4
+	}
+
+	return clampInt(int(math.Round(normalized)), 0, 100)
 }
 
 func meanTopAnomalyScores(anomalies []models.TrafficAnomaly, topN int) float64 {
@@ -1959,6 +2176,67 @@ func computeEWMABaseline(values []float64, alpha float64) ewmaBaseline {
 	b.Samples = len(values)
 	b.Alpha = alpha
 	return b
+}
+
+func blendFloat(primary float64, secondary float64, primaryWeight float64) float64 {
+	if primary <= 0 {
+		return secondary
+	}
+	if secondary <= 0 {
+		return primary
+	}
+	if primaryWeight < 0 {
+		primaryWeight = 0
+	}
+	if primaryWeight > 1 {
+		primaryWeight = 1
+	}
+	return primary*primaryWeight + secondary*(1-primaryWeight)
+}
+
+func percentileFloat64(sortedValues []float64, q float64) float64 {
+	if len(sortedValues) == 0 {
+		return 0
+	}
+	if q <= 0 {
+		return sortedValues[0]
+	}
+	if q >= 1 {
+		return sortedValues[len(sortedValues)-1]
+	}
+
+	position := q * float64(len(sortedValues)-1)
+	lo := int(math.Floor(position))
+	hi := int(math.Ceil(position))
+	if lo == hi {
+		return sortedValues[lo]
+	}
+	frac := position - float64(lo)
+	return sortedValues[lo]*(1-frac) + sortedValues[hi]*frac
+}
+
+func computeRobustSeriesStats(values []float64) robustSeriesStats {
+	stats := robustSeriesStats{}
+	if len(values) == 0 {
+		return stats
+	}
+
+	cp := append([]float64(nil), values...)
+	sort.Float64s(cp)
+	median := percentileFloat64(cp, 0.50)
+	absDev := make([]float64, len(cp))
+	for i, v := range cp {
+		absDev[i] = math.Abs(v - median)
+	}
+	sort.Float64s(absDev)
+	mad := percentileFloat64(absDev, 0.50)
+
+	stats.Median = median
+	stats.MAD = mad
+	stats.RobustStd = mad * 1.4826
+	stats.P90 = percentileFloat64(cp, 0.90)
+	stats.Samples = len(cp)
+	return stats
 }
 
 func minuteAggregateFeatureVector(agg *trafficMinuteAggregate) []float64 {
@@ -3479,7 +3757,7 @@ func (h *handlers) enforceAnomalyBlocking(snapshot models.TrafficAnomalySnapshot
 
 func isAnomalyAutoBlockType(kind string) bool {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "source_port_scan", "source_target_sweep", "repeat_offender", "entity_behavior_shift", "new_entity_risk_surge", "half_open_connection_pressure":
+	case "source_port_scan", "source_target_sweep", "coordinated_scan_campaign", "repeat_offender", "entity_behavior_shift", "new_entity_risk_surge", "half_open_connection_pressure":
 		return true
 	default:
 		return false
