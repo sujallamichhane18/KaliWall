@@ -2130,9 +2130,10 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 
 		pred, err := h.mlAnomaly.Predict(featureVector)
-		mlPrediction = &models.TrafficAnomalyMLPrediction{Enabled: true, Available: false}
+		mlPrediction = &models.TrafficAnomalyMLPrediction{Enabled: true, Available: false, Decision: "waiting"}
 		if err != nil {
 			mlPrediction.Available = false
+			mlPrediction.Decision = "unavailable"
 			mlPrediction.Error = err.Error()
 		} else {
 			mlPrediction.Available = pred.Available
@@ -2143,6 +2144,15 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			mlPrediction.FeatureCount = pred.FeatureCount
 			mlPrediction.InferenceDevice = pred.InferenceDevice
 			mlPrediction.Warning = pred.Warning
+			if pred.Available {
+				if pred.IsAnomaly || pred.PredictedClass == 1 || pred.Score >= pred.Threshold {
+					mlPrediction.Decision = "attack"
+				} else {
+					mlPrediction.Decision = "normal"
+				}
+			} else {
+				mlPrediction.Decision = "unavailable"
+			}
 
 			if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
 				severity := "warning"
@@ -2421,6 +2431,7 @@ func (h *handlers) defaultMLPredictionState() *models.TrafficAnomalyMLPrediction
 		return &models.TrafficAnomalyMLPrediction{
 			Enabled:   true,
 			Available: false,
+			Decision:  "waiting",
 			Error:     "collecting traffic history for ML inference",
 		}
 	}
@@ -2431,6 +2442,7 @@ func (h *handlers) defaultMLPredictionState() *models.TrafficAnomalyMLPrediction
 	return &models.TrafficAnomalyMLPrediction{
 		Enabled:   false,
 		Available: false,
+		Decision:  "disabled",
 		Error:     reason,
 	}
 }
@@ -2440,7 +2452,7 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		return snapshot
 	}
 	if snapshot.ML == nil || !snapshot.ML.Enabled {
-		snapshot.ML = &models.TrafficAnomalyMLPrediction{Enabled: true, Available: false}
+		snapshot.ML = &models.TrafficAnomalyMLPrediction{Enabled: true, Available: false, Decision: "waiting"}
 	}
 
 	windowTotal := 0
@@ -2525,6 +2537,7 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 
 	if windowTotal <= 0 {
 		snapshot.ML.Available = false
+		snapshot.ML.Decision = "unavailable"
 		snapshot.ML.Error = "insufficient traffic telemetry in current window for ML inference"
 		return snapshot
 	}
@@ -2649,6 +2662,7 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 	pred, err := h.mlAnomaly.Predict(featureVector)
 	if err != nil {
 		snapshot.ML.Available = false
+		snapshot.ML.Decision = "unavailable"
 		snapshot.ML.Error = err.Error()
 		return snapshot
 	}
@@ -2661,6 +2675,15 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 	snapshot.ML.FeatureCount = pred.FeatureCount
 	snapshot.ML.InferenceDevice = pred.InferenceDevice
 	snapshot.ML.Warning = strings.TrimSpace(pred.Warning)
+	if pred.Available {
+		if pred.IsAnomaly || pred.PredictedClass == 1 || pred.Score >= pred.Threshold {
+			snapshot.ML.Decision = "attack"
+		} else {
+			snapshot.ML.Decision = "normal"
+		}
+	} else {
+		snapshot.ML.Decision = "unavailable"
+	}
 	if usedConnTelemetry {
 		if snapshot.ML.Warning != "" {
 			snapshot.ML.Warning += "; "

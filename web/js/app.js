@@ -2622,7 +2622,8 @@
 
             var scorePct = Math.round(mlScore * 100);
             var thresholdPct = Math.round(mlThreshold * 100);
-            var mlIsAnomaly = ml.is_anomaly === true || ml.predicted_class === 1;
+            var mlDecision = String(ml.decision || "").trim().toLowerCase();
+            var mlIsAnomaly = mlDecision === "attack" || ml.is_anomaly === true || ml.predicted_class === 1;
             var warningText = String(ml.warning || "").trim();
 
             if (modelBadge) {
@@ -2814,7 +2815,8 @@
 
             var scorePct = Math.round(mlScore * 100);
             var thresholdPct = Math.round(mlThreshold * 100);
-            var isAttack = ml.is_anomaly === true || ml.predicted_class === 1;
+            var mlDecision = String(ml.decision || "").trim().toLowerCase();
+            var isAttack = mlDecision === "attack" || ml.is_anomaly === true || ml.predicted_class === 1;
             var mlWarn = String(ml.warning || "").trim();
             var device = String(ml.inference_device || "cpu").trim().toUpperCase();
 
@@ -2827,7 +2829,13 @@
             if (healthValue) healthValue.textContent = "HEALTHY";
             if (healthHint) healthHint.textContent = "inference responding";
             if (decisionValue) decisionValue.textContent = isAttack ? "ATTACK" : "NORMAL";
-            if (decisionHint) decisionHint.textContent = "predicted class: " + String(ml.predicted_class || 0);
+            if (decisionHint) {
+                if (mlDecision) {
+                    decisionHint.textContent = "decision: " + mlDecision + "; predicted class: " + String(ml.predicted_class || 0);
+                } else {
+                    decisionHint.textContent = "predicted class: " + String(ml.predicted_class || 0);
+                }
+            }
             if (scoreValue) scoreValue.textContent = scorePct + "%";
             if (thresholdValue) thresholdValue.textContent = "threshold: " + thresholdPct + "%";
             if (featureBadge) {
@@ -2879,11 +2887,11 @@
 
         if (mlRows.length === 0 && ml && ml.enabled) {
             var pseudoDecision = ml.available
-                ? ((ml.is_anomaly === true || ml.predicted_class === 1) ? "attack detected" : "normal")
+                ? ((String(ml.decision || "").trim().toLowerCase() === "attack" || ml.is_anomaly === true || ml.predicted_class === 1) ? "attack detected" : "normal")
                 : "inference error";
             mlRows = [{
                 type: "ml_decision",
-                severity: ml.available ? ((ml.is_anomaly || ml.predicted_class === 1) ? "warning" : "info") : "critical",
+                severity: ml.available ? ((String(ml.decision || "").trim().toLowerCase() === "attack" || ml.is_anomaly || ml.predicted_class === 1) ? "warning" : "info") : "critical",
                 title: "XGBoost Decision",
                 score: Math.round(Number(ml.score || 0) * 100),
                 summary: ml.available
