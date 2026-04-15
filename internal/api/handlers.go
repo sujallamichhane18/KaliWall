@@ -1961,79 +1961,117 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 	}
 
 	windowRiskHits := windowBlocked + windowSuspicious
-	if windowTotal >= 22 && len(destinationWindow) > 0 {
-		topDst := ""
-		topHits := 0
-		for dst, hits := range destinationWindow {
-			if hits > topHits {
-				topDst = dst
-				topHits = hits
-			}
-		}
-		if topDst != "" && topHits >= 9 {
-			riskHits := destinationRiskWindow[topDst]
-			share := safeRatio(float64(topHits), float64(windowTotal))
-			riskShare := 0.0
-			if windowRiskHits > 0 {
-				riskShare = safeRatio(float64(riskHits), float64(windowRiskHits))
-			}
-			if share >= 0.28 || (riskHits >= 6 && riskShare >= 0.34) {
-				severity := "warning"
-				if share >= 0.42 || riskShare >= 0.56 {
-					severity = "critical"
-				}
-				appendAnomaly(
-					"destination_hotspot",
-					severity,
-					int(30 + share*86 + riskShare*44),
-					"Destination Hotspot Pressure",
-					fmt.Sprintf("Destination %s accounted for %d/%d events (%.1f%%), with %d high-risk hits.", topDst, topHits, windowTotal, share*100, riskHits),
-					topHits,
-					0.2,
-					share,
-					map[string]interface{}{
-						"destination_ip":      topDst,
-						"destination_hits":    topHits,
-						"destination_share":   share,
-						"risk_hits":           riskHits,
-						"risk_share":          riskShare,
-						"window_minutes":      windowMinutes,
-					},
-				)
-			}
+	topDst := ""
+	topDstHits := 0
+	for dst, hits := range destinationWindow {
+		if hits > topDstHits {
+			topDst = dst
+			topDstHits = hits
 		}
 	}
 
-	halfOpen := 0
-	for _, c := range conns {
-		state := strings.ToUpper(strings.TrimSpace(c.State))
-		if state == "SYN_SENT" || state == "SYN_RECV" {
-			halfOpen++
+	topSource := ""
+	topSourceHits := 0
+	for src, hits := range sourceWindow {
+		if hits > topSourceHits {
+			topSource = src
+			topSourceHits = hits
 		}
 	}
-	if len(conns) >= 20 && halfOpen >= 7 {
-		halfOpenRatio := float64(halfOpen) / float64(len(conns))
-		if halfOpenRatio >= 0.22 {
+
+	halfOpen, observedTCPConnections, halfOpenRatio := summarizeHalfOpenConnections(conns)
+
+	if windowTotal >= 22 && topDst != "" && topDstHits >= 9 {
+		riskHits := destinationRiskWindow[topDst]
+		share := safeRatio(float64(topDstHits), float64(windowTotal))
+		riskShare := 0.0
+		if windowRiskHits > 0 {
+			riskShare = safeRatio(float64(riskHits), float64(windowRiskHits))
+		}
+		if share >= 0.28 || (riskHits >= 6 && riskShare >= 0.34) {
 			severity := "warning"
-			if halfOpenRatio >= 0.34 {
+			if share >= 0.42 || riskShare >= 0.56 {
 				severity = "critical"
 			}
 			appendAnomaly(
-				"half_open_connection_pressure",
+				"destination_hotspot",
 				severity,
-				int(30 + halfOpenRatio*100),
-				"Half-open Connection Pressure",
-				fmt.Sprintf("%d of %d active connections are in SYN handshake states, consistent with connection-flood behavior.", halfOpen, len(conns)),
-				halfOpen,
+				int(30 + share*86 + riskShare*44),
+				"Destination Hotspot Pressure",
+				fmt.Sprintf("Destination %s accounted for %d/%d events (%.1f%%), with %d high-risk hits.", topDst, topDstHits, windowTotal, share*100, riskHits),
+				topDstHits,
 				0.2,
-				halfOpenRatio,
+				share,
 				map[string]interface{}{
-					"half_open_connections": halfOpen,
-					"active_connections":    len(conns),
-					"half_open_ratio":       halfOpenRatio,
+					"destination_ip":    topDst,
+					"destination_hits":  topDstHits,
+					"destination_share": share,
+					"risk_hits":         riskHits,
+					"risk_share":        riskShare,
+					"window_minutes":    windowMinutes,
 				},
 			)
 		}
+	}
+
+	if windowTotal >= 180 && currentMinuteCount >= 120 {
+		sourceShare := safeRatio(float64(topSourceHits), float64(windowTotal))
+		destinationShare := safeRatio(float64(topDstHits), float64(windowTotal))
+		if sourceShare >= 0.34 || destinationShare >= 0.34 || halfOpenRatio >= 0.30 {
+			severity := "warning"
+			score := int(42 + sourceShare*40 + destinationShare*38 + halfOpenRatio*44 + safeRatio(float64(currentMinuteCount), 6))
+			if currentMinuteCount >= 220 || sourceShare >= 0.62 || destinationShare >= 0.62 || halfOpenRatio >= 0.45 {
+				severity = "critical"
+				score += 14
+			}
+			appendAnomaly(
+				"flood_signature",
+				severity,
+				score,
+				"Volumetric Flood Signature",
+				fmt.Sprintf("Traffic reached %d events in the current minute with concentrated source/destination pressure and SYN handshake buildup.", currentMinuteCount),
+				currentMinuteCount,
+				trafficThreshold,
+				float64(currentMinuteCount),
+				map[string]interface{}{
+					"current_minute_events":      currentMinuteCount,
+					"window_total":               windowTotal,
+					"dominant_source":            topSource,
+					"dominant_source_share":      sourceShare,
+					"dominant_source_hits":       topSourceHits,
+					"dominant_destination":       topDst,
+					"dominant_destination_share": destinationShare,
+					"dominant_destination_hits":  topDstHits,
+					"half_open_connections":      halfOpen,
+					"observed_tcp_connections":   observedTCPConnections,
+					"half_open_ratio":            halfOpenRatio,
+					"window_minutes":             windowMinutes,
+				},
+			)
+		}
+	}
+
+	if observedTCPConnections >= 10 && halfOpen >= 4 && halfOpenRatio >= 0.22 {
+		severity := "warning"
+		if halfOpenRatio >= 0.34 {
+			severity = "critical"
+		}
+		appendAnomaly(
+			"half_open_connection_pressure",
+			severity,
+			int(30 + halfOpenRatio*100),
+			"Half-open Connection Pressure",
+			fmt.Sprintf("%d of %d observed TCP connections are in SYN handshake states, consistent with connection-flood behavior.", halfOpen, observedTCPConnections),
+			halfOpen,
+			0.2,
+			halfOpenRatio,
+			map[string]interface{}{
+				"half_open_connections":    halfOpen,
+				"observed_tcp_connections": observedTCPConnections,
+				"active_connections_total": len(conns),
+				"half_open_ratio":         halfOpenRatio,
+			},
+		)
 	}
 
 	if maxFanout.Ports >= 8 {
@@ -2413,6 +2451,8 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 	sourceSet := make(map[string]struct{})
 	destinationSet := make(map[string]struct{})
 	protocolSet := make(map[string]struct{})
+	sourceWindow := make(map[string]int)
+	destinationWindow := make(map[string]int)
 
 	for _, entry := range entries {
 		if entry.Timestamp.Before(windowStart) {
@@ -2432,10 +2472,12 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		src := normalizeTrafficIP(entry.SrcIP)
 		if src != "" {
 			sourceSet[src] = struct{}{}
+			sourceWindow[src]++
 		}
 		dst := normalizeTrafficIP(entry.DstIP)
 		if dst != "" {
 			destinationSet[dst] = struct{}{}
+			destinationWindow[dst]++
 		}
 		proto := normalizeTrafficProtocol(entry.Protocol)
 		if proto != "" {
@@ -2449,13 +2491,7 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		return snapshot
 	}
 
-	halfOpenConnections := 0
-	for _, c := range conns {
-		state := strings.ToUpper(strings.TrimSpace(c.State))
-		if state == "SYN_SENT" || state == "SYN_RECV" {
-			halfOpenConnections++
-		}
-	}
+	halfOpenConnections, observedTCPConnections, halfOpenRatio := summarizeHalfOpenConnections(conns)
 
 	windowSpan := snapshot.WindowMinutes
 	if windowSpan < 1 {
@@ -2470,6 +2506,79 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 
 	currentBlockedRatio := safeRatio(float64(windowBlocked), float64(windowTotal))
 	currentSuspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
+
+	topSource := ""
+	topSourceHits := 0
+	for src, hits := range sourceWindow {
+		if hits > topSourceHits {
+			topSource = src
+			topSourceHits = hits
+		}
+	}
+	topDestination := ""
+	topDestinationHits := 0
+	for dst, hits := range destinationWindow {
+		if hits > topDestinationHits {
+			topDestination = dst
+			topDestinationHits = hits
+		}
+	}
+
+	sourceShare := safeRatio(float64(topSourceHits), float64(windowTotal))
+	destinationShare := safeRatio(float64(topDestinationHits), float64(windowTotal))
+	if windowTotal >= 180 && currentMinuteCount >= 120 && (sourceShare >= 0.34 || destinationShare >= 0.34 || halfOpenRatio >= 0.30) {
+		severity := "warning"
+		score := int(46 + sourceShare*42 + destinationShare*38 + halfOpenRatio*44 + safeRatio(float64(currentMinuteCount), 6))
+		if currentMinuteCount >= 220 || sourceShare >= 0.62 || destinationShare >= 0.62 || halfOpenRatio >= 0.45 {
+			severity = "critical"
+			score += 14
+		}
+		score = clampInt(score, 1, 100)
+
+		dominantSource := topSource
+		if dominantSource == "" {
+			dominantSource = "unknown"
+		}
+		dominantDestination := topDestination
+		if dominantDestination == "" {
+			dominantDestination = "unknown"
+		}
+
+		snapshot.Anomalies = append(snapshot.Anomalies, models.TrafficAnomaly{
+			ID:           "flood_signature-learning",
+			Type:         "flood_signature",
+			Severity:     severity,
+			Score:        score,
+			Title:        "Early Flood Signature",
+			Summary:      fmt.Sprintf("Baseline is still learning, but traffic reached %d events/min with concentrated pressure (src=%s dst=%s).", currentMinuteCount, dominantSource, dominantDestination),
+			SampleCount:  currentMinuteCount,
+			CurrentValue: float64(currentMinuteCount),
+			Evidence: map[string]interface{}{
+				"learning_mode":              true,
+				"current_minute_events":      currentMinuteCount,
+				"window_total":               windowTotal,
+				"dominant_source":            topSource,
+				"dominant_source_share":      sourceShare,
+				"dominant_destination":       topDestination,
+				"dominant_destination_share": destinationShare,
+				"half_open_connections":      halfOpenConnections,
+				"observed_tcp_connections":   observedTCPConnections,
+				"half_open_ratio":            halfOpenRatio,
+				"window_minutes":             windowSpan,
+			},
+		})
+		snapshot.TotalAnomalies = len(snapshot.Anomalies)
+		if severity == "critical" {
+			snapshot.Status = "critical"
+			snapshot.RiskScore = clampInt(int(math.Max(float64(snapshot.RiskScore), 78)), 0, 100)
+		} else {
+			snapshot.Status = "high"
+			snapshot.RiskScore = clampInt(int(math.Max(float64(snapshot.RiskScore), 56)), 0, 100)
+		}
+		if strings.TrimSpace(snapshot.LearningMessage) != "" && !strings.Contains(strings.ToLower(snapshot.LearningMessage), "flood heuristic") {
+			snapshot.LearningMessage += "; emergency flood heuristic active"
+		}
+	}
 
 	featureVector := buildMLAnomalyFeatureVector(
 		snapshot.WindowMinutes,
@@ -2515,6 +2624,45 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 	snapshot.ML.InferenceDevice = pred.InferenceDevice
 	snapshot.ML.Warning = strings.TrimSpace(pred.Warning)
 	snapshot.ML.Error = ""
+
+	if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
+		severity := "warning"
+		if pred.Score >= 0.85 {
+			severity = "critical"
+		}
+		score := clampInt(int(math.Round(pred.Score*100)), 1, 100)
+		if score < 32 {
+			score = 32
+		}
+		snapshot.Anomalies = append(snapshot.Anomalies, models.TrafficAnomaly{
+			ID:            "xgboost_anomaly_score-learning",
+			Type:          "xgboost_anomaly_score",
+			Severity:      severity,
+			Score:         score,
+			Title:         "XGBoost Model Alert (Learning)",
+			Summary:       fmt.Sprintf("XGBoost anomaly model produced %.1f%% anomaly probability while baseline is still learning (threshold %.1f%%).", pred.Score*100, pred.Threshold*100),
+			SampleCount:   windowTotal,
+			BaselineValue: pred.Threshold,
+			CurrentValue:  pred.Score,
+			Evidence: map[string]interface{}{
+				"learning_mode":    true,
+				"score":            pred.Score,
+				"threshold":        pred.Threshold,
+				"predicted_class":  pred.PredictedClass,
+				"feature_count":    pred.FeatureCount,
+				"window_total":     windowTotal,
+				"window_minutes":   windowSpan,
+			},
+		})
+		snapshot.TotalAnomalies = len(snapshot.Anomalies)
+		if severity == "critical" {
+			snapshot.Status = "critical"
+			snapshot.RiskScore = clampInt(int(math.Max(float64(snapshot.RiskScore), 74)), 0, 100)
+		} else if snapshot.Status == "learning" {
+			snapshot.Status = "elevated"
+			snapshot.RiskScore = clampInt(int(math.Max(float64(snapshot.RiskScore), 48)), 0, 100)
+		}
+	}
 	return snapshot
 }
 
@@ -3053,6 +3201,35 @@ func detectorDisplayLabel(kind string) string {
 		parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
 	}
 	return strings.Join(parts, " ")
+}
+
+func summarizeHalfOpenConnections(conns []models.Connection) (halfOpen int, observedTCP int, ratio float64) {
+	for _, c := range conns {
+		proto := strings.ToLower(strings.TrimSpace(c.Protocol))
+		if !strings.HasPrefix(proto, "tcp") {
+			continue
+		}
+
+		state := strings.ToUpper(strings.TrimSpace(c.State))
+		if state == "" || state == "LISTEN" {
+			continue
+		}
+
+		remote := normalizeTrafficIP(c.RemoteIP)
+		if remote == "" {
+			continue
+		}
+
+		observedTCP++
+		if state == "SYN_SENT" || state == "SYN_RECV" {
+			halfOpen++
+		}
+	}
+
+	if observedTCP > 0 {
+		ratio = safeRatio(float64(halfOpen), float64(observedTCP))
+	}
+	return halfOpen, observedTCP, ratio
 }
 
 func normalizeTrafficIP(ip string) string {
