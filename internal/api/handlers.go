@@ -189,7 +189,6 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/firewall/logs", h.handleFirewallLogs)
 	mux.HandleFunc("/api/v1/traffic/visibility", h.handleTrafficVisibility)
 	mux.HandleFunc("/api/v1/traffic/anomalies", h.handleTrafficAnomalies)
-	mux.HandleFunc("/api/v1/ml/anomaly/status", h.handleMLAnomalyStatus)
 	mux.HandleFunc("/api/v1/dns/stats", h.handleDNSStats)
 	mux.HandleFunc("/api/v1/dns/cache", h.handleDNSCache)
 	mux.HandleFunc("/api/v1/dns/refresh", h.handleDNSRefresh)
