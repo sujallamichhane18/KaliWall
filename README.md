@@ -249,6 +249,69 @@ Use either database file format above for GeoIP support.
 
 <br/>
 
+## 🔄 Automatic IPsum Feed Updates
+
+KaliWall already hot-reloads malicious IP indicators from disk every `20s` by default (`--malicious-ips-reload-interval`).
+
+To keep `ipsum.txt` fresh from upstream (`https://github.com/stamparm/ipsum`), use the built-in updater script:
+
+```bash
+./update-ipsum.sh
+```
+
+### ⏱️ Cron (every 30 minutes)
+
+```bash
+crontab -e
+```
+
+Add this line (replace `<PATH_TO_KALIWALL>`):
+
+```cron
+*/30 * * * * cd <PATH_TO_KALIWALL> && ./update-ipsum.sh >> logs/ipsum-updater.log 2>&1
+```
+
+### 🧩 systemd timer (recommended for service deployments)
+
+Create `/etc/systemd/system/kaliwall-ipsum-update.service`:
+
+```ini
+[Unit]
+Description=Refresh KaliWall ipsum feed
+
+[Service]
+Type=oneshot
+WorkingDirectory=<PATH_TO_KALIWALL>
+ExecStart=<PATH_TO_KALIWALL>/update-ipsum.sh
+```
+
+Create `/etc/systemd/system/kaliwall-ipsum-update.timer`:
+
+```ini
+[Unit]
+Description=Run KaliWall ipsum updater every 30 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now kaliwall-ipsum-update.timer
+sudo systemctl list-timers | grep kaliwall-ipsum-update
+```
+
+---
+
+<br/>
+
 ## 🌱 Open Source
 
 <div align="center">
