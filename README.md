@@ -30,7 +30,7 @@
 
 > **KaliWall** is a powerful open-source firewall platform for Linux.  
 > It combines **live firewall control**, **traffic visibility**, **GeoIP telemetry**,  
-> **threat intelligence**, and **DPI controls** through a sleek web dashboard and CLI.
+> **threat intelligence**, **ML anomaly detection**, and **DPI controls** through a sleek web dashboard and CLI.
 
 <br/>
 
@@ -96,13 +96,12 @@
 
 <br/>
 
-### 🤖 AI Explainability (Multi-Provider)
+### 🤖 ML Anomaly Detection
 
-- 🔀 Provider selection support for **OpenAI**, **Anthropic**, and **Grok**
-- 🔐 Per-provider API key storage with persistent restore on restart
-- 📝 AI-powered one-line blocked-traffic explanation generation
-- 🧩 AI-assisted firewall rule suggestion from suspicious/blocked traffic metadata
-- 🛡️ Fail-open deterministic explanation fallback when provider requests fail
+- 🧠 XGBoost-based anomaly scoring integrated into the traffic anomaly pipeline
+- 📊 Dashboard visibility for model state (`running`, `disabled`, `error`) and live score/threshold
+- 🧪 API anomaly snapshots include ML telemetry (`enabled`, `available`, `score`, `threshold`, `is_anomaly`)
+- 🛡️ Graceful fallback to rule/statistical anomaly detection when model runtime is unavailable
 
 <br/>
 
@@ -219,18 +218,15 @@ cd KaliWall
 | 🌐 **Network / DNS** | `/connections` · `/dns/stats` · `/dns/refresh` · `/dns/cache` |
 | 🦠 **Threat Intel** | `/threat/apikey` · `/threat/check/{ip}` · `/threat/cache` |
 | 📊 **Analytics** | `/analytics` · `/analytics/stream` |
-| 🤖 **AI** | `/ai/apikey` · `/ai/status` · `/ai/explain` · `/ai/suggest-rule` |
+| 🤖 **ML Anomalies** | `/traffic/anomalies` |
 | 🗺️ **GeoIP** | `/geo/attacks` · `/geo/stream` |
 | 🔬 **DPI** | `/dpi/status` · `/dpi/control` |
 | 🚫 **Blocklists** | `/blocked` · `/blocked/{ip}` · `/websites` · `/websites/{domain}` |
 
-### AI API Notes
+### ML API Notes
 
-- `GET /ai/apikey` returns active provider, supported providers, and whether the active provider key is configured.
-- `POST /ai/apikey` accepts:
-  - `{ "provider": "openai|anthropic|grok" }` to switch provider
-  - `{ "provider": "...", "api_key": "..." }` to switch and save key
-- `DELETE /ai/apikey?provider=openai` removes the stored key for that provider (provider query param optional; defaults to active provider).
+- `GET /traffic/anomalies` returns risk status, anomaly list, and trend/history metadata.
+- Response includes optional `ml` telemetry fields when model integration is enabled.
 
 ---
 
