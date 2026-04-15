@@ -98,7 +98,7 @@
 
 ### 🤖 AI Explainability (Multi-Provider)
 
-- 🔀 Provider selection support for **OpenRouter**, **OpenAI**, **Anthropic**, and **Grok**
+- 🔀 Provider selection support for **OpenAI**, **Anthropic**, and **Grok**
 - 🔐 Per-provider API key storage with persistent restore on restart
 - 📝 AI-powered one-line blocked-traffic explanation generation
 - 🧩 AI-assisted firewall rule suggestion from suspicious/blocked traffic metadata
@@ -228,7 +228,7 @@ cd KaliWall
 
 - `GET /ai/apikey` returns active provider, supported providers, and whether the active provider key is configured.
 - `POST /ai/apikey` accepts:
-  - `{ "provider": "openrouter|openai|anthropic|grok" }` to switch provider
+  - `{ "provider": "openai|anthropic|grok" }` to switch provider
   - `{ "provider": "...", "api_key": "..." }` to switch and save key
 - `DELETE /ai/apikey?provider=openai` removes the stored key for that provider (provider query param optional; defaults to active provider).
 
