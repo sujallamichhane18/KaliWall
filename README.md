@@ -101,6 +101,7 @@
 - 🧠 XGBoost-based anomaly scoring integrated into the traffic anomaly pipeline
 - 📊 Dashboard visibility for model state (`running`, `disabled`, `error`) and live score/threshold
 - 🧪 API anomaly snapshots include ML telemetry (`enabled`, `available`, `score`, `threshold`, `is_anomaly`)
+- 🖥️ CPU-first inference mode enabled by default (Linux testing without GPU is supported)
 - 🛡️ Graceful fallback to rule/statistical anomaly detection when model runtime is unavailable
 
 <br/>
@@ -227,6 +228,7 @@ cd KaliWall
 
 - `GET /traffic/anomalies` returns risk status, anomaly list, and trend/history metadata.
 - Response includes optional `ml` telemetry fields when model integration is enabled.
+- CPU-only inference is enabled by default with `KALIWALL_ML_FORCE_CPU=1`.
 
 ---
 

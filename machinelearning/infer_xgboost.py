@@ -6,7 +6,8 @@ Input JSON shape:
   "model_path": "machinelearning/xgboost_anomaly_model.joblib",
   "metadata_path": "machinelearning/training_metadata.json",
   "features": {"f1": 1.2, "f2": 0.3},
-  "threshold": 0.55
+    "threshold": 0.55,
+    "force_cpu": true
 }
 
 Output JSON shape:
@@ -67,6 +68,20 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return float(v)
     except Exception:
         return default
+
+
+def _to_bool(v: Any, default: bool) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        raw = v.strip().lower()
+        if raw in {"1", "true", "yes", "y", "on"}:
+            return True
+        if raw in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
 
 
 def _extract_feature_names(meta_obj: Any) -> list[str]:
@@ -154,6 +169,44 @@ def _feature_names_from_model(model: Any) -> list[str]:
     return []
 
 
+def _force_cpu_inference(model: Any) -> str:
+    """Best-effort CPU pinning for XGBoost models.
+
+    This is intentionally defensive: each parameter set is attempted independently,
+    and unsupported parameters are ignored so inference can proceed.
+    """
+
+    # sklearn-style wrapper path
+    if hasattr(model, "set_params"):
+        for params in (
+            {"device": "cpu"},
+            {"tree_method": "hist"},
+            {"predictor": "cpu_predictor"},
+        ):
+            try:
+                model.set_params(**params)
+            except Exception:
+                pass
+
+    # Booster-level path
+    if hasattr(model, "get_booster"):
+        try:
+            booster = model.get_booster()
+            for params in (
+                {"device": "cpu"},
+                {"tree_method": "hist"},
+                {"predictor": "cpu_predictor"},
+            ):
+                try:
+                    booster.set_param(params)
+                except Exception:
+                    pass
+        except Exception as exc:
+            return f"failed to force CPU mode on booster: {exc}"
+
+    return ""
+
+
 def _predict_score(model: Any, matrix: np.ndarray) -> float:
     # Preferred path for classifiers
     if hasattr(model, "predict_proba"):
@@ -191,6 +244,7 @@ def main() -> None:
     metadata_path = str(payload.get("metadata_path", "")).strip()
     features_obj = payload.get("features")
     req_threshold = payload.get("threshold", None)
+    req_force_cpu = payload.get("force_cpu", None)
 
     if not model_path:
         _emit({"ok": False, "error": "model_path is required"}, code=2)
@@ -206,18 +260,27 @@ def main() -> None:
     except Exception as exc:
         _emit({"ok": False, "error": f"failed loading joblib model: {exc}"}, code=2)
 
-    feature_names = list(metadata.feature_names)
+    env_force_cpu = _to_bool(os.getenv("KALIWALL_ML_FORCE_CPU", "1"), True)
+    force_cpu = _to_bool(req_force_cpu, env_force_cpu)
+
     warning = ""
+    if force_cpu:
+        cpu_warning = _force_cpu_inference(model)
+        if cpu_warning:
+            warning = cpu_warning
+
+    feature_names = list(metadata.feature_names)
 
     if not feature_names:
         feature_names = _feature_names_from_model(model)
     if not feature_names:
         # Last-resort deterministic ordering.
         feature_names = sorted(str(k).strip() for k in features_obj.keys() if str(k).strip())
-        warning = (
+        feature_warning = (
             "Feature names were not found in metadata/model. "
             "Using sorted request feature names; verify training feature order."
         )
+        warning = (warning + " " + feature_warning).strip()
 
     vector = np.array([
         _to_float(features_obj.get(name, 0.0), 0.0) for name in feature_names
@@ -241,6 +304,7 @@ def main() -> None:
             "predicted_class": predicted_class,
             "feature_count": len(feature_names),
             "warning": warning,
+            "inference_device": "cpu" if force_cpu else "auto",
         }
     )
 

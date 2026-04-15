@@ -260,6 +260,7 @@ Environment="KALIWALL_ML_PYTHON_CMD=${ML_PYTHON}"
 Environment="KALIWALL_ML_SCRIPT_PATH=${SCRIPT_DIR}/machinelearning/infer_xgboost.py"
 Environment="KALIWALL_ML_MODEL_PATH=${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib"
 Environment="KALIWALL_ML_METADATA_PATH=${SCRIPT_DIR}/machinelearning/training_metadata.json"
+Environment="KALIWALL_ML_FORCE_CPU=1"
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

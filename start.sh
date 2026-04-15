@@ -41,6 +41,7 @@ export KALIWALL_ML_ANOMALY_ENABLED="${KALIWALL_ML_ANOMALY_ENABLED:-1}"
 export KALIWALL_ML_SCRIPT_PATH="${KALIWALL_ML_SCRIPT_PATH:-${SCRIPT_DIR}/machinelearning/infer_xgboost.py}"
 export KALIWALL_ML_MODEL_PATH="${KALIWALL_ML_MODEL_PATH:-${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib}"
 export KALIWALL_ML_METADATA_PATH="${KALIWALL_ML_METADATA_PATH:-${SCRIPT_DIR}/machinelearning/training_metadata.json}"
+export KALIWALL_ML_FORCE_CPU="${KALIWALL_ML_FORCE_CPU:-1}"
 
 PID_FILE="kaliwall.pid"
 LOG_FILE="logs/kaliwall-daemon.log"
