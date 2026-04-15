@@ -18,6 +18,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 ML_VENV_DIR=""
+ML_PREFERRED_MODEL_PATH=""
 
 echo -e "${GREEN}=======================================${NC}"
 echo -e "${GREEN}  KaliWall  Firewall Setup${NC}"
@@ -127,6 +128,9 @@ setup_ml_python_env() {
     local venv_dir="${SCRIPT_DIR}/.venv-ml"
     local venv_python="${venv_dir}/bin/python"
     local requirements_file="${SCRIPT_DIR}/machinelearning/requirements.txt"
+    local joblib_model="${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib"
+    local json_model="${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.json"
+    local ubj_model="${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.ubj"
 
     "${python_cmd}" -m venv "${venv_dir}"
 
@@ -152,8 +156,52 @@ PY
     ML_VENV_DIR="${venv_dir}"
     echo -e "${GREEN}[+] ML runtime ready: ${venv_python}${NC}"
 
-    if [[ ! -f "${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib" ]]; then
-        echo -e "${YELLOW}[!] Model file not found yet: machinelearning/xgboost_anomaly_model.joblib${NC}"
+    if [[ -f "${joblib_model}" && ! -f "${json_model}" ]]; then
+        echo -e "${YELLOW}[*] Exporting joblib model to Booster JSON for compatibility...${NC}"
+        if "${venv_python}" - <<PY
+import sys
+from pathlib import Path
+
+import joblib
+import xgboost as xgb
+
+joblib_model = Path(r"${joblib_model}")
+json_model = Path(r"${json_model}")
+
+model = joblib.load(joblib_model)
+booster = None
+if isinstance(model, xgb.Booster):
+    booster = model
+elif hasattr(model, "get_booster"):
+    booster = model.get_booster()
+
+if booster is None:
+    print("Model does not expose Booster interface; keeping original artifact", file=sys.stderr)
+    sys.exit(0)
+
+booster.save_model(json_model)
+print(f"Saved Booster JSON model: {json_model}")
+PY
+        then
+            echo -e "${GREEN}[+] Booster JSON export ready: ${json_model}${NC}"
+        else
+            echo -e "${YELLOW}[!] Unable to export Booster JSON; continuing with available model artifact${NC}"
+        fi
+    fi
+
+    if [[ -f "${json_model}" ]]; then
+        ML_PREFERRED_MODEL_PATH="${json_model}"
+    elif [[ -f "${ubj_model}" ]]; then
+        ML_PREFERRED_MODEL_PATH="${ubj_model}"
+    elif [[ -f "${joblib_model}" ]]; then
+        ML_PREFERRED_MODEL_PATH="${joblib_model}"
+    else
+        ML_PREFERRED_MODEL_PATH="${joblib_model}"
+    fi
+    echo -e "${GREEN}[+] ML model path selected: ${ML_PREFERRED_MODEL_PATH}${NC}"
+
+    if [[ ! -f "${ML_PREFERRED_MODEL_PATH}" ]]; then
+        echo -e "${YELLOW}[!] Model file not found yet: ${ML_PREFERRED_MODEL_PATH}${NC}"
     fi
 }
 
@@ -258,7 +306,7 @@ Environment=KALIWALL_WEB_DIR=${WEB_INSTALL_DIR}
 Environment="KALIWALL_ML_ANOMALY_ENABLED=1"
 Environment="KALIWALL_ML_PYTHON_CMD=${ML_PYTHON}"
 Environment="KALIWALL_ML_SCRIPT_PATH=${SCRIPT_DIR}/machinelearning/infer_xgboost.py"
-Environment="KALIWALL_ML_MODEL_PATH=${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib"
+Environment="KALIWALL_ML_MODEL_PATH=${ML_PREFERRED_MODEL_PATH:-${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib}"
 Environment="KALIWALL_ML_METADATA_PATH=${SCRIPT_DIR}/machinelearning/training_metadata.json"
 Environment="KALIWALL_ML_FORCE_CPU=1"
 Restart=on-failure

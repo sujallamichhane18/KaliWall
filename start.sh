@@ -21,6 +21,26 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+select_ml_model_path() {
+    local base_dir="$1"
+    local default_path="${base_dir}/machinelearning/xgboost_anomaly_model.joblib"
+    local candidates=(
+        "${base_dir}/machinelearning/xgboost_anomaly_model.json"
+        "${base_dir}/machinelearning/xgboost_anomaly_model.ubj"
+        "${base_dir}/machinelearning/xgboost_anomaly_model.joblib"
+    )
+
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "${candidate}" ]]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+
+    printf '%s' "${default_path}"
+}
+
 # Keep web UI path explicit so startup remains stable even if cwd handling changes.
 export KALIWALL_WEB_DIR="${KALIWALL_WEB_DIR:-${SCRIPT_DIR}/web}"
 
@@ -39,7 +59,9 @@ if [[ -z "${KALIWALL_ML_PYTHON_CMD:-}" ]]; then
 fi
 export KALIWALL_ML_ANOMALY_ENABLED="${KALIWALL_ML_ANOMALY_ENABLED:-1}"
 export KALIWALL_ML_SCRIPT_PATH="${KALIWALL_ML_SCRIPT_PATH:-${SCRIPT_DIR}/machinelearning/infer_xgboost.py}"
-export KALIWALL_ML_MODEL_PATH="${KALIWALL_ML_MODEL_PATH:-${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib}"
+if [[ -z "${KALIWALL_ML_MODEL_PATH:-}" ]]; then
+    export KALIWALL_ML_MODEL_PATH="$(select_ml_model_path "${SCRIPT_DIR}")"
+fi
 export KALIWALL_ML_METADATA_PATH="${KALIWALL_ML_METADATA_PATH:-${SCRIPT_DIR}/machinelearning/training_metadata.json}"
 export KALIWALL_ML_FORCE_CPU="${KALIWALL_ML_FORCE_CPU:-1}"
 
@@ -136,13 +158,23 @@ refresh_ml_status() {
     if [[ "${output}" == *'"ok":true'* ]]; then
         local score
         local threshold
+        local feature_count
+        local inference_device
+        local model_name
         score=$(printf '%s' "${output}" | sed -n 's/.*"score":\([0-9.]*\).*/\1/p' | head -n 1)
         threshold=$(printf '%s' "${output}" | sed -n 's/.*"threshold":\([0-9.]*\).*/\1/p' | head -n 1)
+        feature_count=$(printf '%s' "${output}" | sed -n 's/.*"feature_count":\([0-9]*\).*/\1/p' | head -n 1)
+        inference_device=$(printf '%s' "${output}" | sed -n 's/.*"inference_device":"\([^"]*\)".*/\1/p' | head -n 1)
+        model_name="$(basename "${KALIWALL_ML_MODEL_PATH}")"
         ML_LAST_STATUS="running"
-        if [[ -n "${score}" && -n "${threshold}" ]]; then
-            ML_LAST_DETAIL="score=${score}, threshold=${threshold}"
+        if [[ -n "${score}" && -n "${threshold}" && -n "${feature_count}" ]]; then
+            if [[ -n "${inference_device}" ]]; then
+                ML_LAST_DETAIL="model=${model_name}, score=${score}, threshold=${threshold}, features=${feature_count}, device=${inference_device}"
+            else
+                ML_LAST_DETAIL="model=${model_name}, score=${score}, threshold=${threshold}, features=${feature_count}"
+            fi
         else
-            ML_LAST_DETAIL="model inference OK"
+            ML_LAST_DETAIL="model=${model_name}, inference OK"
         fi
         return 0
     fi
