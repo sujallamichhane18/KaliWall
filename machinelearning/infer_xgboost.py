@@ -153,6 +153,156 @@ def _load_metadata(path: str | None) -> Metadata:
         return Metadata(feature_names=[], threshold=None)
 
 
+def _is_predictor_object(obj: Any) -> bool:
+    if obj is None:
+        return False
+    if xgb is not None and isinstance(obj, xgb.Booster):
+        return True
+    if hasattr(obj, "predict_proba"):
+        return True
+    if hasattr(obj, "predict"):
+        return True
+    if hasattr(obj, "decision_function"):
+        return True
+    if hasattr(obj, "get_booster"):
+        return True
+    return False
+
+
+def _try_load_booster_from_blob(blob: Any) -> Any | None:
+    if xgb is None:
+        return None
+
+    if isinstance(blob, memoryview):
+        blob = blob.tobytes()
+
+    if isinstance(blob, (bytes, bytearray)):
+        try:
+            booster = xgb.Booster()
+            booster.load_model(bytearray(blob))
+            return booster
+        except Exception:
+            return None
+
+    if isinstance(blob, str):
+        path = blob.strip()
+        if path and os.path.isfile(path):
+            try:
+                booster = xgb.Booster()
+                booster.load_model(path)
+                return booster
+            except Exception:
+                return None
+    return None
+
+
+def _unwrap_model_container(candidate: Any, source: str = "root", seen: set[int] | None = None) -> tuple[Any | None, str]:
+    if seen is None:
+        seen = set()
+
+    if candidate is None:
+        return None, ""
+
+    obj_id = id(candidate)
+    if obj_id in seen:
+        return None, ""
+    seen.add(obj_id)
+
+    if _is_predictor_object(candidate):
+        return candidate, source
+
+    booster_from_blob = _try_load_booster_from_blob(candidate)
+    if booster_from_blob is not None:
+        return booster_from_blob, f"{source}:booster_blob"
+
+    if isinstance(candidate, dict):
+        preferred_keys = (
+            "model",
+            "estimator",
+            "classifier",
+            "regressor",
+            "booster",
+            "xgb_model",
+            "xgboost_model",
+            "pipeline",
+            "clf",
+            "model_obj",
+            "best_model",
+        )
+        blob_keys = (
+            "booster_raw",
+            "model_raw",
+            "raw_booster",
+            "raw_model",
+            "booster_bytes",
+            "model_bytes",
+        )
+
+        for key in preferred_keys:
+            if key not in candidate:
+                continue
+            found, found_from = _unwrap_model_container(candidate.get(key), f"{source}.{key}", seen)
+            if found is not None:
+                return found, found_from
+
+        for key in blob_keys:
+            if key not in candidate:
+                continue
+            booster = _try_load_booster_from_blob(candidate.get(key))
+            if booster is not None:
+                return booster, f"{source}.{key}:booster_blob"
+
+        for key, value in candidate.items():
+            found, found_from = _unwrap_model_container(value, f"{source}.{key}", seen)
+            if found is not None:
+                return found, found_from
+
+    if isinstance(candidate, (list, tuple)):
+        for idx, value in enumerate(candidate[:12]):
+            found, found_from = _unwrap_model_container(value, f"{source}[{idx}]", seen)
+            if found is not None:
+                return found, found_from
+
+    return None, ""
+
+
+def _extract_feature_names_from_container(candidate: Any, seen: set[int] | None = None) -> list[str]:
+    if seen is None:
+        seen = set()
+
+    if candidate is None:
+        return []
+
+    obj_id = id(candidate)
+    if obj_id in seen:
+        return []
+    seen.add(obj_id)
+
+    if isinstance(candidate, dict):
+        direct = _extract_feature_names(candidate)
+        if direct:
+            return direct
+
+        for key in ("metadata", "meta", "training_metadata", "model_info", "preprocessor"):
+            if key in candidate:
+                nested = _extract_feature_names_from_container(candidate.get(key), seen)
+                if nested:
+                    return nested
+
+        for value in candidate.values():
+            nested = _extract_feature_names_from_container(value, seen)
+            if nested:
+                return nested
+
+    if isinstance(candidate, (list, tuple)):
+        for value in candidate[:12]:
+            nested = _extract_feature_names_from_container(value, seen)
+            if nested:
+                return nested
+
+    return []
+
+
 def _feature_names_from_model(model: Any) -> list[str]:
     # sklearn-compatible models
     if hasattr(model, "feature_names_in_"):
@@ -184,7 +334,44 @@ def _feature_names_from_model(model: Any) -> list[str]:
     return []
 
 
-def _load_model(model_path: str) -> tuple[Any, str]:
+def _feature_count_from_model(model: Any) -> int:
+    if model is None:
+        return 0
+
+    n_features = getattr(model, "n_features_in_", None)
+    if n_features is not None:
+        try:
+            n = int(n_features)
+            if n > 0:
+                return n
+        except Exception:
+            pass
+
+    if xgb is not None and isinstance(model, xgb.Booster):
+        try:
+            n = int(model.num_features())
+            if n > 0:
+                return n
+        except Exception:
+            pass
+
+    if hasattr(model, "get_booster"):
+        try:
+            booster = model.get_booster()
+            if booster is not None:
+                n = int(booster.num_features())
+                if n > 0:
+                    return n
+        except Exception:
+            pass
+
+    names = _feature_names_from_model(model)
+    if names:
+        return len(names)
+    return 0
+
+
+def _load_model(model_path: str) -> tuple[Any, str, list[str]]:
     """Load model from JSON/UBJ via Booster or from joblib for sklearn-style wrappers.
 
     Returns:
@@ -201,11 +388,21 @@ def _load_model(model_path: str) -> tuple[Any, str]:
             )
         booster = xgb.Booster()
         booster.load_model(model_path)
-        return booster, "booster"
+        return booster, "booster", []
 
     try:
-        model = joblib.load(model_path)
-        return model, "joblib"
+        model_container = joblib.load(model_path)
+        embedded_feature_names = _extract_feature_names_from_container(model_container)
+        resolved_model, resolved_from = _unwrap_model_container(model_container, "joblib")
+        if resolved_model is None:
+            if isinstance(model_container, dict):
+                keys_preview = ", ".join(str(k) for k in list(model_container.keys())[:12])
+                _debug(
+                    "joblib loaded a dict container without a supported model object; "
+                    f"top-level keys: [{keys_preview}]"
+                )
+            return model_container, "joblib", embedded_feature_names
+        return resolved_model, f"joblib/{resolved_from}", embedded_feature_names
     except Exception as exc:
         _debug(
             "joblib.load failed "
@@ -216,7 +413,7 @@ def _load_model(model_path: str) -> tuple[Any, str]:
         try:
             booster = xgb.Booster()
             booster.load_model(model_path)
-            return booster, "booster"
+            return booster, "booster", []
         except Exception as booster_exc:
             _debug(
                 "Booster.load_model fallback failed "
@@ -296,11 +493,22 @@ def _predict_score(model: Any, matrix: np.ndarray, feature_names: list[str]) -> 
 
     # 2) Raw XGBoost Booster prediction path
     if xgb is not None and isinstance(model, xgb.Booster):
-        dmatrix = xgb.DMatrix(
-            matrix,
-            feature_names=feature_names if feature_names else None,
-        )
-        raw = model.predict(dmatrix)
+        try:
+            dmatrix = xgb.DMatrix(
+                matrix,
+                feature_names=feature_names if feature_names else None,
+            )
+            raw = model.predict(dmatrix)
+        except Exception as exc:
+            if feature_names:
+                _debug(
+                    "Booster prediction with explicit feature names failed; "
+                    f"retrying without feature names (reason: {exc})"
+                )
+                dmatrix = xgb.DMatrix(matrix)
+                raw = model.predict(dmatrix)
+            else:
+                raise
         arr = np.asarray(raw)
         if arr.ndim == 2 and arr.shape[1] >= 2:
             value = float(arr[0, 1])
@@ -358,7 +566,7 @@ def main() -> None:
     metadata = _load_metadata(metadata_path if metadata_path else None)
 
     try:
-        model, load_mode = _load_model(model_path)
+        model, load_mode, embedded_feature_names = _load_model(model_path)
     except Exception as exc:
         _debug(
             "model load failed "
@@ -379,16 +587,42 @@ def main() -> None:
 
     feature_names = list(metadata.feature_names)
 
+    if not feature_names and embedded_feature_names:
+        feature_names = list(embedded_feature_names)
+
     if not feature_names:
         feature_names = _feature_names_from_model(model)
     if not feature_names:
-        # Last-resort deterministic ordering.
+        inferred_feature_count = _feature_count_from_model(model)
+        if inferred_feature_count > 0:
+            feature_names = [f"f{i}" for i in range(inferred_feature_count)]
+            feature_warning = (
+                "Feature names were not found in metadata/model. "
+                f"Using generated fallback names f0..f{inferred_feature_count-1}."
+            )
+            warning = (warning + " " + feature_warning).strip()
+
+    if not feature_names:
+        # Last-resort deterministic ordering from request payload.
         feature_names = sorted(str(k).strip() for k in features_obj.keys() if str(k).strip())
-        feature_warning = (
-            "Feature names were not found in metadata/model. "
-            "Using sorted request feature names; verify training feature order."
+        if feature_names:
+            feature_warning = (
+                "Feature names were not found in metadata/model. "
+                "Using sorted request feature names; verify training feature order."
+            )
+            warning = (warning + " " + feature_warning).strip()
+
+    if not feature_names:
+        _emit(
+            {
+                "ok": False,
+                "error": (
+                    "unable to determine model feature layout "
+                    "(no metadata feature names, model feature names, or feature_count available)"
+                ),
+            },
+            code=2,
         )
-        warning = (warning + " " + feature_warning).strip()
 
     vector = np.array([
         _to_float(features_obj.get(name, 0.0), 0.0) for name in feature_names
