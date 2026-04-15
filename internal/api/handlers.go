@@ -1,315 +1,170 @@
 // Package api provides the HTTP router and REST API handlers for KaliWall.
 package api
-
-import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"log"
-	"math"
-	"net"
-	"net/http"
-	"os"
-	"path"
-	"path/filepath"
-	"runtime/debug"
-	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
-
-	iforest "github.com/e-XpertSolutions/go-iforest/v2/iforest"
-
-	"kaliwall/internal/ai"
-	"kaliwall/internal/analytics"
-	"kaliwall/internal/dpi/pipeline"
-	"kaliwall/internal/firewall"
-	"kaliwall/internal/geoip"
-	"kaliwall/internal/logger"
-	"kaliwall/internal/ml"
-	"kaliwall/internal/models"
-	"kaliwall/internal/proxy"
-	"kaliwall/internal/sysinfo"
-	"kaliwall/internal/threatintel"
-)
-
-type dpiStatusProvider interface {
-	Status() pipeline.Status
-}
-
-type dpiControlProvider interface {
-	SetEnabled(enabled bool) error
-}
-
-type dpiDetailedStatsProvider interface {
-	DetailedStats() interface{}
-}
-
-type dpiWorkersProvider interface {
-	SetWorkers(workers int) error
-}
-
-type maliciousDomainProxy interface {
-	DomainStats() proxy.DomainBlocklistStats
-	DomainList() []string
-	ReloadDomains() (int, error)
-	AddDomain(domain string) (bool, string, error)
-	RemoveDomain(domain string) (bool, string, error)
-	IsDomainBlocked(domain string) bool
-	RecentBlockedEvents(limit int) []proxy.BlockedEvent
-}
-
-// DPIProvider provides synchronized access to an optional DPI pipeline.
-type DPIProvider struct {
-	mu       sync.RWMutex
-	provider dpiStatusProvider
-}
-
-// NewDPIProvider constructs a thread-safe holder for the DPI dependency.
-func NewDPIProvider(provider dpiStatusProvider) *DPIProvider {
-	p := &DPIProvider{}
-	p.Set(provider)
-	return p
-}
-
-// Set updates the active DPI provider (safe for async initialization paths).
-func (p *DPIProvider) Set(provider dpiStatusProvider) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.provider = provider
-}
-
-// Status returns DPI status and whether a provider is available.
-func (p *DPIProvider) Status() (pipeline.Status, bool) {
-	if p == nil {
-		return pipeline.Status{Enabled: false, Running: false}, false
-	}
-	p.mu.RLock()
-	provider := p.provider
-	p.mu.RUnlock()
-	if provider == nil {
-		return pipeline.Status{Enabled: false, Running: false}, false
-	}
-	return provider.Status(), true
-}
-
-// SetEnabled toggles DPI on/off if the provider supports lifecycle control.
-func (p *DPIProvider) SetEnabled(enabled bool) error {
-	if p == nil {
-		return errors.New("DPI provider unavailable")
-	}
-	if !enabled {
-		return errors.New("DPI disable removed: always-on mode")
-	}
-	p.mu.RLock()
-	provider := p.provider
-	p.mu.RUnlock()
-	if provider == nil {
-		return errors.New("DPI provider unavailable")
-	}
-	ctrl, ok := provider.(dpiControlProvider)
-	if !ok {
-		return errors.New("DPI control not supported")
-	}
-	return ctrl.SetEnabled(true)
-}
-
-// DetailedStats returns provider-specific rich stats when available.
-func (p *DPIProvider) DetailedStats() (interface{}, bool) {
-	if p == nil {
-		return nil, false
-	}
-	p.mu.RLock()
-	provider := p.provider
-	p.mu.RUnlock()
-	if provider == nil {
-		return nil, false
-	}
-	if detailed, ok := provider.(dpiDetailedStatsProvider); ok {
-		return detailed.DetailedStats(), true
-	}
-	return nil, false
-}
-
-// SetWorkers updates DPI worker concurrency when provider supports it.
-func (p *DPIProvider) SetWorkers(workers int) error {
-	if p == nil {
-		return errors.New("DPI provider unavailable")
-	}
-	p.mu.RLock()
-	provider := p.provider
-	p.mu.RUnlock()
-	if provider == nil {
-		return errors.New("DPI provider unavailable")
-	}
-	ctrl, ok := provider.(dpiWorkersProvider)
-	if !ok {
-		return errors.New("DPI worker control not supported")
-	}
-	return ctrl.SetWorkers(workers)
-}
-
-// NewRouter creates the HTTP mux with all API routes and static file serving.
-func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Service, an *analytics.Service, dpi *DPIProvider, geo *geoip.Service, proxy maliciousDomainProxy, aiService *ai.OpenRouterService) http.Handler {
-	mux := http.NewServeMux()
-
-	mlAnomalyPredictor := ml.NewAnomalyPredictorFromEnv()
-	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo, proxy: proxy, aiService: aiService, mlAnomaly: mlAnomalyPredictor}
-	h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
-	h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
-	h.mlDecisionHistory = make([]mlDecisionPoint, 0, 256)
-	if mlAnomalyPredictor != nil && mlAnomalyPredictor.Enabled() {
-		log.Printf("ML anomaly predictor enabled: model=%s", mlAnomalyPredictor.ModelPath())
+func (h *handlers) recordAnomalySnapshot(snapshot models.TrafficAnomalySnapshot) {
+	if h == nil {
+		return
 	}
 
-	// REST API v1 endpoints
-	mux.HandleFunc("/api/v1/rules", h.handleRules)
-	mux.HandleFunc("/api/v1/rules/analyze", h.handleRulesAnalyze)
-	mux.HandleFunc("/api/v1/rules/validate", h.handleRuleValidate)
-	mux.HandleFunc("/api/v1/rules/", h.handleRuleByID)  // /api/v1/rules/{id}
-	mux.HandleFunc("/api/v1/stats", h.handleStats)
-	mux.HandleFunc("/api/v1/sysinfo", h.handleSysInfo)
-	mux.HandleFunc("/api/v1/connections", h.handleConnections)
-	mux.HandleFunc("/api/v1/logs", h.handleLogs)
-	mux.HandleFunc("/api/v1/logs/stream", h.handleLogStream)
-	mux.HandleFunc("/api/v1/events", h.handleEvents)
-	mux.HandleFunc("/api/v1/events/stream", h.handleEventStream)
-	mux.HandleFunc("/api/v1/threat/apikey", h.handleAPIKey)
-	mux.HandleFunc("/api/v1/threat/check/", h.handleThreatCheck)
-	mux.HandleFunc("/api/v1/threat/cache", h.handleThreatCache)
-	mux.HandleFunc("/api/v1/analytics", h.handleAnalytics)
-	mux.HandleFunc("/api/v1/analytics/stream", h.handleAnalyticsStream)
-	mux.HandleFunc("/api/v1/blocked", h.handleBlockedIPs)
-	mux.HandleFunc("/api/v1/blocked/", h.handleBlockedIPByAddr)
-	mux.HandleFunc("/api/v1/websites", h.handleWebsiteBlocks)
-	mux.HandleFunc("/api/v1/websites/", h.handleWebsiteBlockByDomain)
-	mux.HandleFunc("/api/v1/firewall/engine", h.handleFirewallEngine)
-	mux.HandleFunc("/api/v1/firewall/logs", h.handleFirewallLogs)
-	mux.HandleFunc("/api/v1/traffic/visibility", h.handleTrafficVisibility)
-	mux.HandleFunc("/api/v1/traffic/anomalies", h.handleTrafficAnomalies)
-	mux.HandleFunc("/api/v1/dns/stats", h.handleDNSStats)
-	mux.HandleFunc("/api/v1/dns/cache", h.handleDNSCache)
-	mux.HandleFunc("/api/v1/dns/refresh", h.handleDNSRefresh)
-	mux.HandleFunc("/api/v1/dpi/status", h.handleDPIStatus)
-	mux.HandleFunc("/api/v1/dpi/stats", h.handleDPIStats)
-	mux.HandleFunc("/api/v1/dpi/control", h.handleDPIControl)
-	mux.HandleFunc("/api/v1/dpi/workers", h.handleDPIWorkers)
-	mux.HandleFunc("/api/v1/geo/attacks", h.handleGeoAttacks)
-	mux.HandleFunc("/api/v1/geo/me", h.handleGeoMe)
-	mux.HandleFunc("/api/v1/geo/stream", h.handleGeoStream)
-	mux.HandleFunc("/api/v1/proxy/malicious-domains", h.handleProxyMaliciousDomains)
-	mux.HandleFunc("/api/v1/proxy/malicious-domains/reload", h.handleProxyMaliciousDomainsReload)
-	mux.HandleFunc("/api/v1/proxy/blocked-events", h.handleProxyBlockedEvents)
-	mux.HandleFunc("/api/v1/ai/apikey", h.handleAIApiKey)
-	mux.HandleFunc("/api/v1/ai/status", h.handleAIStatus)
-	mux.HandleFunc("/api/v1/ai/explain", h.handleAIExplain)
-	mux.HandleFunc("/api/v1/ai/suggest-rule", h.handleAISuggestRule)
-	mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
-	})
-	mux.HandleFunc("/web/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
-	})
-
-	// Serve web UI with a resilient resolver so the daemon can run from any working directory.
-	webDir := resolveWebDir()
-	if webDir == "" {
-		log.Printf("Web UI assets not found. Set KALIWALL_WEB_DIR or place a 'web' folder near the executable")
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/api/") {
-				http.NotFound(w, r)
-				return
-			}
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("KaliWall web assets not found. Set KALIWALL_WEB_DIR to the web directory."))
-		})
-		return withRecovery(mux)
+	const anomalyTrendHistoryCap = 1440
+	bucket := snapshot.GeneratedAt.UTC().Truncate(time.Minute)
+	if bucket.IsZero() {
+		return
 	}
 
-	log.Printf("Web UI assets: %s", webDir)
-	fileServer := http.FileServer(http.Dir(webDir))
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.NotFound(w, r)
-			return
-		}
-
-		if r.URL.Path == "/" {
-			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
-			return
-		}
-
-		cleanedURLPath := path.Clean("/" + r.URL.Path)
-		requested := strings.TrimPrefix(cleanedURLPath, "/")
-		if requested == "" {
-			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
-			return
-		}
-
-		if stat, err := os.Stat(filepath.Join(webDir, filepath.FromSlash(requested))); err == nil {
-			if stat.IsDir() {
-				index := filepath.Join(webDir, filepath.FromSlash(requested), "index.html")
-				if _, err := os.Stat(index); err == nil {
-					fileServer.ServeHTTP(w, r)
-					return
-				}
-			} else {
-				fileServer.ServeHTTP(w, r)
-				return
-			}
-		}
-
-		// Fallback to index.html for client-side routes without a file extension.
-		if !strings.Contains(path.Base(cleanedURLPath), ".") {
-			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
-			return
-		}
-
-		fileServer.ServeHTTP(w, r)
-	})
-
-	return withRecovery(mux)
-}
-
-func resolveWebDir() string {
-	candidates := make([]string, 0, 8)
-
-	if envPath := strings.TrimSpace(os.Getenv("KALIWALL_WEB_DIR")); envPath != "" {
-		candidates = append(candidates, envPath)
+	riskPoint := models.TrafficAnomalyRiskPoint{
+		Timestamp:      bucket,
+		RiskScore:      clampInt(snapshot.RiskScore, 0, 100),
+		Status:         strings.TrimSpace(snapshot.Status),
+		TotalAnomalies: snapshot.TotalAnomalies,
+		SampleSize:     snapshot.SampleSize,
 	}
 
-	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(cwd, "web"))
+	h.anomalyTrendMu.Lock()
+	defer h.anomalyTrendMu.Unlock()
+
+	if h.anomalyRiskHistory == nil {
+		h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
+	}
+	if len(h.anomalyRiskHistory) > 0 && h.anomalyRiskHistory[len(h.anomalyRiskHistory)-1].Timestamp.Equal(bucket) {
+		h.anomalyRiskHistory[len(h.anomalyRiskHistory)-1] = riskPoint
+	} else {
+		h.anomalyRiskHistory = append(h.anomalyRiskHistory, riskPoint)
+	}
+	if len(h.anomalyRiskHistory) > anomalyTrendHistoryCap {
+		h.anomalyRiskHistory = h.anomalyRiskHistory[len(h.anomalyRiskHistory)-anomalyTrendHistoryCap:]
 	}
 
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		candidates = append(candidates,
-			filepath.Join(exeDir, "web"),
-			filepath.Join(exeDir, "..", "web"),
-			filepath.Join(exeDir, "..", "share", "kaliwall", "web"),
-		)
+	if h.anomalyDetectorHistory == nil {
+		h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
 	}
 
-	candidates = append(candidates,
-		"/usr/local/share/kaliwall/web",
-		"/usr/share/kaliwall/web",
-	)
-
-	seen := make(map[string]struct{}, len(candidates))
-	for _, candidate := range candidates {
-		if candidate == "" {
+	present := make(map[string]models.TrafficAnomalyDetectorPoint, len(snapshot.Anomalies))
+	for _, a := range snapshot.Anomalies {
+		kind := strings.TrimSpace(a.Type)
+		if kind == "" {
 			continue
 		}
-		abs, err := filepath.Abs(candidate)
-		if err != nil {
-			abs = candidate
+		present[kind] = models.TrafficAnomalyDetectorPoint{
+			Timestamp: bucket,
+			Score:     clampInt(a.Score, 0, 100),
+			Severity:  strings.TrimSpace(strings.ToLower(a.Severity)),
 		}
-		if _, ok := seen[abs]; ok {
+	}
+
+	for kind, point := range present {
+		series := h.anomalyDetectorHistory[kind]
+		if len(series) > 0 && series[len(series)-1].Timestamp.Equal(bucket) {
+			series[len(series)-1] = point
+		} else {
+			series = append(series, point)
+		}
+		if len(series) > anomalyTrendHistoryCap {
+			series = series[len(series)-anomalyTrendHistoryCap:]
+		}
+		h.anomalyDetectorHistory[kind] = series
+	}
+
+	for kind, series := range h.anomalyDetectorHistory {
+		if _, ok := present[kind]; ok {
 			continue
+		}
+		zeroPoint := models.TrafficAnomalyDetectorPoint{
+			Timestamp: bucket,
+			Score:     0,
+			Severity:  "info",
+		}
+		if len(series) > 0 && series[len(series)-1].Timestamp.Equal(bucket) {
+			series[len(series)-1] = zeroPoint
+		} else {
+			series = append(series, zeroPoint)
+		}
+		if len(series) > anomalyTrendHistoryCap {
+			series = series[len(series)-anomalyTrendHistoryCap:]
+		}
+		h.anomalyDetectorHistory[kind] = series
+	}
+}
+
+func (h *handlers) recordMLDecision(snapshot models.TrafficAnomalySnapshot) {
+	if h == nil || h.logger == nil || snapshot.ML == nil {
+		return
+	}
+
+	const mlDecisionHistoryCap = 1440
+	bucket := snapshot.GeneratedAt.UTC().Truncate(time.Minute)
+	if bucket.IsZero() {
+		bucket = time.Now().UTC().Truncate(time.Minute)
+	}
+
+	mlState := snapshot.ML
+	decision := strings.ToLower(strings.TrimSpace(mlState.Decision))
+	if decision == "" {
+		switch {
+		case !mlState.Enabled:
+			decision = "disabled"
+		case !mlState.Available:
+			decision = "unavailable"
+		case mlState.IsAnomaly || mlState.PredictedClass == 1 || mlState.Score >= mlState.Threshold:
+			decision = "attack"
+		default:
+			decision = "normal"
+		}
+	}
+
+	point := mlDecisionPoint{
+		Timestamp:       bucket,
+		Enabled:         mlState.Enabled,
+		Available:       mlState.Available,
+		Decision:        decision,
+		Score:           mlState.Score,
+		Threshold:       mlState.Threshold,
+		IsAnomaly:       mlState.IsAnomaly,
+		PredictedClass:  mlState.PredictedClass,
+		FeatureCount:    mlState.FeatureCount,
+		InferenceDevice: mlState.InferenceDevice,
+		Error:           strings.TrimSpace(mlState.Error),
+	}
+
+	shouldLog := false
+	detail := ""
+
+	h.anomalyTrendMu.Lock()
+	if h.mlDecisionHistory == nil {
+		h.mlDecisionHistory = make([]mlDecisionPoint, 0, 256)
+	}
+
+	if len(h.mlDecisionHistory) == 0 {
+		shouldLog = true
+	} else {
+		last := h.mlDecisionHistory[len(h.mlDecisionHistory)-1]
+		decisionChanged := strings.TrimSpace(last.Decision) != strings.TrimSpace(point.Decision)
+		availabilityChanged := last.Enabled != point.Enabled || last.Available != point.Available
+		classChanged := last.PredictedClass != point.PredictedClass
+		errorChanged := strings.TrimSpace(last.Error) != strings.TrimSpace(point.Error)
+		scoreChanged := math.Abs(last.Score-point.Score) >= 0.12
+		newMinuteAttack := !last.Timestamp.Equal(point.Timestamp) && point.Decision == "attack"
+		shouldLog = decisionChanged || availabilityChanged || classChanged || errorChanged || scoreChanged || newMinuteAttack
+	}
+
+	if len(h.mlDecisionHistory) > 0 && h.mlDecisionHistory[len(h.mlDecisionHistory)-1].Timestamp.Equal(point.Timestamp) {
+		h.mlDecisionHistory[len(h.mlDecisionHistory)-1] = point
+	} else {
+		h.mlDecisionHistory = append(h.mlDecisionHistory, point)
+	}
+
+	if len(h.mlDecisionHistory) > mlDecisionHistoryCap {
+		h.mlDecisionHistory = h.mlDecisionHistory[len(h.mlDecisionHistory)-mlDecisionHistoryCap:]
+	}
+
+	if shouldLog {
+		detail = formatMLDecisionLogDetail(mlState)
+	}
+	h.anomalyTrendMu.Unlock()
+
+	if shouldLog && strings.TrimSpace(detail) != "" {
+		h.logger.Log("INFO", "-", "-", "ML", detail)
+	}
+}
 		}
 		seen[abs] = struct{}{}
 
@@ -508,6 +363,7 @@ func (h *handlers) handleTrafficAnomalies(w http.ResponseWriter, r *http.Request
 	snapshot := h.buildTrafficAnomalySnapshot(limit, windowMinutes)
 	h.enforceAnomalyBlocking(snapshot)
 	h.recordAnomalySnapshot(snapshot)
+	h.recordMLDecision(snapshot)
 	snapshot = h.withAnomalyTrendHistory(snapshot, trendLimit)
 
 	respond(w, http.StatusOK, models.APIResponse{Success: true, Data: snapshot})
@@ -563,6 +419,7 @@ type mlDecisionPoint struct {
 	Timestamp       time.Time
 	Enabled         bool
 	Available       bool
+	Decision        string
 	Score           float64
 	Threshold       float64
 	IsAnomaly       bool
@@ -2136,6 +1993,9 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			mlPrediction.Decision = "unavailable"
 			mlPrediction.Error = err.Error()
 		} else {
+			scanSignal := hasStrongScanSignal(anomalies, halfOpen, observedTCPConnections, maxFanout.Ports)
+			modelAttack := pred.IsAnomaly || pred.PredictedClass == 1 || pred.Score >= pred.Threshold
+
 			mlPrediction.Available = pred.Available
 			mlPrediction.Score = pred.Score
 			mlPrediction.Threshold = pred.Threshold
@@ -2145,8 +2005,11 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			mlPrediction.InferenceDevice = pred.InferenceDevice
 			mlPrediction.Warning = pred.Warning
 			if pred.Available {
-				if pred.IsAnomaly || pred.PredictedClass == 1 || pred.Score >= pred.Threshold {
+				if modelAttack || scanSignal {
 					mlPrediction.Decision = "attack"
+					if !modelAttack && scanSignal {
+						mlPrediction.Warning = appendWarningMessage(mlPrediction.Warning, "scan-signal decision override")
+					}
 				} else {
 					mlPrediction.Decision = "normal"
 				}
@@ -2667,6 +2530,9 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		return snapshot
 	}
 
+	scanSignal := hasStrongScanSignal(snapshot.Anomalies, halfOpenConnections, observedTCPConnections, 0)
+	modelAttack := pred.IsAnomaly || pred.PredictedClass == 1 || pred.Score >= pred.Threshold
+
 	snapshot.ML.Available = pred.Available
 	snapshot.ML.Score = pred.Score
 	snapshot.ML.Threshold = pred.Threshold
@@ -2676,8 +2542,11 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 	snapshot.ML.InferenceDevice = pred.InferenceDevice
 	snapshot.ML.Warning = strings.TrimSpace(pred.Warning)
 	if pred.Available {
-		if pred.IsAnomaly || pred.PredictedClass == 1 || pred.Score >= pred.Threshold {
+		if modelAttack || scanSignal {
 			snapshot.ML.Decision = "attack"
+			if !modelAttack && scanSignal {
+				snapshot.ML.Warning = appendWarningMessage(snapshot.ML.Warning, "scan-signal decision override")
+			}
 		} else {
 			snapshot.ML.Decision = "normal"
 		}
@@ -3076,70 +2945,311 @@ func (h *handlers) recordAnomalySnapshot(snapshot models.TrafficAnomalySnapshot)
 		return
 	}
 
-	const anomalyTrendHistoryCap = 1440
-	bucket := snapshot.GeneratedAt.UTC().Truncate(time.Minute)
-	if bucket.IsZero() {
+
+func (h *handlers) recordMLDecision(snapshot models.TrafficAnomalySnapshot) {
+	if h == nil || h.logger == nil || snapshot.ML == nil {
 		return
 	}
 
-	riskPoint := models.TrafficAnomalyRiskPoint{
-		Timestamp:      bucket,
-		RiskScore:      clampInt(snapshot.RiskScore, 0, 100),
-		Status:         strings.TrimSpace(snapshot.Status),
-		TotalAnomalies: snapshot.TotalAnomalies,
-		SampleSize:     snapshot.SampleSize,
+	const mlDecisionHistoryCap = 1440
+	bucket := snapshot.GeneratedAt.UTC().Truncate(time.Minute)
+	if bucket.IsZero() {
+		bucket = time.Now().UTC().Truncate(time.Minute)
 	}
+
+	mlState := snapshot.ML
+	decision := strings.ToLower(strings.TrimSpace(mlState.Decision))
+	if decision == "" {
+		switch {
+		case !mlState.Enabled:
+			decision = "disabled"
+		case !mlState.Available:
+			decision = "unavailable"
+		case mlState.IsAnomaly || mlState.PredictedClass == 1 || mlState.Score >= mlState.Threshold:
+			decision = "attack"
+		default:
+			decision = "normal"
+		}
+	}
+
+	point := mlDecisionPoint{
+		Timestamp:       bucket,
+		Enabled:         mlState.Enabled,
+		Available:       mlState.Available,
+		Decision:        decision,
+		Score:           mlState.Score,
+		Threshold:       mlState.Threshold,
+		IsAnomaly:       mlState.IsAnomaly,
+		PredictedClass:  mlState.PredictedClass,
+		FeatureCount:    mlState.FeatureCount,
+		InferenceDevice: mlState.InferenceDevice,
+		Error:           strings.TrimSpace(mlState.Error),
+	}
+
+	shouldLog := false
+	detail := ""
 
 	h.anomalyTrendMu.Lock()
-	defer h.anomalyTrendMu.Unlock()
-
-	if h.anomalyRiskHistory == nil {
-		h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
-	}
-	if len(h.anomalyRiskHistory) > 0 && h.anomalyRiskHistory[len(h.anomalyRiskHistory)-1].Timestamp.Equal(bucket) {
-		h.anomalyRiskHistory[len(h.anomalyRiskHistory)-1] = riskPoint
-	} else {
-		h.anomalyRiskHistory = append(h.anomalyRiskHistory, riskPoint)
-	}
-	if len(h.anomalyRiskHistory) > anomalyTrendHistoryCap {
-		h.anomalyRiskHistory = h.anomalyRiskHistory[len(h.anomalyRiskHistory)-anomalyTrendHistoryCap:]
-	}
-
-	if h.anomalyDetectorHistory == nil {
-		h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
-	}
-
-	present := make(map[string]models.TrafficAnomalyDetectorPoint, len(snapshot.Anomalies))
-	for _, a := range snapshot.Anomalies {
-		kind := strings.TrimSpace(a.Type)
-		if kind == "" {
-			continue
+	if h.mlDecisionHistory == nil {
+		const anomalyTrendHistoryCap = 1440
+		bucket := snapshot.GeneratedAt.UTC().Truncate(time.Minute)
+		if bucket.IsZero() {
+			return
 		}
-		present[kind] = models.TrafficAnomalyDetectorPoint{
-			Timestamp: bucket,
-			Score:     clampInt(a.Score, 0, 100),
-			Severity:  strings.TrimSpace(strings.ToLower(a.Severity)),
-		}
-	}
 
-	for kind, point := range present {
-		series := h.anomalyDetectorHistory[kind]
-		if len(series) > 0 && series[len(series)-1].Timestamp.Equal(bucket) {
-			series[len(series)-1] = point
+		riskPoint := models.TrafficAnomalyRiskPoint{
+			Timestamp:      bucket,
+			RiskScore:      clampInt(snapshot.RiskScore, 0, 100),
+			Status:         strings.TrimSpace(snapshot.Status),
+			TotalAnomalies: snapshot.TotalAnomalies,
+			SampleSize:     snapshot.SampleSize,
+		}
+
+		h.anomalyTrendMu.Lock()
+		defer h.anomalyTrendMu.Unlock()
+
+		if h.anomalyRiskHistory == nil {
+			h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
+		}
+		if len(h.anomalyRiskHistory) > 0 && h.anomalyRiskHistory[len(h.anomalyRiskHistory)-1].Timestamp.Equal(bucket) {
+			h.anomalyRiskHistory[len(h.anomalyRiskHistory)-1] = riskPoint
 		} else {
-			series = append(series, point)
+			h.anomalyRiskHistory = append(h.anomalyRiskHistory, riskPoint)
 		}
-		if len(series) > anomalyTrendHistoryCap {
-			series = series[len(series)-anomalyTrendHistoryCap:]
+		if len(h.anomalyRiskHistory) > anomalyTrendHistoryCap {
+			h.anomalyRiskHistory = h.anomalyRiskHistory[len(h.anomalyRiskHistory)-anomalyTrendHistoryCap:]
 		}
-		h.anomalyDetectorHistory[kind] = series
+
+		if h.anomalyDetectorHistory == nil {
+			h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
+		}
+
+		present := make(map[string]models.TrafficAnomalyDetectorPoint, len(snapshot.Anomalies))
+		for _, a := range snapshot.Anomalies {
+			kind := strings.TrimSpace(a.Type)
+			if kind == "" {
+				continue
+			}
+			present[kind] = models.TrafficAnomalyDetectorPoint{
+				Timestamp: bucket,
+				Score:     clampInt(a.Score, 0, 100),
+				Severity:  strings.TrimSpace(strings.ToLower(a.Severity)),
+			}
+		}
+
+		for kind, point := range present {
+			series := h.anomalyDetectorHistory[kind]
+			if len(series) > 0 && series[len(series)-1].Timestamp.Equal(bucket) {
+				series[len(series)-1] = point
+			} else {
+				series = append(series, point)
+			}
+			if len(series) > anomalyTrendHistoryCap {
+				series = series[len(series)-anomalyTrendHistoryCap:]
+			}
+			h.anomalyDetectorHistory[kind] = series
+		}
+
+		for kind, series := range h.anomalyDetectorHistory {
+			if _, ok := present[kind]; ok {
+				continue
+			}
+			zeroPoint := models.TrafficAnomalyDetectorPoint{
+				Timestamp: bucket,
+				Score:     0,
+				Severity:  "info",
+			}
+			if len(series) > 0 && series[len(series)-1].Timestamp.Equal(bucket) {
+				series[len(series)-1] = zeroPoint
+			} else {
+				series = append(series, zeroPoint)
+			}
+			if len(series) > anomalyTrendHistoryCap {
+				series = series[len(series)-anomalyTrendHistoryCap:]
+			}
+			h.anomalyDetectorHistory[kind] = series
+		}
 	}
 
-	for kind, series := range h.anomalyDetectorHistory {
-		if _, ok := present[kind]; ok {
-			continue
+	func (h *handlers) recordMLDecision(snapshot models.TrafficAnomalySnapshot) {
+		if h == nil || h.logger == nil || snapshot.ML == nil {
+			return
 		}
-		zeroPoint := models.TrafficAnomalyDetectorPoint{
+
+		const mlDecisionHistoryCap = 1440
+		bucket := snapshot.GeneratedAt.UTC().Truncate(time.Minute)
+		if bucket.IsZero() {
+			bucket = time.Now().UTC().Truncate(time.Minute)
+		}
+
+		mlState := snapshot.ML
+		decision := strings.ToLower(strings.TrimSpace(mlState.Decision))
+		if decision == "" {
+			switch {
+			case !mlState.Enabled:
+				decision = "disabled"
+			case !mlState.Available:
+				decision = "unavailable"
+			case mlState.IsAnomaly || mlState.PredictedClass == 1 || mlState.Score >= mlState.Threshold:
+				decision = "attack"
+			default:
+				decision = "normal"
+			}
+		}
+
+		point := mlDecisionPoint{
+			Timestamp:       bucket,
+			Enabled:         mlState.Enabled,
+			Available:       mlState.Available,
+			Decision:        decision,
+			Score:           mlState.Score,
+			Threshold:       mlState.Threshold,
+			IsAnomaly:       mlState.IsAnomaly,
+			PredictedClass:  mlState.PredictedClass,
+			FeatureCount:    mlState.FeatureCount,
+			InferenceDevice: mlState.InferenceDevice,
+			Error:           strings.TrimSpace(mlState.Error),
+		}
+
+		shouldLog := false
+		detail := ""
+
+		h.anomalyTrendMu.Lock()
+		if h.mlDecisionHistory == nil {
+			h.mlDecisionHistory = make([]mlDecisionPoint, 0, 256)
+		}
+
+		if len(h.mlDecisionHistory) == 0 {
+			shouldLog = true
+		} else {
+			last := h.mlDecisionHistory[len(h.mlDecisionHistory)-1]
+			decisionChanged := strings.TrimSpace(last.Decision) != strings.TrimSpace(point.Decision)
+			availabilityChanged := last.Enabled != point.Enabled || last.Available != point.Available
+			classChanged := last.PredictedClass != point.PredictedClass
+			errorChanged := strings.TrimSpace(last.Error) != strings.TrimSpace(point.Error)
+			scoreChanged := math.Abs(last.Score-point.Score) >= 0.12
+			newMinuteAttack := !last.Timestamp.Equal(point.Timestamp) && point.Decision == "attack"
+			shouldLog = decisionChanged || availabilityChanged || classChanged || errorChanged || scoreChanged || newMinuteAttack
+		}
+
+		if len(h.mlDecisionHistory) > 0 && h.mlDecisionHistory[len(h.mlDecisionHistory)-1].Timestamp.Equal(point.Timestamp) {
+			h.mlDecisionHistory[len(h.mlDecisionHistory)-1] = point
+		} else {
+			h.mlDecisionHistory = append(h.mlDecisionHistory, point)
+		}
+
+		if len(h.mlDecisionHistory) > mlDecisionHistoryCap {
+			h.mlDecisionHistory = h.mlDecisionHistory[len(h.mlDecisionHistory)-mlDecisionHistoryCap:]
+		}
+
+		if shouldLog {
+			detail = formatMLDecisionLogDetail(mlState)
+		}
+		h.anomalyTrendMu.Unlock()
+
+		if shouldLog && strings.TrimSpace(detail) != "" {
+			h.logger.Log("INFO", "-", "-", "ML", detail)
+		}
+	}
+
+	func (h *handlers) withAnomalyTrendHistory(snapshot models.TrafficAnomalySnapshot, trendLimit int) models.TrafficAnomalySnapshot {
+		if h == nil {
+			return snapshot
+		}
+		if trendLimit < 10 {
+			trendLimit = 10
+		}
+		if trendLimit > 1440 {
+			trendLimit = 1440
+		}
+
+		h.anomalyTrendMu.RLock()
+		defer h.anomalyTrendMu.RUnlock()
+
+		riskSeries := h.anomalyRiskHistory
+		if len(riskSeries) > trendLimit {
+			riskSeries = riskSeries[len(riskSeries)-trendLimit:]
+		}
+		if len(riskSeries) > 0 {
+			snapshot.RiskTrend = make([]models.TrafficAnomalyRiskPoint, len(riskSeries))
+			copy(snapshot.RiskTrend, riskSeries)
+		}
+
+		type detectorCandidate struct {
+			kind      string
+			latest    models.TrafficAnomalyDetectorPoint
+			points    []models.TrafficAnomalyDetectorPoint
+			hasSignal bool
+		}
+		candidates := make([]detectorCandidate, 0, len(h.anomalyDetectorHistory))
+		for kind, all := range h.anomalyDetectorHistory {
+			if len(all) == 0 {
+				continue
+			}
+			points := all
+			if len(points) > trendLimit {
+				points = points[len(points)-trendLimit:]
+			}
+			hasSignal := false
+			for _, p := range points {
+				if p.Score > 0 {
+					hasSignal = true
+					break
+				}
+			}
+			if !hasSignal {
+				continue
+			}
+			latest := points[len(points)-1]
+			candidates = append(candidates, detectorCandidate{kind: kind, latest: latest, points: points, hasSignal: true})
+		}
+
+		sort.SliceStable(candidates, func(i, j int) bool {
+			if candidates[i].latest.Score == candidates[j].latest.Score {
+				return candidates[i].latest.Timestamp.After(candidates[j].latest.Timestamp)
+			}
+			return candidates[i].latest.Score > candidates[j].latest.Score
+		})
+
+		maxSeries := 8
+		if len(candidates) < maxSeries {
+			maxSeries = len(candidates)
+		}
+
+		detectorTrends := make([]models.TrafficAnomalyDetectorTrend, 0, maxSeries)
+		for i := 0; i < maxSeries; i++ {
+			item := candidates[i]
+			cp := make([]models.TrafficAnomalyDetectorPoint, len(item.points))
+			copy(cp, item.points)
+			detectorTrends = append(detectorTrends, models.TrafficAnomalyDetectorTrend{
+				Type:           item.kind,
+				Label:          detectorDisplayLabel(item.kind),
+				LatestScore:    clampInt(item.latest.Score, 0, 100),
+				LatestSeverity: item.latest.Severity,
+				Points:         cp,
+			})
+		}
+
+		if len(detectorTrends) == 0 {
+			for _, a := range snapshot.Anomalies {
+				detectorTrends = append(detectorTrends, models.TrafficAnomalyDetectorTrend{
+					Type:           a.Type,
+					Label:          detectorDisplayLabel(a.Type),
+					LatestScore:    clampInt(a.Score, 0, 100),
+					LatestSeverity: a.Severity,
+					Points: []models.TrafficAnomalyDetectorPoint{
+						{Timestamp: snapshot.GeneratedAt, Score: clampInt(a.Score, 0, 100), Severity: a.Severity},
+					},
+				})
+				if len(detectorTrends) >= 8 {
+					break
+				}
+			}
+		}
+
+		snapshot.DetectorTrends = detectorTrends
+		return snapshot
+	}
 			Timestamp: bucket,
 			Score:     0,
 			Severity:  "info",
@@ -3297,6 +3407,83 @@ func summarizeHalfOpenConnections(conns []models.Connection) (halfOpen int, obse
 		ratio = safeRatio(float64(halfOpen), float64(observedTCP))
 	}
 	return halfOpen, observedTCP, ratio
+}
+
+func appendWarningMessage(base string, addition string) string {
+	base = strings.TrimSpace(base)
+	addition = strings.TrimSpace(addition)
+	if addition == "" {
+		return base
+	}
+	if base == "" {
+		return addition
+	}
+	if strings.Contains(strings.ToLower(base), strings.ToLower(addition)) {
+		return base
+	}
+	return base + "; " + addition
+}
+
+func hasStrongScanSignal(anomalies []models.TrafficAnomaly, halfOpen int, observedTCP int, fanoutPorts int) bool {
+	for _, anomaly := range anomalies {
+		kind := strings.ToLower(strings.TrimSpace(anomaly.Type))
+		switch kind {
+		case "source_port_scan", "source_target_sweep", "coordinated_scan_campaign", "port_fanout", "half_open_connection_pressure", "destination_hotspot":
+			if anomaly.Score >= 44 || strings.EqualFold(strings.TrimSpace(anomaly.Severity), "critical") {
+				return true
+			}
+		}
+	}
+
+	if fanoutPorts >= 10 {
+		return true
+	}
+	if observedTCP >= 8 && halfOpen >= 4 {
+		halfOpenRatio := safeRatio(float64(halfOpen), float64(observedTCP))
+		if halfOpenRatio >= 0.24 {
+			return true
+		}
+	}
+	return false
+}
+
+func formatMLDecisionLogDetail(ml *models.TrafficAnomalyMLPrediction) string {
+	if ml == nil {
+		return "ML-Decision: UNAVAILABLE"
+	}
+
+	decision := strings.ToUpper(strings.TrimSpace(ml.Decision))
+	if decision == "" {
+		decision = "UNAVAILABLE"
+	}
+
+	if !ml.Enabled {
+		reason := strings.TrimSpace(ml.Error)
+		if reason == "" {
+			reason = "disabled"
+		}
+		return fmt.Sprintf("ML-Decision: %s enabled=false reason=%s", decision, reason)
+	}
+
+	if !ml.Available {
+		reason := strings.TrimSpace(ml.Error)
+		if reason == "" {
+			reason = "inference unavailable"
+		}
+		return fmt.Sprintf("ML-Decision: %s enabled=true available=false reason=%s", decision, reason)
+	}
+
+	detail := fmt.Sprintf(
+		"ML-Decision: %s enabled=true available=true score=%.3f threshold=%.3f class=%d",
+		decision,
+		ml.Score,
+		ml.Threshold,
+		ml.PredictedClass,
+	)
+	if warning := strings.TrimSpace(ml.Warning); warning != "" {
+		detail += " warning=" + warning
+	}
+	return detail
 }
 
 func normalizeTrafficIP(ip string) string {
