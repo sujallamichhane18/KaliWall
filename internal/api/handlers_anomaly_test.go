@@ -8,6 +8,7 @@ import (
 
 	"kaliwall/internal/firewall"
 	"kaliwall/internal/logger"
+	"kaliwall/internal/models"
 )
 
 func newAnomalyTestHandlers(t *testing.T) (*handlers, func()) {
@@ -449,5 +450,56 @@ func TestComputeRobustSeriesStatsCapturesMedianAndSpread(t *testing.T) {
 	}
 	if stats.P90 <= stats.Median {
 		t.Fatalf("expected p90 to exceed median, got p90=%.3f median=%.3f", stats.P90, stats.Median)
+	}
+}
+
+func TestBuildTrafficAnomalySnapshotDetectsFloodSignature(t *testing.T) {
+	h, cleanup := newAnomalyTestHandlers(t)
+	defer cleanup()
+
+	for i := 0; i < 260; i++ {
+		h.logger.Log("ALLOW", "198.51.100.250", "10.10.0.25", "tcp", "dpi:packet flood sample")
+	}
+	for i := 0; i < 36; i++ {
+		src := fmt.Sprintf("203.0.113.%d", (i%8)+1)
+		dst := fmt.Sprintf("10.10.0.%d", (i%6)+40)
+		h.logger.Log("ALLOW", src, dst, "tcp", "normal baseline traffic")
+	}
+
+	snapshot := h.buildTrafficAnomalySnapshot(1200, 15)
+	if snapshot.TotalAnomalies == 0 {
+		t.Fatalf("expected anomalies, got none")
+	}
+
+	found := false
+	for _, a := range snapshot.Anomalies {
+		if a.Type == "flood_signature" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected flood_signature anomaly, got %#v", snapshot.Anomalies)
+	}
+}
+
+func TestSummarizeHalfOpenConnectionsUsesRelevantTCPOnly(t *testing.T) {
+	conns := []models.Connection{
+		{Protocol: "tcp", RemoteIP: "0.0.0.0", State: "LISTEN"},
+		{Protocol: "tcp", RemoteIP: "203.0.113.10", State: "SYN_RECV"},
+		{Protocol: "tcp6", RemoteIP: "2001:db8::1", State: "SYN_SENT"},
+		{Protocol: "udp", RemoteIP: "203.0.113.11", State: "ESTABLISHED"},
+		{Protocol: "tcp", RemoteIP: "198.51.100.44", State: "ESTABLISHED"},
+	}
+
+	halfOpen, observedTCP, ratio := summarizeHalfOpenConnections(conns)
+	if halfOpen != 2 {
+		t.Fatalf("expected 2 half-open tcp connections, got %d", halfOpen)
+	}
+	if observedTCP != 3 {
+		t.Fatalf("expected 3 observed tcp connections, got %d", observedTCP)
+	}
+	if ratio < 0.66 || ratio > 0.67 {
+		t.Fatalf("expected ratio close to 2/3, got %.4f", ratio)
 	}
 }
