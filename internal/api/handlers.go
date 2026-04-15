@@ -2154,6 +2154,8 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 				mlPrediction.Decision = "unavailable"
 			}
 
+			enforceMLScanDecisionOverride(mlPrediction, anomalies)
+
 			if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
 				severity := "warning"
 				if pred.Score >= 0.85 {
@@ -2423,6 +2425,109 @@ func buildMLAnomalyFeatureVector(
 	return featureMap
 }
 
+func scanSignalThreshold(kind string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "source_port_scan":
+		return 34, true
+	case "source_target_sweep":
+		return 34, true
+	case "coordinated_scan_campaign":
+		return 30, true
+	case "half_open_connection_pressure":
+		return 40, true
+	case "port_fanout":
+		return 40, true
+	case "flood_signature":
+		return 60, true
+	default:
+		return 0, false
+	}
+}
+
+func strongestScanSignal(anomalies []models.TrafficAnomaly) (kind string, score int, severity string, ok bool) {
+	bestScore := -1
+	bestSeverityRank := -1
+
+	for _, anomaly := range anomalies {
+		currentKind := strings.ToLower(strings.TrimSpace(anomaly.Type))
+		minScore, tracked := scanSignalThreshold(currentKind)
+		if !tracked {
+			continue
+		}
+
+		currentScore := clampInt(anomaly.Score, 0, 100)
+		currentSeverity := strings.ToLower(strings.TrimSpace(anomaly.Severity))
+		switch currentSeverity {
+		case "critical":
+			minScore -= 8
+		case "warning":
+			minScore -= 4
+		}
+		if minScore < 18 {
+			minScore = 18
+		}
+		if currentScore < minScore {
+			continue
+		}
+
+		severityRank := 0
+		switch currentSeverity {
+		case "critical":
+			severityRank = 2
+		case "warning":
+			severityRank = 1
+		}
+
+		if currentScore > bestScore || (currentScore == bestScore && severityRank > bestSeverityRank) {
+			bestScore = currentScore
+			bestSeverityRank = severityRank
+			kind = currentKind
+			score = currentScore
+			severity = currentSeverity
+		}
+	}
+
+	if bestScore < 0 {
+		return "", 0, "", false
+	}
+	return kind, score, severity, true
+}
+
+func enforceMLScanDecisionOverride(mlPrediction *models.TrafficAnomalyMLPrediction, anomalies []models.TrafficAnomaly) {
+	if mlPrediction == nil || !mlPrediction.Enabled || len(anomalies) == 0 {
+		return
+	}
+
+	kind, score, severity, ok := strongestScanSignal(anomalies)
+	if !ok {
+		return
+	}
+
+	if !mlPrediction.Available && strings.EqualFold(strings.TrimSpace(mlPrediction.Decision), "unavailable") {
+		return
+	}
+
+	mlPrediction.Decision = "attack"
+	mlPrediction.IsAnomaly = true
+	mlPrediction.PredictedClass = 1
+	if mlPrediction.Threshold <= 0 {
+		mlPrediction.Threshold = 0.5
+	}
+	minScore := math.Min(0.99, math.Max(mlPrediction.Threshold+0.06, float64(score)/100.0))
+	if mlPrediction.Score < minScore {
+		mlPrediction.Score = minScore
+	}
+
+	note := fmt.Sprintf("scan-signal override: %s (%s score=%d)", kind, severity, score)
+	if strings.TrimSpace(mlPrediction.Warning) == "" {
+		mlPrediction.Warning = note
+		return
+	}
+	if !strings.Contains(strings.ToLower(mlPrediction.Warning), "scan-signal override") {
+		mlPrediction.Warning += "; " + note
+	}
+}
+
 func (h *handlers) defaultMLPredictionState() *models.TrafficAnomalyMLPrediction {
 	if h == nil || h.mlAnomaly == nil {
 		return nil
@@ -2466,6 +2571,8 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 	protocolSet := make(map[string]struct{})
 	sourceWindow := make(map[string]int)
 	destinationWindow := make(map[string]int)
+	sourcePorts := make(map[string]map[string]struct{})
+	sourceTargets := make(map[string]map[string]struct{})
 
 	for _, entry := range entries {
 		if entry.Timestamp.Before(windowStart) {
@@ -2483,11 +2590,23 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		}
 
 		src := normalizeTrafficIP(entry.SrcIP)
+		dst := normalizeTrafficIP(entry.DstIP)
 		if src != "" {
 			sourceSet[src] = struct{}{}
 			sourceWindow[src]++
+			if dst != "" {
+				if _, ok := sourceTargets[src]; !ok {
+					sourceTargets[src] = make(map[string]struct{})
+				}
+				sourceTargets[src][dst] = struct{}{}
+			}
+			if dstPort := parseDestinationPortFromDetail(entry.Detail); dstPort != "" {
+				if _, ok := sourcePorts[src]; !ok {
+					sourcePorts[src] = make(map[string]struct{})
+				}
+				sourcePorts[src][dstPort] = struct{}{}
+			}
 		}
-		dst := normalizeTrafficIP(entry.DstIP)
 		if dst != "" {
 			destinationSet[dst] = struct{}{}
 			destinationWindow[dst]++
@@ -2508,6 +2627,7 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 
 			remote := normalizeTrafficIP(conn.RemoteIP)
 			local := normalizeTrafficIP(conn.LocalIP)
+			localPort := strings.TrimSpace(conn.LocalPort)
 			if remote == "" && local == "" {
 				continue
 			}
@@ -2522,6 +2642,18 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 			if remote != "" {
 				sourceSet[remote] = struct{}{}
 				sourceWindow[remote]++
+				if local != "" {
+					if _, ok := sourceTargets[remote]; !ok {
+						sourceTargets[remote] = make(map[string]struct{})
+					}
+					sourceTargets[remote][local] = struct{}{}
+				}
+				if localPort != "" {
+					if _, ok := sourcePorts[remote]; !ok {
+						sourcePorts[remote] = make(map[string]struct{})
+					}
+					sourcePorts[remote][localPort] = struct{}{}
+				}
 			}
 			if local != "" {
 				destinationSet[local] = struct{}{}
@@ -2631,6 +2763,70 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		}
 	}
 
+	type learningScanCandidate struct {
+		SourceIP      string
+		UniquePorts   int
+		UniqueTargets int
+		Events        int
+	}
+	bestLearningScan := learningScanCandidate{}
+	bestLearningWeight := 0
+	for src, portsSet := range sourcePorts {
+		portCount := len(portsSet)
+		targetCount := len(sourceTargets[src])
+		events := sourceWindow[src]
+		if events < 8 || portCount < 6 {
+			continue
+		}
+		if targetCount == 0 {
+			targetCount = 1
+		}
+		weight := portCount*3 + targetCount*2 + events/2
+		if weight > bestLearningWeight {
+			bestLearningWeight = weight
+			bestLearningScan = learningScanCandidate{SourceIP: src, UniquePorts: portCount, UniqueTargets: targetCount, Events: events}
+		}
+	}
+	if bestLearningScan.SourceIP != "" {
+		severity := "warning"
+		if bestLearningScan.UniquePorts >= 14 || bestLearningScan.UniqueTargets >= 10 || bestLearningScan.Events >= 42 {
+			severity = "critical"
+		}
+		score := clampInt(int(30+float64(bestLearningScan.UniquePorts)*2.6+float64(bestLearningScan.UniqueTargets)*1.6+safeRatio(float64(bestLearningScan.Events), 2)), 1, 100)
+
+		snapshot.Anomalies = append(snapshot.Anomalies, models.TrafficAnomaly{
+			ID:           "source_port_scan-learning",
+			Type:         "source_port_scan",
+			Severity:     severity,
+			Score:        score,
+			Title:        "Early Scan Signature",
+			Summary:      fmt.Sprintf("Baseline is still learning, but source %s touched %d ports across %d targets in %d events.", bestLearningScan.SourceIP, bestLearningScan.UniquePorts, bestLearningScan.UniqueTargets, bestLearningScan.Events),
+			SampleCount:  bestLearningScan.Events,
+			CurrentValue: float64(bestLearningScan.UniquePorts),
+			Evidence: map[string]interface{}{
+				"learning_mode":            true,
+				"source_ip":                bestLearningScan.SourceIP,
+				"unique_dst_ports":         bestLearningScan.UniquePorts,
+				"unique_dst_targets":       bestLearningScan.UniqueTargets,
+				"source_event_count":       bestLearningScan.Events,
+				"window_minutes":           windowSpan,
+			},
+		})
+		snapshot.TotalAnomalies = len(snapshot.Anomalies)
+		if severity == "critical" {
+			if snapshot.Status != "critical" {
+				snapshot.Status = "high"
+			}
+			snapshot.RiskScore = clampInt(int(math.Max(float64(snapshot.RiskScore), 62)), 0, 100)
+		} else if snapshot.Status == "learning" {
+			snapshot.Status = "elevated"
+			snapshot.RiskScore = clampInt(int(math.Max(float64(snapshot.RiskScore), 44)), 0, 100)
+		}
+		if strings.TrimSpace(snapshot.LearningMessage) != "" && !strings.Contains(strings.ToLower(snapshot.LearningMessage), "scan heuristic") {
+			snapshot.LearningMessage += "; early scan heuristic active"
+		}
+	}
+
 	featureVector := buildMLAnomalyFeatureVector(
 		snapshot.WindowMinutes,
 		windowTotal,
@@ -2690,6 +2886,7 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		}
 		snapshot.ML.Warning += "using active connection telemetry for inference"
 	}
+	enforceMLScanDecisionOverride(snapshot.ML, snapshot.Anomalies)
 	snapshot.ML.Error = ""
 
 	if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
