@@ -197,6 +197,7 @@ type TrafficAnomalyDetectorTrend struct {
 type TrafficAnomalyMLPrediction struct {
 	Enabled        bool    `json:"enabled"`
 	Available      bool    `json:"available"`
+	Decision       string  `json:"decision,omitempty"`
 	Score          float64 `json:"score,omitempty"`
 	Threshold      float64 `json:"threshold,omitempty"`
 	IsAnomaly      bool    `json:"is_anomaly,omitempty"`
