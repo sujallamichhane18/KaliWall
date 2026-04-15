@@ -18,6 +18,8 @@ import (
 
 const (
 	defaultScriptPath   = "machinelearning/infer_xgboost.py"
+	defaultModelJSONPath = "machinelearning/xgboost_anomaly_model.json"
+	defaultModelUBJPath  = "machinelearning/xgboost_anomaly_model.ubj"
 	defaultModelPath    = "machinelearning/xgboost_anomaly_model.joblib"
 	defaultMetadataPath = "machinelearning/training_metadata.json"
 	defaultTimeout      = 1500 * time.Millisecond
@@ -88,14 +90,14 @@ func NewAnomalyPredictorFromEnv() *AnomalyPredictor {
 	}
 
 	scriptPath := resolveExistingPath(strings.TrimSpace(os.Getenv("KALIWALL_ML_SCRIPT_PATH")), defaultScriptPath)
-	modelPath := resolveExistingPath(strings.TrimSpace(os.Getenv("KALIWALL_ML_MODEL_PATH")), defaultModelPath)
+	modelPath := resolveModelPath(strings.TrimSpace(os.Getenv("KALIWALL_ML_MODEL_PATH")))
 	metadataPath := resolveExistingPath(strings.TrimSpace(os.Getenv("KALIWALL_ML_METADATA_PATH")), defaultMetadataPath)
 	if scriptPath == "" {
 		predictor.disableReason = "ML inference script not found"
 		return predictor
 	}
 	if modelPath == "" {
-		predictor.disableReason = "ML model file not found"
+		predictor.disableReason = "ML model file not found (.json/.ubj/.joblib)"
 		return predictor
 	}
 
@@ -317,6 +319,26 @@ func resolveExistingPath(preferred string, fallback string) string {
 		return ""
 	}
 	return firstExistingFile(fallback)
+}
+
+func resolveModelPath(preferred string) string {
+	if preferred != "" {
+		if resolved := firstExistingFile(preferred); resolved != "" {
+			return resolved
+		}
+	}
+
+	candidates := []string{
+		defaultModelJSONPath,
+		defaultModelUBJPath,
+		defaultModelPath,
+	}
+	for _, candidate := range candidates {
+		if resolved := firstExistingFile(candidate); resolved != "" {
+			return resolved
+		}
+	}
+	return ""
 }
 
 func firstExistingFile(candidate string) string {

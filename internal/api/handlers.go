@@ -632,9 +632,9 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		snapshot.HistorySamples = 0
 		snapshot.Status = "learning"
 		snapshot.LearningMessage = fmt.Sprintf("UEBA baseline learning: 0/%d samples, 0/%d min coverage", minHistorySamples, minHistoryDurationMinutes)
-		if snapshot.ML != nil && snapshot.ML.Enabled {
-			snapshot.ML.Available = false
-			snapshot.ML.Error = "insufficient traffic samples for ML inference"
+		snapshot = h.applyMLPredictionDuringLearning(snapshot, entries, conns, windowStart)
+		if snapshot.ML != nil && snapshot.ML.Enabled && !snapshot.ML.Available && strings.TrimSpace(snapshot.ML.Error) == "" {
+			snapshot.ML.Error = "insufficient traffic telemetry for ML inference"
 		}
 		return snapshot
 	}
@@ -2447,6 +2447,7 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 	windowBlocked := 0
 	windowSuspicious := 0
 	currentMinuteCount := 0
+	usedConnTelemetry := false
 	currentBucket := snapshot.GeneratedAt.UTC().Unix() / 60
 	sourceSet := make(map[string]struct{})
 	destinationSet := make(map[string]struct{})
@@ -2485,9 +2486,46 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		}
 	}
 
+	if windowTotal == 0 && len(conns) > 0 {
+		usedConnTelemetry = true
+		for _, conn := range conns {
+			state := strings.ToUpper(strings.TrimSpace(conn.State))
+			if state == "" || state == "LISTEN" {
+				continue
+			}
+
+			remote := normalizeTrafficIP(conn.RemoteIP)
+			local := normalizeTrafficIP(conn.LocalIP)
+			if remote == "" && local == "" {
+				continue
+			}
+
+			windowTotal++
+			currentMinuteCount++
+
+			if state == "SYN_SENT" || state == "SYN_RECV" {
+				windowSuspicious++
+			}
+
+			if remote != "" {
+				sourceSet[remote] = struct{}{}
+				sourceWindow[remote]++
+			}
+			if local != "" {
+				destinationSet[local] = struct{}{}
+				destinationWindow[local]++
+			}
+
+			proto := normalizeTrafficProtocol(conn.Protocol)
+			if proto != "" {
+				protocolSet[proto] = struct{}{}
+			}
+		}
+	}
+
 	if windowTotal <= 0 {
 		snapshot.ML.Available = false
-		snapshot.ML.Error = "insufficient traffic in current window for ML inference"
+		snapshot.ML.Error = "insufficient traffic telemetry in current window for ML inference"
 		return snapshot
 	}
 
@@ -2623,6 +2661,12 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 	snapshot.ML.FeatureCount = pred.FeatureCount
 	snapshot.ML.InferenceDevice = pred.InferenceDevice
 	snapshot.ML.Warning = strings.TrimSpace(pred.Warning)
+	if usedConnTelemetry {
+		if snapshot.ML.Warning != "" {
+			snapshot.ML.Warning += "; "
+		}
+		snapshot.ML.Warning += "using active connection telemetry for inference"
+	}
 	snapshot.ML.Error = ""
 
 	if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
