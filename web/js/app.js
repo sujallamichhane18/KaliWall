@@ -2484,9 +2484,12 @@
         var generatedAt = document.getElementById("anomalyGeneratedAt");
         var historyBadge = document.getElementById("anomalyHistoryBadge");
         var learningBadge = document.getElementById("anomalyLearningBadge");
+        var modelBadge = document.getElementById("anomalyModelBadge");
+        var modelInfoBadge = document.getElementById("anomalyModelInfoBadge");
         var tableBody = document.querySelector("#trafficAnomalyTable tbody");
         var logsBadge = document.getElementById("logsAnomalyCount");
         var socRisk = document.getElementById("socAnomalyRisk");
+        var socMl = document.getElementById("socMlState");
 
         if (!snapshot) {
             if (riskBadge) {
@@ -2507,12 +2510,25 @@
             if (learningBadge) {
                 learningBadge.style.display = "none";
             }
+            if (modelBadge) {
+                modelBadge.className = "badge badge-reject";
+                modelBadge.textContent = "ML: unavailable";
+                modelBadge.title = errorMessage || "ML anomaly model state unavailable";
+            }
+            if (modelInfoBadge) {
+                modelInfoBadge.className = "badge badge-disabled";
+                modelInfoBadge.textContent = "Model: no telemetry";
+                modelInfoBadge.title = errorMessage || "ML anomaly model state unavailable";
+            }
             if (logsBadge) {
                 logsBadge.className = "badge badge-disabled";
                 logsBadge.textContent = "0 anomalies";
             }
             if (socRisk) {
                 socRisk.textContent = "UNAVAILABLE (0)";
+            }
+            if (socMl) {
+                socMl.textContent = "UNAVAILABLE";
             }
             renderAnomalyRiskTrend(null);
             renderAnomalyDetectorTrend(null);
@@ -2572,6 +2588,68 @@
                 learningBadge.style.display = "inline-flex";
                 learningBadge.className = "badge badge-reject";
                 learningBadge.textContent = learningMessage;
+            }
+        }
+
+        var ml = snapshot.ml && typeof snapshot.ml === "object" ? snapshot.ml : null;
+        if (!ml || ml.enabled === false) {
+            if (modelBadge) {
+                modelBadge.className = "badge badge-disabled";
+                modelBadge.textContent = "ML: disabled";
+                modelBadge.title = "ML anomaly model is disabled or not configured";
+            }
+            if (modelInfoBadge) {
+                modelInfoBadge.className = "badge badge-disabled";
+                modelInfoBadge.textContent = "Model: not configured";
+                modelInfoBadge.title = "Enable KALIWALL_ML_ANOMALY_ENABLED and configure model paths";
+            }
+            if (socMl) {
+                socMl.textContent = "DISABLED";
+            }
+        } else if (ml.available) {
+            var mlScore = Number(ml.score || 0);
+            var mlThreshold = Number(ml.threshold || 0.5);
+            if (!isFinite(mlScore)) mlScore = 0;
+            if (!isFinite(mlThreshold)) mlThreshold = 0.5;
+            mlScore = Math.max(0, Math.min(1, mlScore));
+            mlThreshold = Math.max(0, Math.min(1, mlThreshold));
+
+            var scorePct = Math.round(mlScore * 100);
+            var thresholdPct = Math.round(mlThreshold * 100);
+            var mlIsAnomaly = ml.is_anomaly === true || ml.predicted_class === 1;
+            var warningText = String(ml.warning || "").trim();
+
+            if (modelBadge) {
+                modelBadge.className = "badge " + (mlIsAnomaly ? "badge-reject" : "badge-enabled");
+                modelBadge.textContent = mlIsAnomaly ? "ML: anomaly" : "ML: running";
+                modelBadge.title = mlIsAnomaly
+                    ? "Model flagged anomaly at " + scorePct + "% (threshold " + thresholdPct + "%)"
+                    : "Model inference active at " + scorePct + "% (threshold " + thresholdPct + "%)";
+            }
+            if (modelInfoBadge) {
+                modelInfoBadge.className = "badge " + (mlIsAnomaly ? "badge-reject" : "badge-disabled");
+                modelInfoBadge.textContent = "Model: " + scorePct + "% / " + thresholdPct + "%";
+                modelInfoBadge.title = warningText || ("score=" + scorePct + "%, threshold=" + thresholdPct + "%, features=" + (ml.feature_count || 0));
+            }
+            if (socMl) {
+                socMl.textContent = (mlIsAnomaly ? "ALERT " : "RUNNING ") + "(" + scorePct + "%)";
+            }
+        } else {
+            var mlError = String(ml.error || ml.warning || "inference unavailable").trim();
+            if (mlError.length > 100) mlError = mlError.slice(0, 97) + "...";
+
+            if (modelBadge) {
+                modelBadge.className = "badge badge-reject";
+                modelBadge.textContent = "ML: error";
+                modelBadge.title = mlError;
+            }
+            if (modelInfoBadge) {
+                modelInfoBadge.className = "badge badge-reject";
+                modelInfoBadge.textContent = "Model: " + (mlError || "unavailable");
+                modelInfoBadge.title = mlError;
+            }
+            if (socMl) {
+                socMl.textContent = "ERROR";
             }
         }
 

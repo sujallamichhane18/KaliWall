@@ -100,6 +100,7 @@
                     <div class="soc-kpi-card"><span class="label">Firewall</span><span class="value" id="socFwState">ACTIVE</span></div>
                     <div class="soc-kpi-card"><span class="label">DPI</span><span class="value" id="socDpiState">ON</span></div>
                     <div class="soc-kpi-card"><span class="label">Traffic Anomaly Risk</span><span class="value" id="socAnomalyRisk">NORMAL (0)</span></div>
+                    <div class="soc-kpi-card"><span class="label">ML Anomaly Model</span><span class="value" id="socMlState">CHECKING</span></div>
                     <div class="soc-kpi-card"><span class="label">Decode Errors</span><span class="value" id="socDecodeErrors">0</span></div>
                     <div class="soc-kpi-card"><span class="label">TI Feed</span><span class="value" id="socTiFreshness">-</span></div>
                     <div class="soc-kpi-card"><span class="label">Events/sec</span><span class="value" id="socEventsRate">0</span></div>
@@ -861,6 +862,8 @@
                         <span class="badge badge-disabled" id="anomalyGeneratedAt">Updated: -</span>
                         <span class="badge badge-disabled" id="anomalyHistoryBadge">History: -</span>
                         <span class="badge badge-disabled" id="anomalyLearningBadge" style="display:none">Learning mode</span>
+                        <span class="badge badge-disabled" id="anomalyModelBadge">ML: checking...</span>
+                        <span class="badge badge-disabled" id="anomalyModelInfoBadge">Model: -</span>
                         <button class="btn btn-secondary" id="btnRefreshAnomalies">
                             <i class="fa-solid fa-chart-line"></i> Analyze Now
                         </button>

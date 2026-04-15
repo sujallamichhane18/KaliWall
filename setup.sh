@@ -17,6 +17,8 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+ML_VENV_DIR=""
+
 echo -e "${GREEN}=======================================${NC}"
 echo -e "${GREEN}  KaliWall  Firewall Setup${NC}"
 echo -e "${GREEN}=======================================${NC}"
@@ -32,6 +34,16 @@ run_as_root() {
     else
         sudo "$@"
     fi
+}
+
+append_missing_package() {
+    local pkg="$1"
+    for existing in "${missing_packages[@]:-}"; do
+        if [[ "${existing}" == "${pkg}" ]]; then
+            return 0
+        fi
+    done
+    missing_packages+=("${pkg}")
 }
 
 ensure_apt_packages() {
@@ -97,6 +109,54 @@ install_go() {
     echo -e "${GREEN}[+] Go installed: $(go version)${NC}"
 }
 
+setup_ml_python_env() {
+    echo -e "${YELLOW}[*] Preparing ML Python runtime...${NC}"
+
+    local python_cmd=""
+    if command -v python3 &> /dev/null; then
+        python_cmd="$(command -v python3)"
+    elif command -v python &> /dev/null; then
+        python_cmd="$(command -v python)"
+    fi
+
+    if [[ -z "${python_cmd}" ]]; then
+        echo -e "${RED}[!] Python 3 is required for ML inference but was not found${NC}"
+        exit 1
+    fi
+
+    local venv_dir="${SCRIPT_DIR}/.venv-ml"
+    local venv_python="${venv_dir}/bin/python"
+    local requirements_file="${SCRIPT_DIR}/machinelearning/requirements.txt"
+
+    "${python_cmd}" -m venv "${venv_dir}"
+
+    echo -e "${YELLOW}[*] Installing ML Python dependencies...${NC}"
+    "${venv_python}" -m pip install --upgrade pip >/dev/null
+    if [[ -f "${requirements_file}" ]]; then
+        "${venv_python}" -m pip install -r "${requirements_file}"
+    else
+        "${venv_python}" -m pip install numpy joblib xgboost
+    fi
+
+    if ! "${venv_python}" - <<'PY'
+import importlib
+for module_name in ("numpy", "joblib", "xgboost"):
+    importlib.import_module(module_name)
+print("ok")
+PY
+    then
+        echo -e "${RED}[!] ML Python dependency validation failed${NC}"
+        exit 1
+    fi
+
+    ML_VENV_DIR="${venv_dir}"
+    echo -e "${GREEN}[+] ML runtime ready: ${venv_python}${NC}"
+
+    if [[ ! -f "${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib" ]]; then
+        echo -e "${YELLOW}[!] Model file not found yet: machinelearning/xgboost_anomaly_model.joblib${NC}"
+    fi
+}
+
 missing_packages=()
 for dependency in curl tar; do
     if command -v "${dependency}" &> /dev/null; then
@@ -105,6 +165,24 @@ for dependency in curl tar; do
         missing_packages+=("${dependency}")
     fi
 done
+
+if command -v python3 &> /dev/null; then
+    echo -e "${GREEN}[+] Found dependency: python3 ($(command -v python3))${NC}"
+else
+    append_missing_package "python3"
+fi
+
+if command -v pip3 &> /dev/null; then
+    echo -e "${GREEN}[+] Found dependency: pip3 ($(command -v pip3))${NC}"
+else
+    append_missing_package "python3-pip"
+fi
+
+if python3 -m venv --help >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] Found dependency: python3-venv${NC}"
+else
+    append_missing_package "python3-venv"
+fi
 
 ensure_apt_packages "${missing_packages[@]}"
 
@@ -123,6 +201,9 @@ fi
 # 2. Navigate to project directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# 2.5. Prepare Python ML runtime used by anomaly model integration
+setup_ml_python_env
 
 # 3. Download dependencies
 echo -e "${YELLOW}[*] Downloading Go dependencies...${NC}"
@@ -148,6 +229,15 @@ install_service() {
 
     local WEB_INSTALL_ROOT="/usr/local/share/kaliwall"
     local WEB_INSTALL_DIR="${WEB_INSTALL_ROOT}/web"
+    local ML_PYTHON="${SCRIPT_DIR}/.venv-ml/bin/python"
+
+    if [[ ! -x "${ML_PYTHON}" ]]; then
+        if command -v python3 &> /dev/null; then
+            ML_PYTHON="$(command -v python3)"
+        elif command -v python &> /dev/null; then
+            ML_PYTHON="$(command -v python)"
+        fi
+    fi
 
     echo -e "${YELLOW}[*] Installing web assets to ${WEB_INSTALL_DIR}...${NC}"
     run_as_root mkdir -p "${WEB_INSTALL_ROOT}"
@@ -165,6 +255,11 @@ Type=simple
 WorkingDirectory=${SCRIPT_DIR}
 ExecStart=${SCRIPT_DIR}/kaliwall
 Environment=KALIWALL_WEB_DIR=${WEB_INSTALL_DIR}
+Environment="KALIWALL_ML_ANOMALY_ENABLED=1"
+Environment="KALIWALL_ML_PYTHON_CMD=${ML_PYTHON}"
+Environment="KALIWALL_ML_SCRIPT_PATH=${SCRIPT_DIR}/machinelearning/infer_xgboost.py"
+Environment="KALIWALL_ML_MODEL_PATH=${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib"
+Environment="KALIWALL_ML_METADATA_PATH=${SCRIPT_DIR}/machinelearning/training_metadata.json"
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -191,6 +286,9 @@ echo ""
 echo -e "${GREEN}[+] Setup complete${NC}"
 echo -e "${GREEN}[+] Binary: ./kaliwall${NC}"
 echo -e "${GREEN}[+] CLI:    ./kaliwall-cli${NC}"
+if [[ -n "${ML_VENV_DIR}" ]]; then
+    echo -e "${GREEN}[+] ML Python env: ${ML_VENV_DIR}/bin/python${NC}"
+fi
 echo -e "${GREEN}[+] Next:   ./start.sh${NC}"
 echo -e "${GREEN}[+] Logs:   ./start.sh --logs${NC}"
 echo -e "${GREEN}[+] Follow: ./start.sh --logs-follow${NC}"

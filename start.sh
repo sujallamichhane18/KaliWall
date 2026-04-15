@@ -10,6 +10,7 @@
 #   ./start.sh --logs-follow   # follow daemon log in real time
 #   ./start.sh --service       # start systemd service
 #   ./start.sh --service-logs  # show service logs via journalctl
+#   ./start.sh --ml-status     # probe ML anomaly runtime and model health
 
 set -euo pipefail
 
@@ -23,10 +24,30 @@ cd "$SCRIPT_DIR"
 # Keep web UI path explicit so startup remains stable even if cwd handling changes.
 export KALIWALL_WEB_DIR="${KALIWALL_WEB_DIR:-${SCRIPT_DIR}/web}"
 
+# ML anomaly inference defaults.
+ML_VENV_PYTHON="${SCRIPT_DIR}/.venv-ml/bin/python"
+if [[ -z "${KALIWALL_ML_PYTHON_CMD:-}" ]]; then
+    if [[ -x "${ML_VENV_PYTHON}" ]]; then
+        export KALIWALL_ML_PYTHON_CMD="${ML_VENV_PYTHON}"
+    elif command -v python3 >/dev/null 2>&1; then
+        export KALIWALL_ML_PYTHON_CMD="$(command -v python3)"
+    elif command -v python >/dev/null 2>&1; then
+        export KALIWALL_ML_PYTHON_CMD="$(command -v python)"
+    else
+        export KALIWALL_ML_PYTHON_CMD="python3"
+    fi
+fi
+export KALIWALL_ML_ANOMALY_ENABLED="${KALIWALL_ML_ANOMALY_ENABLED:-1}"
+export KALIWALL_ML_SCRIPT_PATH="${KALIWALL_ML_SCRIPT_PATH:-${SCRIPT_DIR}/machinelearning/infer_xgboost.py}"
+export KALIWALL_ML_MODEL_PATH="${KALIWALL_ML_MODEL_PATH:-${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib}"
+export KALIWALL_ML_METADATA_PATH="${KALIWALL_ML_METADATA_PATH:-${SCRIPT_DIR}/machinelearning/training_metadata.json}"
+
 PID_FILE="kaliwall.pid"
 LOG_FILE="logs/kaliwall-daemon.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 DPI_ARGS=("--dpi" "--dpi-lite")
+ML_LAST_STATUS="unknown"
+ML_LAST_DETAIL="not checked"
 
 if [[ "${KALIWALL_DPI:-1}" == "0" ]]; then
     DPI_ARGS=()
@@ -48,7 +69,106 @@ Options:
   --logs-follow   Follow ${LOG_FILE}
   --service       Start systemd service kaliwall
   --service-logs  Show journal logs for systemd service
+  --ml-status     Probe ML anomaly runtime and model health
 EOF
+}
+
+command_reference_exists() {
+    local cmd="$1"
+    if [[ -z "$cmd" ]]; then
+        return 1
+    fi
+    if [[ "$cmd" == */* ]]; then
+        [[ -x "$cmd" ]]
+    else
+        command -v "$cmd" >/dev/null 2>&1
+    fi
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
+refresh_ml_status() {
+    ML_LAST_STATUS="unknown"
+    ML_LAST_DETAIL="not checked"
+
+    if [[ "${KALIWALL_ML_ANOMALY_ENABLED}" == "0" ]]; then
+        ML_LAST_STATUS="disabled"
+        ML_LAST_DETAIL="KALIWALL_ML_ANOMALY_ENABLED=0"
+        return 0
+    fi
+
+    if ! command_reference_exists "${KALIWALL_ML_PYTHON_CMD}"; then
+        ML_LAST_STATUS="not-ready"
+        ML_LAST_DETAIL="python command not found: ${KALIWALL_ML_PYTHON_CMD}"
+        return 0
+    fi
+
+    if [[ ! -f "${KALIWALL_ML_SCRIPT_PATH}" ]]; then
+        ML_LAST_STATUS="not-ready"
+        ML_LAST_DETAIL="script not found: ${KALIWALL_ML_SCRIPT_PATH}"
+        return 0
+    fi
+
+    if [[ ! -f "${KALIWALL_ML_MODEL_PATH}" ]]; then
+        ML_LAST_STATUS="not-ready"
+        ML_LAST_DETAIL="model not found: ${KALIWALL_ML_MODEL_PATH}"
+        return 0
+    fi
+
+    local payload
+    payload=$(printf '{"model_path":"%s","metadata_path":"%s","features":{}}' \
+        "$(json_escape "${KALIWALL_ML_MODEL_PATH}")" \
+        "$(json_escape "${KALIWALL_ML_METADATA_PATH}")")
+
+    local output
+    if ! output=$(printf '%s' "${payload}" | "${KALIWALL_ML_PYTHON_CMD}" "${KALIWALL_ML_SCRIPT_PATH}" 2>&1); then
+        ML_LAST_STATUS="error"
+        ML_LAST_DETAIL="${output}"
+        return 0
+    fi
+
+    if [[ "${output}" == *'"ok":true'* ]]; then
+        local score
+        local threshold
+        score=$(printf '%s' "${output}" | sed -n 's/.*"score":\([0-9.]*\).*/\1/p' | head -n 1)
+        threshold=$(printf '%s' "${output}" | sed -n 's/.*"threshold":\([0-9.]*\).*/\1/p' | head -n 1)
+        ML_LAST_STATUS="running"
+        if [[ -n "${score}" && -n "${threshold}" ]]; then
+            ML_LAST_DETAIL="score=${score}, threshold=${threshold}"
+        else
+            ML_LAST_DETAIL="model inference OK"
+        fi
+        return 0
+    fi
+
+    ML_LAST_STATUS="error"
+    ML_LAST_DETAIL="${output}"
+}
+
+print_ml_status() {
+    refresh_ml_status
+    case "${ML_LAST_STATUS}" in
+        running)
+            echo -e "${GREEN}[+] ML anomaly model: RUNNING (${ML_LAST_DETAIL})${NC}"
+            ;;
+        disabled)
+            echo -e "${YELLOW}[!] ML anomaly model: DISABLED (${ML_LAST_DETAIL})${NC}"
+            ;;
+        not-ready)
+            echo -e "${YELLOW}[!] ML anomaly model: NOT READY (${ML_LAST_DETAIL})${NC}"
+            ;;
+        error)
+            echo -e "${YELLOW}[!] ML anomaly model: ERROR (${ML_LAST_DETAIL})${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}[!] ML anomaly model: UNKNOWN (${ML_LAST_DETAIL})${NC}"
+            ;;
+    esac
 }
 
 is_running_pid() {
@@ -110,6 +230,7 @@ case "${1:-}" in
     --foreground)
         echo -e "${GREEN}[+] Starting KaliWall in foreground...${NC}"
         echo -e "${GREEN}[+] Web UI: http://localhost:8080${NC}"
+        print_ml_status
         echo -e "${YELLOW}[!] Run with sudo for live firewall integration${NC}"
         ./kaliwall "${DPI_ARGS[@]}"
         ;;
@@ -125,6 +246,7 @@ case "${1:-}" in
         fi
         rotate_log_if_needed
         echo -e "${GREEN}[+] Starting KaliWall in daemon mode...${NC}"
+        print_ml_status
         nohup ./kaliwall "${DPI_ARGS[@]}" > "$LOG_FILE" 2>&1 &
         DAEMON_PID=$!
         echo "$DAEMON_PID" > "$PID_FILE"
@@ -192,6 +314,8 @@ case "${1:-}" in
                 echo -e "${GREEN}[+] Systemd service: active${NC}" || \
                 echo -e "${YELLOW}[!] Systemd service: inactive${NC}"
         fi
+        echo ""
+        print_ml_status
         ;;
     --logs)
         if [[ ! -f "$LOG_FILE" ]]; then
@@ -216,6 +340,9 @@ case "${1:-}" in
         echo -e "${GREEN}[+] Showing systemd logs (last 120 lines)...${NC}"
         journalctl -u kaliwall -n 120 --no-pager
         ;;
+    --ml-status)
+        print_ml_status
+        ;;
     "")
         if [[ -f "$PID_FILE" ]]; then
             OLD_PID=$(cat "$PID_FILE" 2>/dev/null || true)
@@ -228,6 +355,7 @@ case "${1:-}" in
         fi
         rotate_log_if_needed
         echo -e "${GREEN}[+] Starting KaliWall in daemon mode (default)...${NC}"
+        print_ml_status
         nohup ./kaliwall "${DPI_ARGS[@]}" > "$LOG_FILE" 2>&1 &
         DAEMON_PID=$!
         echo "$DAEMON_PID" > "$PID_FILE"
