@@ -34,6 +34,8 @@ type AnomalyPredictor struct {
 	metadataPath string
 	timeout      time.Duration
 	threshold    *float64
+	forceCPU     bool
+	disableReason string
 }
 
 // Prediction is the normalized ML output consumed by the anomaly API.
@@ -45,6 +47,7 @@ type Prediction struct {
 	PredictedClass int
 	FeatureCount   int
 	Warning        string
+	InferenceDevice string
 }
 
 type predictRequest struct {
@@ -52,6 +55,7 @@ type predictRequest struct {
 	MetadataPath string             `json:"metadata_path,omitempty"`
 	Features     map[string]float64 `json:"features"`
 	Threshold    *float64           `json:"threshold,omitempty"`
+	ForceCPU     *bool              `json:"force_cpu,omitempty"`
 }
 
 type predictResponse struct {
@@ -63,12 +67,14 @@ type predictResponse struct {
 	IsAnomaly      bool    `json:"is_anomaly"`
 	PredictedClass int     `json:"predicted_class"`
 	FeatureCount   int     `json:"feature_count"`
+	InferenceDevice string `json:"inference_device,omitempty"`
 }
 
 // NewAnomalyPredictorFromEnv builds an optional predictor from environment settings.
 func NewAnomalyPredictorFromEnv() *AnomalyPredictor {
-	predictor := &AnomalyPredictor{enabled: false, timeout: defaultTimeout}
+	predictor := &AnomalyPredictor{enabled: false, timeout: defaultTimeout, forceCPU: true}
 	if !envBool("KALIWALL_ML_ANOMALY_ENABLED", true) {
+		predictor.disableReason = "KALIWALL_ML_ANOMALY_ENABLED=0"
 		return predictor
 	}
 
@@ -77,13 +83,19 @@ func NewAnomalyPredictorFromEnv() *AnomalyPredictor {
 		pythonCmd = defaultPythonCommand()
 	}
 	if _, err := exec.LookPath(pythonCmd); err != nil {
+		predictor.disableReason = fmt.Sprintf("python command not found: %s", pythonCmd)
 		return predictor
 	}
 
 	scriptPath := resolveExistingPath(strings.TrimSpace(os.Getenv("KALIWALL_ML_SCRIPT_PATH")), defaultScriptPath)
 	modelPath := resolveExistingPath(strings.TrimSpace(os.Getenv("KALIWALL_ML_MODEL_PATH")), defaultModelPath)
 	metadataPath := resolveExistingPath(strings.TrimSpace(os.Getenv("KALIWALL_ML_METADATA_PATH")), defaultMetadataPath)
-	if scriptPath == "" || modelPath == "" {
+	if scriptPath == "" {
+		predictor.disableReason = "ML inference script not found"
+		return predictor
+	}
+	if modelPath == "" {
+		predictor.disableReason = "ML model file not found"
 		return predictor
 	}
 
@@ -93,6 +105,7 @@ func NewAnomalyPredictorFromEnv() *AnomalyPredictor {
 	predictor.modelPath = modelPath
 	predictor.metadataPath = metadataPath
 	predictor.timeout = envDurationMs("KALIWALL_ML_TIMEOUT_MS", defaultTimeout)
+	predictor.forceCPU = envBool("KALIWALL_ML_FORCE_CPU", true)
 	if threshold, ok := envFloat("KALIWALL_ML_THRESHOLD"); ok {
 		t := clampFloat(threshold, 0, 1)
 		predictor.threshold = &t
@@ -113,6 +126,54 @@ func (p *AnomalyPredictor) ModelPath() string {
 	return p.modelPath
 }
 
+// MetadataPath exposes the resolved metadata file path when present.
+func (p *AnomalyPredictor) MetadataPath() string {
+	if p == nil {
+		return ""
+	}
+	return p.metadataPath
+}
+
+// ScriptPath exposes the resolved bridge script path.
+func (p *AnomalyPredictor) ScriptPath() string {
+	if p == nil {
+		return ""
+	}
+	return p.scriptPath
+}
+
+// PythonCommand exposes the python command used for bridge invocation.
+func (p *AnomalyPredictor) PythonCommand() string {
+	if p == nil {
+		return ""
+	}
+	return p.pythonCmd
+}
+
+// Timeout reports the configured ML bridge timeout.
+func (p *AnomalyPredictor) Timeout() time.Duration {
+	if p == nil {
+		return 0
+	}
+	return p.timeout
+}
+
+// ForceCPU reports whether requests enforce CPU inference mode.
+func (p *AnomalyPredictor) ForceCPU() bool {
+	if p == nil {
+		return true
+	}
+	return p.forceCPU
+}
+
+// DisableReason provides a diagnostic reason when predictor is disabled.
+func (p *AnomalyPredictor) DisableReason() string {
+	if p == nil {
+		return "ml anomaly predictor unavailable"
+	}
+	return strings.TrimSpace(p.disableReason)
+}
+
 // Predict runs Python inference against the configured XGBoost joblib model.
 func (p *AnomalyPredictor) Predict(features map[string]float64) (Prediction, error) {
 	if p == nil || !p.enabled {
@@ -122,11 +183,13 @@ func (p *AnomalyPredictor) Predict(features map[string]float64) (Prediction, err
 		features = map[string]float64{}
 	}
 
+	forceCPU := p.forceCPU
 	request := predictRequest{
 		ModelPath:    p.modelPath,
 		MetadataPath: p.metadataPath,
 		Features:     features,
 		Threshold:    p.threshold,
+		ForceCPU:     &forceCPU,
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
@@ -188,6 +251,7 @@ func (p *AnomalyPredictor) Predict(features map[string]float64) (Prediction, err
 		PredictedClass: response.PredictedClass,
 		FeatureCount:   response.FeatureCount,
 		Warning:        strings.TrimSpace(response.Warning),
+		InferenceDevice: strings.TrimSpace(response.InferenceDevice),
 	}
 	if prediction.PredictedClass != 0 && prediction.PredictedClass != 1 {
 		if prediction.IsAnomaly {

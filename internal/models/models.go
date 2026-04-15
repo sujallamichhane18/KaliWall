@@ -202,6 +202,7 @@ type TrafficAnomalyMLPrediction struct {
 	IsAnomaly      bool    `json:"is_anomaly,omitempty"`
 	PredictedClass int     `json:"predicted_class,omitempty"`
 	FeatureCount   int     `json:"feature_count,omitempty"`
+	InferenceDevice string `json:"inference_device,omitempty"`
 	Warning        string  `json:"warning,omitempty"`
 	Error          string  `json:"error,omitempty"`
 }

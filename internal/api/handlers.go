@@ -159,6 +159,7 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo, proxy: proxy, aiService: aiService, mlAnomaly: mlAnomalyPredictor}
 	h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
 	h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
+	h.mlDecisionHistory = make([]mlDecisionPoint, 0, 256)
 	if mlAnomalyPredictor != nil && mlAnomalyPredictor.Enabled() {
 		log.Printf("ML anomaly predictor enabled: model=%s", mlAnomalyPredictor.ModelPath())
 	}
@@ -188,6 +189,7 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux.HandleFunc("/api/v1/firewall/logs", h.handleFirewallLogs)
 	mux.HandleFunc("/api/v1/traffic/visibility", h.handleTrafficVisibility)
 	mux.HandleFunc("/api/v1/traffic/anomalies", h.handleTrafficAnomalies)
+	mux.HandleFunc("/api/v1/ml/anomaly/status", h.handleMLAnomalyStatus)
 	mux.HandleFunc("/api/v1/dns/stats", h.handleDNSStats)
 	mux.HandleFunc("/api/v1/dns/cache", h.handleDNSCache)
 	mux.HandleFunc("/api/v1/dns/refresh", h.handleDNSRefresh)
@@ -558,6 +560,32 @@ type isolationForestWindowResult struct {
 	MaxOutlierDistance float64
 }
 
+type mlDecisionPoint struct {
+	Timestamp       time.Time
+	Enabled         bool
+	Available       bool
+	Score           float64
+	Threshold       float64
+	IsAnomaly       bool
+	PredictedClass  int
+	FeatureCount    int
+	InferenceDevice string
+	Error           string
+}
+
+type mlTrainingMetadata struct {
+	AUC           float64                `json:"auc"`
+	FeatureCount  int                    `json:"feature_count"`
+	TrainRows     int                    `json:"train_rows"`
+	TestRows      int                    `json:"test_rows"`
+	NormalTrain   int                    `json:"normal_train"`
+	AttackTrain   int                    `json:"attack_train"`
+	NormalTest    int                    `json:"normal_test"`
+	AttackTest    int                    `json:"attack_test"`
+	TrainedDevice string                 `json:"trained_device"`
+	Args          map[string]interface{} `json:"args"`
+}
+
 func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) models.TrafficAnomalySnapshot {
 	if limit <= 0 || limit > 10000 {
 		limit = 5000
@@ -591,6 +619,8 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		return snapshot
 	}
 
+	snapshot.ML = h.defaultMLPredictionState()
+
 	windowDuration := time.Duration(windowMinutes) * time.Minute
 	windowStart := now.Add(-windowDuration)
 	prevWindowStart := windowStart.Add(-windowDuration)
@@ -603,6 +633,10 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		snapshot.HistorySamples = 0
 		snapshot.Status = "learning"
 		snapshot.LearningMessage = fmt.Sprintf("UEBA baseline learning: 0/%d samples, 0/%d min coverage", minHistorySamples, minHistoryDurationMinutes)
+		if snapshot.ML != nil && snapshot.ML.Enabled {
+			snapshot.ML.Available = false
+			snapshot.ML.Error = "insufficient traffic samples for ML inference"
+		}
 		return snapshot
 	}
 
@@ -642,6 +676,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 	}
 	if !snapshot.HistoryReady {
+		snapshot = h.applyMLPredictionDuringLearning(snapshot, entries, conns, windowStart)
 		return snapshot
 	}
 
@@ -2024,7 +2059,10 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 	}
 
-	var mlPrediction *models.TrafficAnomalyMLPrediction
+	mlPrediction := snapshot.ML
+	if mlPrediction == nil {
+		mlPrediction = h.defaultMLPredictionState()
+	}
 	if h != nil && h.mlAnomaly != nil && h.mlAnomaly.Enabled() {
 		featureVector := buildMLAnomalyFeatureVector(
 			windowMinutes,
@@ -2055,7 +2093,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 		)
 
 		pred, err := h.mlAnomaly.Predict(featureVector)
-		mlPrediction = &models.TrafficAnomalyMLPrediction{Enabled: true}
+		mlPrediction = &models.TrafficAnomalyMLPrediction{Enabled: true, Available: false}
 		if err != nil {
 			mlPrediction.Available = false
 			mlPrediction.Error = err.Error()
@@ -2066,6 +2104,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 			mlPrediction.IsAnomaly = pred.IsAnomaly
 			mlPrediction.PredictedClass = pred.PredictedClass
 			mlPrediction.FeatureCount = pred.FeatureCount
+			mlPrediction.InferenceDevice = pred.InferenceDevice
 			mlPrediction.Warning = pred.Warning
 
 			if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
@@ -2335,6 +2374,149 @@ func buildMLAnomalyFeatureVector(
 	}
 
 	return featureMap
+}
+
+func (h *handlers) defaultMLPredictionState() *models.TrafficAnomalyMLPrediction {
+	if h == nil || h.mlAnomaly == nil {
+		return nil
+	}
+	if h.mlAnomaly.Enabled() {
+		return &models.TrafficAnomalyMLPrediction{
+			Enabled:   true,
+			Available: false,
+			Error:     "collecting traffic history for ML inference",
+		}
+	}
+	reason := strings.TrimSpace(h.mlAnomaly.DisableReason())
+	if reason == "" {
+		reason = "ML anomaly predictor disabled or not configured"
+	}
+	return &models.TrafficAnomalyMLPrediction{
+		Enabled:   false,
+		Available: false,
+		Error:     reason,
+	}
+}
+
+func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomalySnapshot, entries []models.TrafficEntry, conns []models.Connection, windowStart time.Time) models.TrafficAnomalySnapshot {
+	if h == nil || h.mlAnomaly == nil || !h.mlAnomaly.Enabled() {
+		return snapshot
+	}
+	if snapshot.ML == nil || !snapshot.ML.Enabled {
+		snapshot.ML = &models.TrafficAnomalyMLPrediction{Enabled: true, Available: false}
+	}
+
+	windowTotal := 0
+	windowBlocked := 0
+	windowSuspicious := 0
+	currentMinuteCount := 0
+	currentBucket := snapshot.GeneratedAt.UTC().Unix() / 60
+	sourceSet := make(map[string]struct{})
+	destinationSet := make(map[string]struct{})
+	protocolSet := make(map[string]struct{})
+
+	for _, entry := range entries {
+		if entry.Timestamp.Before(windowStart) {
+			continue
+		}
+		windowTotal++
+		if isBlockingAction(entry.Action) {
+			windowBlocked++
+		}
+		if isSuspiciousDetail(entry.Detail) {
+			windowSuspicious++
+		}
+		if entry.Timestamp.UTC().Unix()/60 == currentBucket {
+			currentMinuteCount++
+		}
+
+		src := normalizeTrafficIP(entry.SrcIP)
+		if src != "" {
+			sourceSet[src] = struct{}{}
+		}
+		dst := normalizeTrafficIP(entry.DstIP)
+		if dst != "" {
+			destinationSet[dst] = struct{}{}
+		}
+		proto := normalizeTrafficProtocol(entry.Protocol)
+		if proto != "" {
+			protocolSet[proto] = struct{}{}
+		}
+	}
+
+	if windowTotal <= 0 {
+		snapshot.ML.Available = false
+		snapshot.ML.Error = "insufficient traffic in current window for ML inference"
+		return snapshot
+	}
+
+	halfOpenConnections := 0
+	for _, c := range conns {
+		state := strings.ToUpper(strings.TrimSpace(c.State))
+		if state == "SYN_SENT" || state == "SYN_RECV" {
+			halfOpenConnections++
+		}
+	}
+
+	windowSpan := snapshot.WindowMinutes
+	if windowSpan < 1 {
+		windowSpan = 1
+	}
+	meanPerMin := safeRatio(float64(windowTotal), float64(windowSpan))
+	trafficThreshold := math.Max(1, meanPerMin*1.25)
+	burstRatio := 0.0
+	if meanPerMin > 0 {
+		burstRatio = safeRatio(float64(currentMinuteCount), meanPerMin)
+	}
+
+	currentBlockedRatio := safeRatio(float64(windowBlocked), float64(windowTotal))
+	currentSuspiciousRatio := safeRatio(float64(windowSuspicious), float64(windowTotal))
+
+	featureVector := buildMLAnomalyFeatureVector(
+		snapshot.WindowMinutes,
+		windowTotal,
+		windowBlocked,
+		windowSuspicious,
+		currentMinuteCount,
+		meanPerMin,
+		0,
+		trafficThreshold,
+		0,
+		0,
+		burstRatio,
+		0,
+		currentBlockedRatio,
+		math.Max(currentBlockedRatio+0.05, 0.05),
+		0,
+		currentSuspiciousRatio,
+		math.Max(currentSuspiciousRatio+0.05, 0.05),
+		0,
+		len(sourceSet),
+		len(destinationSet),
+		len(protocolSet),
+		len(conns),
+		halfOpenConnections,
+		isolationForestWindowResult{},
+		nil,
+	)
+
+	pred, err := h.mlAnomaly.Predict(featureVector)
+	if err != nil {
+		snapshot.ML.Available = false
+		snapshot.ML.Error = err.Error()
+		return snapshot
+	}
+
+	snapshot.ML.Available = pred.Available
+	snapshot.ML.Score = pred.Score
+	snapshot.ML.Threshold = pred.Threshold
+	snapshot.ML.IsAnomaly = pred.IsAnomaly
+	snapshot.ML.PredictedClass = pred.PredictedClass
+	snapshot.ML.FeatureCount = pred.FeatureCount
+	snapshot.ML.InferenceDevice = pred.InferenceDevice
+	snapshot.ML.Warning = strings.TrimSpace(pred.Warning)
+	snapshot.ML.Error = ""
+	return snapshot
 }
 
 func computeEWMABaseline(values []float64, alpha float64) ewmaBaseline {
@@ -3122,6 +3304,7 @@ type handlers struct {
 	anomalyTrendMu       sync.RWMutex
 	anomalyRiskHistory   []models.TrafficAnomalyRiskPoint
 	anomalyDetectorHistory map[string][]models.TrafficAnomalyDetectorPoint
+	mlDecisionHistory   []mlDecisionPoint
 
 	myGeoMu      sync.RWMutex
 	myGeoCache   models.GeoLocation
