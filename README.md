@@ -229,6 +229,17 @@ cd KaliWall
 - `GET /traffic/anomalies` returns risk status, anomaly list, and trend/history metadata.
 - Response includes optional `ml` telemetry fields when model integration is enabled.
 - CPU-only inference is enabled by default with `KALIWALL_ML_FORCE_CPU=1`.
+- ML output now includes override metadata: `override_applied`, `override_source`, `override_rule_id`, and `override_reason`.
+
+### ML Override Rules
+
+- Default rules file: `configs/ml-override-rules.yaml`
+- Rule evaluation order: highest `priority` first.
+- Override toggle: `KALIWALL_ML_OVERRIDE_RULES_ENABLED=1`
+- Custom rules path: `KALIWALL_ML_OVERRIDE_RULES_PATH=/path/to/ml-override-rules.yaml`
+- Built-in scan override toggle: `KALIWALL_ML_SCAN_OVERRIDE_ENABLED=1`
+
+Use this when the model prediction is wrong and you need deterministic policy control.
 
 ---
 

@@ -198,6 +198,10 @@ type TrafficAnomalyMLPrediction struct {
 	Enabled        bool    `json:"enabled"`
 	Available      bool    `json:"available"`
 	Decision       string  `json:"decision,omitempty"`
+	OverrideApplied bool   `json:"override_applied,omitempty"`
+	OverrideSource string  `json:"override_source,omitempty"`
+	OverrideRuleID string  `json:"override_rule_id,omitempty"`
+	OverrideReason string  `json:"override_reason,omitempty"`
 	Score          float64 `json:"score,omitempty"`
 	Threshold      float64 `json:"threshold,omitempty"`
 	IsAnomaly      bool    `json:"is_anomaly,omitempty"`

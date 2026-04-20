@@ -309,6 +309,9 @@ Environment="KALIWALL_ML_SCRIPT_PATH=${SCRIPT_DIR}/machinelearning/infer_xgboost
 Environment="KALIWALL_ML_MODEL_PATH=${ML_PREFERRED_MODEL_PATH:-${SCRIPT_DIR}/machinelearning/xgboost_anomaly_model.joblib}"
 Environment="KALIWALL_ML_METADATA_PATH=${SCRIPT_DIR}/machinelearning/training_metadata.json"
 Environment="KALIWALL_ML_FORCE_CPU=1"
+Environment="KALIWALL_ML_OVERRIDE_RULES_ENABLED=1"
+Environment="KALIWALL_ML_OVERRIDE_RULES_PATH=${SCRIPT_DIR}/configs/ml-override-rules.yaml"
+Environment="KALIWALL_ML_SCAN_OVERRIDE_ENABLED=1"
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

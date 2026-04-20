@@ -1,0 +1,38 @@
+# ML decision override rules are evaluated in descending priority order.
+# Decision values:
+#   - attack (force anomaly/attack)
+#   - normal (force benign)
+#
+# Match keys are optional and combined with logical AND.
+# Anomaly filters require at least one anomaly that matches all anomaly conditions.
+
+enabled: true
+rules:
+  - id: force-attack-critical-scan
+    enabled: true
+    priority: 200
+    decision: attack
+    reason: critical scan/flood signals should always be treated as attack
+    match:
+      anomaly_types:
+        - coordinated_scan_campaign
+        - flood_signature
+        - source_port_scan
+        - source_target_sweep
+      anomaly_severities:
+        - critical
+      min_anomaly_score: 58
+
+  - id: suppress-low-confidence-ml-spike
+    enabled: false
+    priority: 120
+    decision: normal
+    reason: disable isolated low-confidence model spikes until retraining is complete
+    warning: manual override applied for low-confidence ML spike
+    match:
+      model_decision:
+        - attack
+      max_model_score: 0.60
+      anomaly_types:
+        - xgboost_anomaly_score
+      max_anomaly_score: 45

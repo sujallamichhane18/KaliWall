@@ -156,12 +156,36 @@ func NewRouter(fw *firewall.Engine, tl *logger.TrafficLogger, ti *threatintel.Se
 	mux := http.NewServeMux()
 
 	mlAnomalyPredictor := ml.NewAnomalyPredictorFromEnv()
-	h := &handlers{fw: fw, logger: tl, threat: ti, analytics: an, dpi: dpi, geo: geo, proxy: proxy, aiService: aiService, mlAnomaly: mlAnomalyPredictor}
+	mlDecisionOverrides, mlOverrideErr := loadMLDecisionOverrideRulesFromEnv()
+	if mlOverrideErr != nil {
+		log.Printf("ML override rules could not be loaded: %v", mlOverrideErr)
+	}
+	mlScanOverrideEnabled := envBoolDefault(envMLScanOverrideEnabled, true)
+	h := &handlers{
+		fw:                       fw,
+		logger:                   tl,
+		threat:                   ti,
+		analytics:                an,
+		dpi:                      dpi,
+		geo:                      geo,
+		proxy:                    proxy,
+		aiService:                aiService,
+		mlAnomaly:                mlAnomalyPredictor,
+		mlDecisionOverrides:      mlDecisionOverrides,
+		mlScanOverrideEnabled:    mlScanOverrideEnabled,
+		mlScanOverrideConfigured: true,
+	}
 	h.anomalyRiskHistory = make([]models.TrafficAnomalyRiskPoint, 0, 256)
 	h.anomalyDetectorHistory = make(map[string][]models.TrafficAnomalyDetectorPoint)
 	h.mlDecisionHistory = make([]mlDecisionPoint, 0, 256)
 	if mlAnomalyPredictor != nil && mlAnomalyPredictor.Enabled() {
 		log.Printf("ML anomaly predictor enabled: model=%s", mlAnomalyPredictor.ModelPath())
+	}
+	if mlDecisionOverrides != nil && mlDecisionOverrides.Enabled() {
+		log.Printf("ML override rules enabled: %d active rules (%s)", mlDecisionOverrides.RuleCount(), mlDecisionOverrides.Path())
+	}
+	if !mlScanOverrideEnabled {
+		log.Printf("ML scan-signal override disabled via %s", envMLScanOverrideEnabled)
 	}
 
 	// REST API v1 endpoints
@@ -2154,7 +2178,7 @@ func (h *handlers) buildTrafficAnomalySnapshot(limit int, windowMinutes int) mod
 				mlPrediction.Decision = "unavailable"
 			}
 
-			enforceMLScanDecisionOverride(mlPrediction, anomalies)
+			h.applyMLDecisionOverrides(mlPrediction, anomalies)
 
 			if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
 				severity := "warning"
@@ -2493,18 +2517,36 @@ func strongestScanSignal(anomalies []models.TrafficAnomaly) (kind string, score 
 	return kind, score, severity, true
 }
 
-func enforceMLScanDecisionOverride(mlPrediction *models.TrafficAnomalyMLPrediction, anomalies []models.TrafficAnomaly) {
-	if mlPrediction == nil || !mlPrediction.Enabled || len(anomalies) == 0 {
+func (h *handlers) applyMLDecisionOverrides(mlPrediction *models.TrafficAnomalyMLPrediction, anomalies []models.TrafficAnomaly) {
+	if mlPrediction == nil || !mlPrediction.Enabled {
 		return
+	}
+
+	scanOverrideEnabled := true
+	if h != nil && h.mlScanOverrideConfigured {
+		scanOverrideEnabled = h.mlScanOverrideEnabled
+	}
+	if scanOverrideEnabled {
+		enforceMLScanDecisionOverride(mlPrediction, anomalies)
+	}
+
+	if h != nil && h.mlDecisionOverrides != nil {
+		h.mlDecisionOverrides.Apply(mlPrediction, anomalies)
+	}
+}
+
+func enforceMLScanDecisionOverride(mlPrediction *models.TrafficAnomalyMLPrediction, anomalies []models.TrafficAnomaly) bool {
+	if mlPrediction == nil || !mlPrediction.Enabled || len(anomalies) == 0 {
+		return false
 	}
 
 	kind, score, severity, ok := strongestScanSignal(anomalies)
 	if !ok {
-		return
+		return false
 	}
 
 	if !mlPrediction.Available && strings.EqualFold(strings.TrimSpace(mlPrediction.Decision), "unavailable") {
-		return
+		return false
 	}
 
 	mlPrediction.Decision = "attack"
@@ -2519,13 +2561,9 @@ func enforceMLScanDecisionOverride(mlPrediction *models.TrafficAnomalyMLPredicti
 	}
 
 	note := fmt.Sprintf("scan-signal override: %s (%s score=%d)", kind, severity, score)
-	if strings.TrimSpace(mlPrediction.Warning) == "" {
-		mlPrediction.Warning = note
-		return
-	}
-	if !strings.Contains(strings.ToLower(mlPrediction.Warning), "scan-signal override") {
-		mlPrediction.Warning += "; " + note
-	}
+	setMLOverrideMetadata(mlPrediction, "scan_signal", kind, note)
+	appendMLWarning(mlPrediction, note)
+	return true
 }
 
 func (h *handlers) defaultMLPredictionState() *models.TrafficAnomalyMLPrediction {
@@ -2886,7 +2924,7 @@ func (h *handlers) applyMLPredictionDuringLearning(snapshot models.TrafficAnomal
 		}
 		snapshot.ML.Warning += "using active connection telemetry for inference"
 	}
-	enforceMLScanDecisionOverride(snapshot.ML, snapshot.Anomalies)
+	h.applyMLDecisionOverrides(snapshot.ML, snapshot.Anomalies)
 	snapshot.ML.Error = ""
 
 	if pred.Available && (pred.IsAnomaly || pred.Score >= math.Max(pred.Threshold+0.08, 0.68)) {
@@ -3740,6 +3778,9 @@ type handlers struct {
 	proxy     maliciousDomainProxy
 	aiService *ai.OpenRouterService
 	mlAnomaly *ml.AnomalyPredictor
+	mlDecisionOverrides *mlDecisionOverrideSet
+	mlScanOverrideEnabled bool
+	mlScanOverrideConfigured bool
 
 	anomalyTrendMu       sync.RWMutex
 	anomalyRiskHistory   []models.TrafficAnomalyRiskPoint
